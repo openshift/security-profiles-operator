@@ -1,0 +1,54 @@
+# Copyright 2020 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+FROM quay.io/jhrozek/security-profiles-operator:golang AS build
+USER root
+WORKDIR /work
+
+RUN dnf install -y \
+        git \
+        make
+
+RUN rpm -Uvh http://download.eng.bos.redhat.com/brewroot/packages/libseccomp/2.5.2/1.el8/data/signed/fd431d51/$(uname -m)/libseccomp-devel-2.5.2-1.el8.$(uname -m).rpm
+
+ADD . /work
+RUN mkdir -p build
+
+ARG APPARMOR_ENABLED=0
+ARG BPF_ENABLED=0
+ARG STATIC_LINK=no
+
+RUN make
+
+# hash below referred to latest
+FROM registry.access.redhat.com/ubi8/ubi-minimal@sha256:33931dce809712888d1a8061bfa676963f517daca993984afed3251bc1fb5987
+ARG version
+USER root
+
+RUN microdnf --enablerepo=* install -y \
+        make
+
+RUN rpm -Uvh http://download.eng.bos.redhat.com/brewroot/packages/libseccomp/2.5.2/1.el8/data/signed/fd431d51/$(uname -m)/libseccomp-2.5.2-1.el8.$(uname -m).rpm
+
+LABEL name="Security Profiles Operator" \
+      version=$version \
+      description="The Security Profiles Operator makes it easier for cluster admins to manage their seccomp, SELinux or AppArmor profiles and apply them to Kubernetes' workloads."
+
+COPY --from=build /work/build/security-profiles-operator /usr/bin/
+
+ENTRYPOINT ["/usr/bin/security-profiles-operator"]
+
+USER 65535:65535
+
+# vim: ft=dockerfile
