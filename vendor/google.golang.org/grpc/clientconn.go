@@ -438,6 +438,7 @@ func (cc *ClientConn) enterIdleMode() error {
 			ac.tearDown(errConnIdling)
 		}
 	}()
+
 	return nil
 }
 
