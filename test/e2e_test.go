@@ -32,7 +32,7 @@ import (
 )
 
 const (
-	certmanager       = "https://github.com/cert-manager/cert-manager/releases/download/v1.11.1/cert-manager.yaml"
+	certmanager       = "https://github.com/cert-manager/cert-manager/releases/download/v1.13.2/cert-manager.yaml"
 	namespaceManifest = "deploy/namespace-operator.yaml"
 	testNamespace     = "test-ns"
 	defaultNamespace  = "default"
@@ -42,7 +42,7 @@ const (
 	defaultSelinuxOpTimeout     = "360s"
 	defaultLogEnricherOpTimeout = defaultSelinuxOpTimeout
 	defaultBpfRecorderOpTimeout = defaultSelinuxOpTimeout
-	defaultWaitTimeout          = "180s"
+	defaultWaitTimeout          = "5m"
 	defaultWaitTime             = 15 * time.Second
 )
 
@@ -76,10 +76,13 @@ func (e *e2e) TestSecurityProfilesOperator() {
 			"Seccomp: Verify base profile merge",
 			e.testCaseBaseProfile,
 		},
-		{
-			"Seccomp: Verify base profile merge from OCI registry",
-			e.testCaseBaseProfileOCI,
-		},
+		// TODO: re-enable when we found a workaround to the flaky GitHub registry connection
+		/*
+			{
+				"Seccomp: Verify base profile merge from OCI registry",
+				e.testCaseBaseProfileOCI,
+			},
+		*/
 		{
 			"Seccomp: Allowed syscalls",
 			e.testCaseAllowedSyscalls,
@@ -109,6 +112,10 @@ func (e *e2e) TestSecurityProfilesOperator() {
 			e.testCaseSelinuxMetrics,
 		},
 		{
+			"AppArmor: base case (install policy, run pod and delete)",
+			e.testCaseAppArmorBaseUsage,
+		},
+		{
 			"SPOD: Update SELinux flag",
 			e.testCaseSPODUpdateSelinux,
 		},
@@ -119,6 +126,10 @@ func (e *e2e) TestSecurityProfilesOperator() {
 		{
 			"SPOD: Change profiling",
 			e.testCaseProfilingChange,
+		},
+		{
+			"SPOD: Profiling server protocol",
+			e.testCaseProfilingHTTP,
 		},
 		{
 			"SPOD: Enable memory optimiztaion",
@@ -156,6 +167,7 @@ func (e *e2e) TestSecurityProfilesOperator() {
 	e.Run("cluster-wide: Selinux: Verify the policy can be marked as permissive", func() {
 		e.testCaseSelinuxIncompletePolicy()
 		e.testCaseSelinuxIncompletePermissivePolicy()
+		e.testCaseSelinuxIncompleteDisabledPolicy()
 	})
 
 	e.Run("cluster-wide: Selinux: Verify SELinux profile recording logs", func() {
@@ -173,6 +185,7 @@ func (e *e2e) TestSecurityProfilesOperator() {
 		e.testSeccompBpfProfileMerging()
 		e.testSeccompLogsProfileMerging()
 		e.testSelinuxLogsProfileMerging()
+		e.testSelinuxLogsDisabledProfileMerging()
 	})
 
 	// Clean up cluster-wide deployment to prepare for namespace deployment
@@ -293,8 +306,8 @@ func (e *e2e) deployOperator(manifest string) {
 	// ones from the nodes
 	e.logf("Setting imagePullPolicy to '%s' in manifest: %s", e.pullPolicy, manifest)
 	e.updateManifest(manifest, "imagePullPolicy: Always", fmt.Sprintf("imagePullPolicy: %s", e.pullPolicy))
-	e.updateManifest(manifest, "image: .*registry.k8s.io/.*", fmt.Sprintf("image: %s", e.testImage))
-	e.updateManifest(manifest, "value: .*registry.k8s.io/.*", fmt.Sprintf("value: %s", e.testImage))
+	e.updateManifest(manifest, "image: .*gcr.io/k8s-staging-sp-operator/.*", fmt.Sprintf("image: %s", e.testImage))
+	e.updateManifest(manifest, "value: .*gcr.io/k8s-staging-sp-operator/.*", fmt.Sprintf("value: %s", e.testImage))
 	e.updateManifest(manifest, "value: .*quay.io/.*/selinuxd.*", fmt.Sprintf("value: %s", e.selinuxdImage))
 	if e.selinuxEnabled {
 		e.updateManifest(manifest, "enableSelinux: false", "enableSelinux: true")

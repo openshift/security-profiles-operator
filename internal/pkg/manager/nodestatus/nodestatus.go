@@ -51,8 +51,8 @@ const (
 )
 
 var (
-	ErrNoOwnerProfile  = errors.New("no owner profile defined for this status")
-	ErrUnkownOwnerKind = errors.New("the node status owner is of an unknown kind")
+	ErrNoOwnerProfile   = errors.New("no owner profile defined for this status")
+	ErrUnknownOwnerKind = errors.New("the node status owner is of an unknown kind")
 )
 
 // NewController returns a new empty controller instance.
@@ -266,8 +266,10 @@ func (r *StatusReconciler) getProfileFromStatus(
 		prof = &seccompprofileapi.SeccompProfile{}
 	case "SelinuxProfile":
 		prof = &selxv1alpha2.SelinuxProfile{}
+	case "RawSelinuxProfile":
+		prof = &selxv1alpha2.RawSelinuxProfile{}
 	default:
-		return nil, fmt.Errorf("getting owner profile: %w", ErrUnkownOwnerKind)
+		return nil, fmt.Errorf("getting owner profile: %w", ErrUnknownOwnerKind)
 	}
 	if err := r.client.Get(ctx, key, prof); err != nil {
 		return nil, fmt.Errorf("getting owner profile: %s/%s: %w", s.GetNamespace(), ctrl.Name, err)
@@ -305,6 +307,9 @@ func (r *StatusReconciler) reconcileStatus(
 		outStatus.SetConditions(spodv1alpha1.Unavailable())
 	case statusv1alpha1.ProfileStatePartial:
 		outStatus.Status = statusv1alpha1.ProfileStatePartial
+		outStatus.SetConditions(spodv1alpha1.Unavailable())
+	case statusv1alpha1.ProfileStateDisabled:
+		outStatus.Status = statusv1alpha1.ProfileStateDisabled
 		outStatus.SetConditions(spodv1alpha1.Unavailable())
 	}
 

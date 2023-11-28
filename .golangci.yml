@@ -28,7 +28,6 @@ linters:
     - containedctx
     - contextcheck
     - decorder
-    - depguard
     - dogsled
     - dupl
     - dupword
@@ -45,6 +44,7 @@ linters:
     - ginkgolinter
     - gocheckcompilerdirectives
     - gochecknoinits
+    - gochecksumtype
     - gocognit
     - goconst
     - gocritic
@@ -57,11 +57,11 @@ linters:
     - goheader
     - goimports
     - gomnd
-    - gomoddirectives
     - gomodguard
     - goprintffuncname
     - gosec
     - gosimple
+    - gosmopolitan
     - govet
     - grouper
     - importas
@@ -69,6 +69,7 @@ linters:
     - lll
     - loggercheck
     - makezero
+    - mirror
     - misspell
     - musttag
     - nakedret
@@ -85,9 +86,11 @@ linters:
     - reassign
     - revive
     - rowserrcheck
+    - sloglint
     - sqlclosecheck
     - staticcheck
     - stylecheck
+    - tagalign
     - tagliatelle
     - tenv
     - testableexamples
@@ -100,21 +103,30 @@ linters:
     - usestdlibvars
     - wastedassign
     - whitespace
+    - zerologlint
     # - cyclop
+    # - depguard
     # - exhaustruct
     # - forbidigo
     # - funlen
     # - gochecknoglobals
+    # - gomoddirectives
+    # - inamedparam
     # - interfacebloat
     # - ireturn
     # - maintidx
     # - nlreturn
     # - nonamedreturns
+    # - perfsprint
+    # - protogetter
+    # - testifylint
     # - testpackage
     # - varnamelen
     # - wrapcheck
     # - wsl
 linters-settings:
+  goconst:
+    min-occurrences: 6
   gomoddirectives:
     replace-allow-list:
       - golang.org/x/sys

@@ -30,7 +30,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -229,7 +229,7 @@ func (r *ReconcileSPOd) Reconcile(ctx context.Context, req reconcile.Request) (r
 	if foundSPOd.Status.NumberReady == foundSPOd.Status.DesiredNumberScheduled {
 		condready := spod.Status.GetReadyCondition()
 		// Don't pollute the logs. Let's only update when needed.
-		if condready.Status != corev1.ConditionTrue {
+		if condready.Status != metav1.ConditionTrue {
 			return r.handleRunningStatus(ctx, spod, logger)
 		}
 	}
@@ -369,7 +369,7 @@ func (r *ReconcileSPOd) handleCreate(
 		ctx, serviceMonitor,
 	); err != nil {
 		//nolint:gocritic
-		if runtime.IsNotRegisteredError(err) || meta.IsNoMatchError(err) {
+		if bindata.IsNotFound(err) {
 			r.log.Info("Service monitor resource does not seem to exist, ignoring")
 		} else if errors.IsAlreadyExists(err) {
 			r.log.Info("Service monitor already exist, skipping")
@@ -454,7 +454,7 @@ func (r *ReconcileSPOd) handleUpdate(
 	if err := r.client.Patch(
 		ctx, serviceMonitor, client.Merge,
 	); err != nil {
-		if runtime.IsNotRegisteredError(err) || meta.IsNoMatchError(err) {
+		if bindata.IsNotFound(err) {
 			r.log.Info("Service monitor resource does not seem to exist, ignoring")
 		} else {
 			return fmt.Errorf("updating service monitor: %w", err)
@@ -524,7 +524,7 @@ func (r *ReconcileSPOd) getConfiguredSPOd(
 	}
 
 	// Custom host proc volume
-	useCustomHostProc := cfg.Spec.HostProcVolumePath != bindata.DefaultHostProcPath
+	useCustomHostProc := cfg.Spec.HostProcVolumePath != bindata.DefaultHostProcPath && cfg.Spec.HostProcVolumePath != ""
 	volume, mount := bindata.CustomHostProcVolume(cfg.Spec.HostProcVolumePath)
 
 	// Disable profile recording controller by default

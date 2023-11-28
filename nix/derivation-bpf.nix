@@ -1,5 +1,5 @@
 { pkgs, buildGoModule, arch ? "x86" }:
-with pkgs; buildGo120Module rec {
+with pkgs; buildGo121Module rec {
   name = "security-profiles-operator";
   src = ./..;
   vendorSha256 = null;
@@ -7,8 +7,8 @@ with pkgs; buildGo120Module rec {
   outputs = [ "out" ];
   nativeBuildInputs = with buildPackages; [
     git
-    llvmPackages_15.clang-unwrapped
-    llvm_15
+    llvmPackages_16.clang-unwrapped
+    llvm_16
     pkg-config
     which
   ];

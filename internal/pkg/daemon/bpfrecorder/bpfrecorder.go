@@ -451,7 +451,8 @@ func (b *BpfRecorder) Load(startEventProcessor bool) (err error) {
 	if err != nil {
 		return fmt.Errorf("init events ringbuffer: %w", err)
 	}
-	b.StartRingBuffer(ringbuffer)
+	const timeout = 300
+	b.PollRingBuffer(ringbuffer, timeout)
 
 	if startEventProcessor {
 		go b.processEvents(events)
@@ -735,7 +736,7 @@ func (b *BpfRecorder) findProfileForContainerID(id string) (string, error) {
 					}
 
 					b.logger.V(config.VerboseLevel).Info(
-						"Found Container ID in cluser",
+						"Found Container ID in cluster",
 						"containerID", containerID,
 						"podName", pod.Name,
 						"containerName", containerName,

@@ -82,7 +82,7 @@ type ReferenceFetcher interface {
 }
 
 // ReferrerLister provides the Referrers API.
-// Reference: https://github.com/opencontainers/distribution-spec/blob/v1.1.0-rc1/spec.md#listing-referrers
+// Reference: https://github.com/opencontainers/distribution-spec/blob/v1.1.0-rc3/spec.md#listing-referrers
 type ReferrerLister interface {
 	Referrers(ctx context.Context, desc ocispec.Descriptor, artifactType string, fn func(referrers []ocispec.Descriptor) error) error
 }
@@ -93,18 +93,34 @@ type TagLister interface {
 	// Since the returned tag list may be paginated by the underlying
 	// implementation, a function should be passed in to process the paginated
 	// tag list.
+	//
 	// `last` argument is the `last` parameter when invoking the tags API.
 	// If `last` is NOT empty, the entries in the response start after the
 	// tag specified by `last`. Otherwise, the response starts from the top
 	// of the Tags list.
+	//
 	// Note: When implemented by a remote registry, the tags API is called.
 	// However, not all registries supports pagination or conforms the
 	// specification.
+	//
 	// References:
-	// - https://github.com/opencontainers/distribution-spec/blob/v1.1.0-rc1/spec.md#content-discovery
-	// - https://docs.docker.com/registry/spec/api/#tags
+	//   - https://github.com/opencontainers/distribution-spec/blob/v1.1.0-rc3/spec.md#content-discovery
+	//   - https://docs.docker.com/registry/spec/api/#tags
 	// See also `Tags()` in this package.
 	Tags(ctx context.Context, last string, fn func(tags []string) error) error
+}
+
+// Mounter allows cross-repository blob mounts.
+// For backward compatibility reasons, this is not implemented by
+// BlobStore: use a type assertion to check availability.
+type Mounter interface {
+	// Mount makes the blob with the given descriptor in fromRepo
+	// available in the repository signified by the receiver.
+	Mount(ctx context.Context,
+		desc ocispec.Descriptor,
+		fromRepo string,
+		getContent func() (io.ReadCloser, error),
+	) error
 }
 
 // Tags lists the tags available in the repository.
