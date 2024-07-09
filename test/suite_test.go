@@ -17,6 +17,7 @@ limitations under the License.
 package e2e_test
 
 import (
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -39,10 +40,10 @@ import (
 )
 
 const (
-	kindVersion      = "v0.20.0"
-	kindImage        = "kindest/node:v1.27.3@sha256:3966ac761ae0136263ffdb6cfd4db23ef8a83cba8a463690e98317add2c9ba72"
-	kindDarwinSHA512 = "d3edf9ee8e5d0f537a4be4c2f1b155755e969f3dd7738f13ce4262ed8252adeb4575542e73c44541c666bc2c95d0c37cc791b16d2f13ad83ee39ed381db9b869" //nolint:lll // full length SHA
-	kindLinuxSHA512  = "0ecebe8f0bdacd932a9ea2e6de4e1577ce4b5017c6fea289855db2c7f4f538f86236ed77332f46f805b5867e2b8c123155d1908bb5605cc4a9d2f94b39427c3c" //nolint:lll // full length SHA
+	kindVersion      = "v0.23.0"
+	kindImage        = "kindest/node:v1.30.0@sha256:047357ac0cfea04663786a612ba1eaba9702bef25227a794b52890dd8bcd692e"
+	kindDarwinSHA512 = "08a8055068e6f735704b6543f9510eaa871ac37903abc18b803f7c5a8187acb322511cf61c13dc940cc1e260849e6bda279c692d1cb464c6d825996fd42b8e56" //nolint:lll // full length SHA
+	kindLinuxSHA512  = "5026abe09759c2243cfedb10f1f52b2bb7878153da9453eae42fa22d9ae867ba46d2ac03ffbc771b58b747724a344c6c8fb754f24727fefbfd66e961543805c3" //nolint:lll // full length SHA
 )
 
 var (
@@ -327,6 +328,7 @@ func (e *kinde2e) SetupSuite() {
 
 	var err error
 	e.kubectlPath, err = exec.LookPath("kubectl")
+	e.updateManifest(e.operatorManifest, "value: .*quay.io/.*/selinuxd.*", "value: "+e.selinuxdImage)
 	e.Nil(err)
 }
 
@@ -480,7 +482,7 @@ func (e *openShifte2e) pushImageToRegistry() {
 
 func (e *openShifte2e) execNodeOCP(node string, args ...string) string {
 	return e.kubectl(
-		"debug", "-q", fmt.Sprintf("node/%s", node), "--",
+		"debug", "-q", "node/"+node, "--",
 		"chroot", "/host", "/bin/bash", "-c",
 		strings.Join(args, " "),
 	)
@@ -517,6 +519,7 @@ func (e *vanilla) SetupSuite() {
 	e.e2e.waitForReadyPods = e.waitForReadyPodsVanilla
 	e.e2e.deployCertManager = e.deployCertManagerVanilla
 	e.e2e.setupRecordingSa = e.deployRecordingSa
+	e.updateManifest(e.operatorManifest, "value: .*quay.io/.*/selinuxd.*", "value: "+e.selinuxdImage)
 	e.Nil(err)
 }
 
@@ -663,7 +666,7 @@ func (e *e2e) runAndRetryPodCMD(podCMD string) string {
 			return nil
 		}
 		output = ""
-		return fmt.Errorf("no output from pod command")
+		return errors.New("no output from pod command")
 	}, func(err error) bool {
 		e.logf("retry on error: %s", err)
 		if maxTries < 3 {
@@ -885,14 +888,10 @@ func (e *e2e) labelNs(namespace, label string) {
 }
 
 func (e *e2e) switchToNs(ns string) func() {
-	nsManifest := fmt.Sprintf(`
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: %s`, ns)
+	nsManifest := "\napiVersion: v1\nkind: Namespace\nmetadata:\n  name: " + ns
 
 	e.logf("creating ns %s", ns)
-	deleteFn := e.writeAndApply(nsManifest, fmt.Sprintf("%s.yml", ns))
+	deleteFn := e.writeAndApply(nsManifest, ns+".yml")
 	defer deleteFn()
 
 	e.logf("switching to ns %s", ns)

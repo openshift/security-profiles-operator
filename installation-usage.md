@@ -519,7 +519,7 @@ metadata:
   name: profile1
 spec:
   defaultAction: SCMP_ACT_ERRNO
-  baseProfileName: runc-v1.1.9
+  baseProfileName: runc-v1.1.12
   syscalls:
     - action: SCMP_ACT_ALLOW
       names:
@@ -555,7 +555,7 @@ metadata:
   name: profile1
 spec:
   defaultAction: SCMP_ACT_ERRNO
-  baseProfileName: oci://ghcr.io/security-profiles/runc:v1.1.9
+  baseProfileName: oci://ghcr.io/security-profiles/runc:v1.1.12
 ```
 
 The resulting profile `profile1` will then contain all base syscalls from the
@@ -629,6 +629,21 @@ spec:
     kind: SeccompProfile
     name: profile-complain
   image: nginx:1.19.1
+```
+
+You can enable a default profile binding by using the string "*" as the image name.
+This will only apply a profile binding if no other profile binding matches a container in the pod.
+
+```yaml
+apiVersion: security-profiles-operator.x-k8s.io/v1alpha1
+kind: ProfileBinding
+metadata:
+  name: nginx-binding
+spec:
+  profileRef:
+    kind: SeccompProfile
+    name: profile-complain
+  image: *
 ```
 
 If the Pod is already running, it will need to be restarted in order to pick up
@@ -706,7 +721,7 @@ my-pod   2/2     Running   0          18s
 Then the enricher should indicate that it receives audit logs for those containers:
 
 ```
-> kubectl -n security-profiles-operator logs --since=1m --selector name=spod log-enricher
+> kubectl -n security-profiles-operator logs --since=1m --selector name=spod -c log-enricher
 …
 I0705 12:08:18.729660 1843190 enricher.go:136] log-enricher "msg"="audit"  "container"="redis" "executable"="/usr/local/bin/redis-server" "namespace"="default" "node"="127.0.0.1" "pid"=1847839 "pod"="my-pod" "syscallID"=232 "syscallName"="epoll_wait" "timestamp"="1625486870.273:187492" "type"="seccomp"
 ```
@@ -833,7 +848,7 @@ my-pod   1/1     Running   0          10s
 Then the BPF recorder should indicate that it found the container:
 
 ```
-> kubectl -n security-profiles-operator logs --since=1m --selector name=spod -c log-enricher
+> kubectl -n security-profiles-operator logs --since=1m --selector name=spod -c bpf-recorder
 …
 I1115 12:12:30.029216   66106 bpfrecorder.go:654] bpf-recorder "msg"="Found container ID in cluster"  "containerID"="c2e10af47011f6a61cd7e92073db2711796f174af35b34486967588ef7f95fbc" "containerName"="nginx"
 I1115 12:12:30.029264   66106 bpfrecorder.go:539] bpf-recorder "msg"="Saving PID for profile"  "mntns"=4026533352 "pid"=74384 "profile"="my-recording-nginx-1636978341"
@@ -1346,9 +1361,9 @@ securityprofilesoperatordaemon.security-profiles-operator.x-k8s.io/spod patched
 
 Alternatively, make sure the operator deployment sets the `ENABLE_LOG_ENRICHER` variable,
 to `true`, either by setting the environment variable in the deployment or by enabling
-the variable trough a `Subscription` resource, when installing the operator using OLM
-(see [Restricting the operator to specific nodes](#restricting-the-operator-to-specific-nodes)
-for an example of setting another variable).
+the variable trough a `Subscription` resource, when installing the operator using OLM.
+See [Constrain spod scheduling](#constrain-spod-scheduling) for an example of
+setting `tolerations` and `affinity` on the SPOD.
 
 Now the operator will take care of re-deploying the `spod` DaemonSet and the
 enricher should listening on new changes to the audit logs:
@@ -1947,18 +1962,18 @@ The `spoc` client is able to pull security profiles from OCI artifact compatible
 registries. To do that, just run `spoc pull`:
 
 ```console
-> spoc pull ghcr.io/security-profiles/runc:v1.1.9
-16:32:29.795597 Pulling profile from: ghcr.io/security-profiles/runc:v1.1.9
+> spoc pull ghcr.io/security-profiles/runc:v1.1.12
+16:32:29.795597 Pulling profile from: ghcr.io/security-profiles/runc:v1.1.12
 16:32:29.795610 Verifying signature
 
-Verification for ghcr.io/security-profiles/runc:v1.1.9 --
+Verification for ghcr.io/security-profiles/runc:v1.1.12 --
 The following checks were performed on each of these signatures:
   - Existence of the claims in the transparency log was verified offline
   - The code-signing certificate was verified using trusted certificate authority certificates
 
 [{"critical":{"identity":{"docker-reference":"ghcr.io/security-profiles/runc"},…}}]
 16:32:33.208695 Creating file store in: /tmp/pull-3199397214
-16:32:33.208713 Verifying reference: ghcr.io/security-profiles/runc:v1.1.9
+16:32:33.208713 Verifying reference: ghcr.io/security-profiles/runc:v1.1.12
 16:32:33.208718 Creating repository for ghcr.io/security-profiles/runc
 16:32:33.208742 Using tag: v1.1.4
 16:32:33.208743 Copying profile from repository
@@ -2092,15 +2107,15 @@ The Security Profiles Operator will try to pull the correct profile by using
 way, for example if a profile does not support any platform:
 
 ```
-> spoc pull ghcr.io/security-profiles/runc:v1.1.9
-11:07:14.788840 Pulling profile from: ghcr.io/security-profiles/runc:v1.1.9
+> spoc pull ghcr.io/security-profiles/runc:v1.1.12
+11:07:14.788840 Pulling profile from: ghcr.io/security-profiles/runc:v1.1.12
 11:07:14.788852 Verifying signature
 …
 11:07:17.559037 Copying profile from repository
 11:07:18.359152 Trying to read profile: profile-linux-amd64.yaml
 11:07:18.359209 Trying to read profile: profile.yaml
 11:07:18.359224 Trying to unmarshal seccomp profile
-11:07:18.359728 Got SeccompProfile: runc-v1.1.9
+11:07:18.359728 Got SeccompProfile: runc-v1.1.12
 11:07:18.359732 Saving profile in: /tmp/profile.yaml
 ```
 

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-set -x
+set -euox pipefail
 
 OLM_VERSION=v0.18.2
 
@@ -73,7 +73,7 @@ function deploy_deps() {
     kubectl_wait -ncert-manager --for condition=ready pod -l app.kubernetes.io/instance=cert-manager
 
     # All installation methods run off the same catalog
-    sed -i "s#registry.k8s.io/security-profiles-operator/security-profiles-operator-catalog:v0.8.2#${CATALOG_IMG}#g" examples/olm/install-resources.yaml
+    sed -i "s#registry.k8s.io/security-profiles-operator/security-profiles-operator-catalog:v0.8.4#${CATALOG_IMG}#g" examples/olm/install-resources.yaml
 
 }
 
@@ -204,8 +204,33 @@ function deploy_spo() {
     kubectl create -f $manifests
 }
 
+function try_until_ok() {
+    { set +x; } 2>/dev/null  # disable trace output temporarily
+
+    local cmd="$1"
+    shift  # Remove the command from the argument list
+
+    # retry until it succeeds or until time is up
+    local end_time=$(($(date +%s) + 180))
+    while (( $(date +%s) < end_time )); do
+        local cmd_start_time=$(date +%s)
+        if "$cmd" "$@" 1>/dev/null 2>/dev/null; then
+            break
+        fi
+        if (( $(date +%s) == $cmd_start_time )); then
+            sleep 1
+        fi
+    done
+
+    set -x
+    # run one final time with all output enabled
+    "$cmd" "$@"
+}
+
 function kubectl_wait() {
-    kubectl wait --timeout 180s "$@"
+    # kubectl wait for non-existent resource seems to exit with error, which is causing random test failures.
+    # see https://github.com/kubernetes/kubernetes/issues/83242
+    try_until_ok kubectl wait --timeout 1s "$@"
 }
 
 function check_spo_is_running() {
@@ -227,38 +252,18 @@ function check_spo_is_running() {
     done
 
     # wait a bit for CSV to appear
-    # (jhrozek): I didn't find a useful condition or status to wait for..
-    # ..if only there was a way to check if ANY installedCSV is set..
-    sleep 30
-    CSV=$(kubectl -n$ns get sub security-profiles-operator-sub -ojsonpath='{.status.installedCSV}')
+    CSV=$(try_until_ok kubectl -n$ns get sub security-profiles-operator-sub -ojsonpath='{.status.installedCSV}')
+
     # wait for the CSV to be actually installed
     kubectl_wait -n$ns --for=jsonpath='{.status.phase}'=Succeeded csv $CSV
 
     # wait for the operator to be ready
     kubectl_wait -n$ns --for=condition=ready pod -lname=security-profiles-operator || return 1
 
-    # wait for webhook deploy to be created, kubectl wait for non-existent resource seems to exit with error
-    # which is causing random test failure
-    # see https://github.com/kubernetes/kubernetes/issues/83242
-    for i in $(seq 1 10); do
-        found=$(kubectl_wait -n$ns --for=condition=ready pod -lname=security-profiles-operator-webhook 2>/dev/null)
-        if [[ $found ]]; then
-            break
-        fi
-        sleep 5
-    done
+    # wait for webhook deploy to be created
     kubectl_wait -n$ns --for=condition=ready pod -lname=security-profiles-operator-webhook || return 1
 
-    # wait for spod pod to be created, kubectl wait for non-existent resource seems to exit with error
-    # which is causing random test failure
-    # see https://github.com/kubernetes/kubernetes/issues/83242
-    for i in $(seq 1 10); do
-        found=$(kubectl get -n$ns pods -lname=spod 2>/dev/null)
-        if [[ $found ]]; then
-            break
-        fi
-        sleep 5
-    done
+    # wait for spod pod to be created
     kubectl_wait -n$ns --for=condition=ready pod -lname=spod || return 1
 
     return 0
@@ -414,18 +419,7 @@ function teardown_spo() {
 
 function check_spod_property() {
     what=$1
-
-    for i in $(seq 1 5); do
-        kubectl -nsecurity-profiles-operator get ds spod -oyaml | grep $what
-        found=$?
-        if [ $found -ne 0 ]; then
-            sleep 3
-        else
-            break
-        fi
-    done
-
-    kubectl -nsecurity-profiles-operator get ds spod -oyaml | grep $what || return 1
+    try_until_ok kubectl -nsecurity-profiles-operator get ds spod -oyaml | grep $what
 }
 
 # The actual script begins here
@@ -462,13 +456,13 @@ teardown_spo custom
 echo "Testing SPO deployment with ENABLE_LOG_ENRICHER"
 deploy_spo_with_variable ENABLE_LOG_ENRICHER || rv=1
 check_spo_is_running security-profiles-operator || rv=1
-check_spod_property with-recording=true
+check_spod_property with-recording=true || rv=1
 teardown_spo ENABLE_LOG_ENRICHER
 
 echo "Testing SPO deployment with ENABLE_BPF_RECORDER"
 deploy_spo_with_variable ENABLE_BPF_RECORDER || rv=1
 check_spo_is_running security-profiles-operator || rv=1
-check_spod_property with-recording=true
+check_spod_property with-recording=true || rv=1
 teardown_spo ENABLE_BPF_RECORDER
 
 exit $rv
