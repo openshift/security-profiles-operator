@@ -986,4 +986,4 @@ spec:
   - image: quay.io/security-profiles-operator/selinuxd-el9:latest
     name: selinuxd-el9
   replaces: security-profiles-operator.v0.8.1
-  version: 0.8.1
+  version: 0.8.4
