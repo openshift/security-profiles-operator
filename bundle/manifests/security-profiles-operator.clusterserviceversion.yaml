@@ -967,7 +967,7 @@ spec:
   - apparmor
   - ebpf
   links:
-  - name: Security Profiles Operator
+  - name: Security Profiles Operator upstream repository
     url: https://github.com/kubernetes-sigs/security-profiles-operator
   maintainers:
   - email: dev@kubernetes.io
