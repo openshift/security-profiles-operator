@@ -970,7 +970,7 @@ spec:
   - name: Security Profiles Operator
     url: https://github.com/kubernetes-sigs/security-profiles-operator
   - name: Security Profiles Operator documentation
-    url: https://docs.openshift.com/container-platform/latest/security/security_profiles_operator/spo-understanding.html
+    url: https://docs.openshift.com/container-platform/latest/security/security_profiles_operator/spo-overview.html
   maintainers:
   - email: dev@kubernetes.io
     name: Kubernetes upstream
