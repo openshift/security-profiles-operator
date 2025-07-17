@@ -182,16 +182,16 @@ func TestMatchSelinuxdImageVersion(t *testing.T) {
 
 	mappingJSON := `[
 		{
-			"regex":"(.*)(CoreOS).*([\\d+])\\.8[\\d+]\\.(.*)",
-			"imageFromVar":"RELATED_IMAGE_RHEL8_SELINUXD"
+			"regex": "(.*)(CoreOS).*(41[0-2]\\.[0-9]+)\\..*",
+			"imageFromVar": "RELATED_IMAGE_SELINUXD_EL8"
 		},
 		{
-			"regex":"(.*)(CoreOS).*([\\d+])\\.9[\\d+]\\.(.*)|(.*)(CoreOS)([\\s+])9\\.(.*)",
-			"imageFromVar":"RELATED_IMAGE_RHEL9_SELINUXD"
+			"regex": "(.*)(CoreOS).*(41[3-9]\\.[0-9]+)\\..*|(.*)(CoreOS)\\s+9\\.[0-9]+\\..*",
+			"imageFromVar": "RELATED_IMAGE_SELINUXD_EL9"
 		},
 		{
-			"regex":"(.*)(CoreOS)([\\s+])10\\.(.*)",
-			"imageFromVar":"RELATED_IMAGE_RHEL10_SELINUXD"
+			"regex": "(.*)(CoreOS)\\s+10\\.[0-9]+\\..*",
+			"imageFromVar": "RELATED_IMAGE_SELINUXD_EL10"
 		}
 	]`
 
@@ -209,7 +209,7 @@ func TestMatchSelinuxdImageVersion(t *testing.T) {
 					},
 				},
 			},
-			want: "RELATED_IMAGE_RHEL8_SELINUXD",
+			want: "RELATED_IMAGE_SELINUXD_EL8",
 		},
 		{
 			name: "Should return el9",
@@ -220,7 +220,7 @@ func TestMatchSelinuxdImageVersion(t *testing.T) {
 					},
 				},
 			},
-			want: "RELATED_IMAGE_RHEL9_SELINUXD",
+			want: "RELATED_IMAGE_SELINUXD_EL9",
 		},
 		{
 			name: "Should return el9 for RHEL 9",
@@ -265,6 +265,41 @@ func TestMatchSelinuxdImageVersion(t *testing.T) {
 				},
 			},
 			want: "",
+		},
+		// Reported issue case
+		{
+			name: "User reported case - RHEL CoreOS 9.6",
+			node: &corev1.Node{
+				Status: corev1.NodeStatus{
+					NodeInfo: corev1.NodeSystemInfo{
+						OSImage: "Red Hat Enterprise Linux CoreOS 9.6.20250715-0 (Plow)",
+					},
+				},
+			},
+			want: "RELATED_IMAGE_SELINUXD_EL9",
+		},
+		// Future-proofing tests
+		{
+			name: "Future OCP 4.20 (hypothetical)",
+			node: &corev1.Node{
+				Status: corev1.NodeStatus{
+					NodeInfo: corev1.NodeSystemInfo{
+						OSImage: "Red Hat Enterprise Linux CoreOS 420.96.202512011200-0 (Plow)",
+					},
+				},
+			},
+			want: "",
+		},
+		{
+			name: "Direct RHEL 9.8 (future)",
+			node: &corev1.Node{
+				Status: corev1.NodeStatus{
+					NodeInfo: corev1.NodeSystemInfo{
+						OSImage: "Red Hat Enterprise Linux CoreOS 9.8.202512011200-0 (Plow)",
+					},
+				},
+			},
+			want: "RELATED_IMAGE_SELINUXD_EL9",
 		},
 	}
 
