@@ -26,11 +26,13 @@ import (
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	errors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/scheme"
 
+	profilerecordingapi "sigs.k8s.io/security-profiles-operator/api/profilerecording/v1alpha1"
 	seccompprofileapi "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1beta1"
 	selinuxprofileapi "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1alpha2"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/controller"
@@ -98,6 +100,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req reconcile.Request) (r
 	if errors.IsNotFound(err) { // this is a pod deletion, so update all seccomp/selinux profiles that were using it
 		seccompProfiles := &seccompprofileapi.SeccompProfileList{}
 		selinuxProfiles := &selinuxprofileapi.SelinuxProfileList{}
+		profileRecordings := &profilerecordingapi.ProfileRecordingList{}
 
 		if err = r.client.List(ctx, seccompProfiles, client.MatchingFields{linkedPodsKey: podID}); err != nil {
 			return reconcile.Result{}, fmt.Errorf("listing SeccompProfiles for deleted pod: %w", err)
@@ -105,6 +108,10 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req reconcile.Request) (r
 
 		if err = r.client.List(ctx, selinuxProfiles, client.MatchingFields{linkedPodsKey: podID}); err != nil {
 			return reconcile.Result{}, fmt.Errorf("listing SelinuxProfiles for deleted pod: %w", err)
+		}
+
+		if err = r.client.List(ctx, profileRecordings, client.MatchingFields{linkedPodsKey: podID}); err != nil {
+			return reconcile.Result{}, fmt.Errorf("listing ProfileRecordings for deleted pod: %w", err)
 		}
 
 		for i := range seccompProfiles.Items {
@@ -116,6 +123,12 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req reconcile.Request) (r
 		for j := range selinuxProfiles.Items {
 			if err = r.updatePodReferencesForSelinux(ctx, &selinuxProfiles.Items[j]); err != nil {
 				return reconcile.Result{}, fmt.Errorf("updating SelinuxProfile for deleted pod: %w", err)
+			}
+		}
+
+		for k := range profileRecordings.Items {
+			if err = r.updatePodReferencesForProfileRecording(ctx, &profileRecordings.Items[k]); err != nil {
+				return reconcile.Result{}, fmt.Errorf("updating ProfileRecording for deleted pod: %w", err)
 			}
 		}
 
@@ -263,6 +276,60 @@ func (r *PodReconciler) updatePodReferencesForSelinux(ctx context.Context, se *s
 	} else {
 		if err := util.Retry(func() error {
 			return util.RemoveFinalizer(ctx, r.client, se, util.HasActivePodsFinalizerString)
+		}, util.IsNotFoundOrConflict); err != nil {
+			return fmt.Errorf("removing finalizer: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// updatePodReferencesForProfileRecording updates a ProfileRecording with the identifiers of pods using it and ensures
+// it has a finalizer indicating it is in use to prevent it from being deleted.
+func (r *PodReconciler) updatePodReferencesForProfileRecording(
+	ctx context.Context, pr *profilerecordingapi.ProfileRecording,
+) error {
+	// we list the pods and not the workloads, because the workloads are just strings
+	// and we can't query for them directly
+	selector, err := metav1.LabelSelectorAsSelector(&pr.Spec.PodSelector)
+	if err != nil {
+		return fmt.Errorf("creating selector: %w", err)
+	}
+
+	linkedPods := &corev1.PodList{}
+	if err := r.client.List(ctx, linkedPods, client.InNamespace(pr.GetNamespace()), client.MatchingLabelsSelector{Selector: selector}); err != nil {
+		return fmt.Errorf("listing pods to update profileRecording: %w", err)
+	}
+
+	podList := make([]string, len(linkedPods.Items))
+	for i := range linkedPods.Items {
+		pod := linkedPods.Items[i]
+		podList[i] = pod.GetName()
+	}
+
+	if err := util.Retry(func() error {
+		pr.Status.ActiveWorkloads = podList
+		updateErr := r.client.Status().Update(ctx, pr)
+		if updateErr != nil {
+			if err := r.client.Get(ctx, util.NamespacedName(pr.GetName(), pr.GetNamespace()), pr); err != nil {
+				return fmt.Errorf("retrieving profile: %w", err)
+			}
+			return fmt.Errorf("updating profile: %w", updateErr)
+		}
+		return nil
+	}, util.IsNotFoundOrConflict); err != nil {
+		return fmt.Errorf("updating ProfileRecording status: %w", err)
+	}
+
+	if len(linkedPods.Items) > 0 {
+		if err := util.Retry(func() error {
+			return util.AddFinalizer(ctx, r.client, pr, util.HasActivePodsFinalizerString)
+		}, util.IsNotFoundOrConflict); err != nil {
+			return fmt.Errorf("adding finalizer: %w", err)
+		}
+	} else {
+		if err := util.Retry(func() error {
+			return util.RemoveFinalizer(ctx, r.client, pr, util.HasActivePodsFinalizerString)
 		}, util.IsNotFoundOrConflict); err != nil {
 			return fmt.Errorf("removing finalizer: %w", err)
 		}
