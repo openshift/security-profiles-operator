@@ -16,7 +16,10 @@ RUN ./update_bundle_rbac.sh
 RUN ./update_crd_conversion.sh
 
 FROM scratch
-LABEL name=openshift-compliance-operator-bundle
+ARG SPO_VERSION
+
+LABEL name="compliance/openshift-security-profiles-operator-bundle"
+LABEL cpe="cpe:/a:redhat:openshift_security_profiles_operator:1::el9"
 LABEL version=${SPO_VERSION}
 LABEL summary='OpenShift Security Profiles Operator'
 LABEL maintainer='Infrastructure Security and Compliance Team <isc-team@redhat.com>'
