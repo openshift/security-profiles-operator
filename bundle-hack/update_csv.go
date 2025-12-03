@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -14,12 +15,16 @@ import (
 
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Printf("Usage: %s <manifest_directory> <version>\n", os.Args[0])
+		fmt.Printf("Usage: %s <manifest_directory> <version> [operator-image]\n", os.Args[0])
 		os.Exit(1)
 	}
 
 	manifestDirectory := os.Args[1]
 	version := os.Args[2]
+	operatorImage := ""
+	if len(os.Args) > 3 {
+		operatorImage = os.Args[3]
+	}
 
 	buildManifestFilePath, err := getManifestFilePathFromDirectory(manifestDirectory)
 	if err != nil {
@@ -61,7 +66,7 @@ func main() {
 		fmt.Println(err)
 		os.Exit(1)
 	}
-	if err := replaceImages(manifest); err != nil {
+	if err := replaceImages(manifest, operatorImage); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
@@ -182,7 +187,8 @@ func splitPullSpec(konfluxPullSpec string) (string, error) {
 // re-anchoring it to the Red Hat registry.
 //
 // RBAC proxy is a special case: it uses a static "latest" tag.
-func replaceImages(m map[string]interface{}) error {
+// Note: selinuxd images are kept hardcoded since they live in a different repo.
+func replaceImages(m map[string]interface{}, operatorImage string) error {
 	defer recoverFromReplaceImages()
 
 	// 1) Define your raw Konflux pull specs (with sha) and the
@@ -193,10 +199,18 @@ func replaceImages(m map[string]interface{}) error {
 		RedHatBase string // registry.redhat.io/...
 		FinalPS    string // will be set after extracting sha
 	}
+
+	// Use the operator image passed from the pipeline if provided
+	operatorKonfluxPS := operatorImage
+	if operatorKonfluxPS == "" {
+		// Fallback to hardcoded value if not provided (for backward compatibility)
+		operatorKonfluxPS = "quay.io/redhat-user-workloads/ocp-isc-tenant/security-profiles-operator-dev@sha256:15f7abcf8859b679535d11a0720cd4c3923e9194c12f600d05e1a7e81803e113"
+	}
+
 	defs := []imgDef{
 		{
 			EnvName:    "RELATED_IMAGE_OPERATOR",
-			KonfluxPS:  "quay.io/redhat-user-workloads/ocp-isc-tenant/security-profiles-operator-dev@sha256:15f7abcf8859b679535d11a0720cd4c3923e9194c12f600d05e1a7e81803e113",
+			KonfluxPS:  operatorKonfluxPS,
 			RedHatBase: "registry.redhat.io/compliance/openshift-security-profiles-rhel8-operator",
 		},
 		{
@@ -230,7 +244,7 @@ func replaceImages(m map[string]interface{}) error {
 		if defs[i].KonfluxPS != "" {
 			sha, err := splitPullSpec(defs[i].KonfluxPS)
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to extract SHA from %s: %w", defs[i].KonfluxPS, err)
 			}
 			defs[i].FinalPS = defs[i].RedHatBase + sha
 		}
@@ -271,7 +285,8 @@ func replaceImages(m map[string]interface{}) error {
 	}
 
 	// 4) Update the container's image to the operator's FinalPS
-	ctr["image"] = defs[0].FinalPS
+	// Trim any whitespace/newlines to prevent YAML literal block formatting
+	ctr["image"] = strings.TrimSpace(defs[0].FinalPS)
 
 	// 5) Update each RELATED_IMAGE_* env var
 	envSlice, ok := ctr["env"].([]interface{})
@@ -286,7 +301,8 @@ func replaceImages(m map[string]interface{}) error {
 		name, _ := envVar["name"].(string)
 		for _, def := range defs {
 			if name == def.EnvName {
-				envVar["value"] = def.FinalPS
+				// Trim any whitespace/newlines to prevent YAML literal block formatting
+				envVar["value"] = strings.TrimSpace(def.FinalPS)
 				break
 			}
 		}
@@ -449,10 +465,17 @@ func writeManifest(m map[string]interface{}, manifestDirectory, version string) 
 	}
 	fmt.Printf("Successfully moved %s to %s.\n", oldCSVFilename, newCSVFilename)
 
-	out, err := yaml.Marshal(m)
-	if err != nil {
+	// Use encoder with options to prevent literal block formatting for strings
+	var buf bytes.Buffer
+	encoder := yaml.NewEncoder(&buf)
+	encoder.SetIndent(2)
+	defer encoder.Close()
+
+	if err := encoder.Encode(m); err != nil {
 		return fmt.Errorf("failed to marshal YAML: %v", err)
 	}
+
+	out := buf.Bytes()
 
 	if err := os.WriteFile(newCSVFilename, out, 0644); err != nil {
 		return fmt.Errorf("failed to write updated manifest %s: %v", newCSVFilename, err)
