@@ -3121,6 +3121,8 @@ data:
             "set_tid_address",
             "setgid",
             "setgroups",
+            "setresgid",
+            "setresuid",
             "setrlimit",
             "setsockopt",
             "setuid",

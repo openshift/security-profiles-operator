@@ -39,11 +39,16 @@ spec:
         - prctl
         - read
         - recvfrom
+        - rt_sigaction
+        - rt_sigprocmask
         - rt_sigreturn
         - sched_yield
+        - select
         - set_tid_address
         - setgid
         - setgroups
+        - setresgid
+        - setresuid
         - setuid
         - tgkill
         - write
