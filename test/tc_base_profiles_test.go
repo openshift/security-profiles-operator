@@ -55,22 +55,6 @@ spec:
     - exit_group
 `, baseProfileName)
 
-	const helloPod = `
-apiVersion: v1
-kind: Pod
-metadata:
-  name: hello
-spec:
-  containers:
-  - image: quay.io/security-profiles-operator/test-hello-world:latest
-    name: hello
-  securityContext:
-    seccompProfile:
-      type: Localhost
-      localhostProfile: operator/hello.json
-  restartPolicy: OnFailure
-`
-
 	e.kubectl("create", "-f", baseProfilePath)
 
 	defer e.kubectl("delete", "-f", baseProfilePath)
@@ -93,14 +77,45 @@ spec:
 	e.logf("Waiting for profile to be reconciled")
 	e.waitForProfile("hello")
 
-	e.logf("Creating hello-world pod")
+	// Get the profile to check the actual localhostProfile path
+	profile := e.getSeccompProfile("hello")
+	localhostProfile := profile.Status.LocalhostProfile
+	e.logf("Profile status localhostProfile: %s", localhostProfile)
+
+	// Fail if localhostProfile is empty - this indicates the profile was not properly reconciled
+	if localhostProfile == "" {
+		e.logf("Profile localhostProfile is empty, gathering debug information")
+		e.kubectlOperatorNS("logs", "-l", "name=spod")
+		profileYAML := e.kubectl("get", "sp", "hello", "-o", "yaml")
+		e.logf("Profile YAML:\n%s", profileYAML)
+		e.FailNowf("Profile localhostProfile is empty - profile was not properly reconciled", "Profile YAML:\n%s", profileYAML)
+	}
+
+	// Update pod YAML with the correct localhostProfile path
+	helloPodWithPath := fmt.Sprintf(`
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hello
+spec:
+  containers:
+  - image: quay.io/security-profiles-operator/test-hello-world:latest
+    name: hello
+  securityContext:
+    seccompProfile:
+      type: Localhost
+      localhostProfile: %s
+  restartPolicy: OnFailure
+`, localhostProfile)
+
+	e.logf("Creating hello-world pod with localhostProfile: %s", localhostProfile)
 
 	helloPodFile, err := os.CreateTemp("", "hello-pod*.yaml")
 	e.Nil(err)
 
 	defer os.Remove(helloPodFile.Name())
 
-	_, err = helloPodFile.WriteString(helloPod)
+	_, err = helloPodFile.WriteString(helloPodWithPath)
 	e.Nil(err)
 	err = helloPodFile.Close()
 	e.Nil(err)
@@ -117,6 +132,15 @@ spec:
 		output := e.kubectl("get", "pod", "hello")
 		if strings.Contains(output, "Completed") {
 			break
+		}
+
+		if strings.Contains(output, "CreateContainerError") {
+			e.logf("Container creation failed, gathering debug information")
+			e.kubectlOperatorNS("logs", "-l", "name=spod")
+			e.kubectl("get", "sp", "hello", "-o", "yaml")
+			podDescribe := e.kubectl("describe", "pod", "hello")
+			e.logf("Pod describe output:\n%s", podDescribe)
+			e.FailNowf("Unable to create container", podDescribe)
 		}
 
 		time.Sleep(time.Second)
