@@ -24,8 +24,8 @@ import (
 )
 
 const (
-	baseProfileNameRunc = "runc-v1.2.3"
-	baseProfileNameCrun = "crun-v1.20"
+	baseProfileNameRunc = "runc-v1.3.0"
+	baseProfileNameCrun = "crun-v1.22"
 )
 
 func (e *e2e) testCaseBaseProfile([]string) {
@@ -37,6 +37,11 @@ func (e *e2e) testCaseBaseProfile([]string) {
 	if clusterType == clusterTypeVanilla && e.containerRuntime != containerRuntimeDocker {
 		baseProfilePath = "examples/baseprofile-crun.yaml"
 		baseProfileName = baseProfileNameCrun
+	} else if clusterType == clusterTypeOpenShift {
+		if e.isOCP418OrHigher() {
+			baseProfilePath = "examples/baseprofile-crun.yaml"
+			baseProfileName = baseProfileNameCrun
+		}
 	}
 
 	helloProfile := fmt.Sprintf(`
@@ -81,6 +86,7 @@ spec:
 	e.Nil(err)
 
 	defer os.Remove(helloProfileFile.Name())
+
 	_, err = helloProfileFile.WriteString(helloProfile)
 	e.Nil(err)
 	err = helloProfileFile.Close()

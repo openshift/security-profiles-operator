@@ -69,7 +69,7 @@ func (sp *RawSelinuxProfile) SetImplementationStatus() {
 // GetPolicyName gets the policy module name in the format that
 // we're expecting for parsing.
 func (sp *RawSelinuxProfile) GetPolicyName() string {
-	return sp.GetName() + "_" + sp.GetNamespace()
+	return sp.GetName()
 }
 
 // GetPolicyUsage is the representation of how a pod will call this
@@ -104,7 +104,7 @@ func (sp *RawSelinuxProfile) IsReconcilable() bool {
 type RawSelinuxProfileList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []SelinuxProfile `json:"items"`
+	Items           []RawSelinuxProfile `json:"items"`
 }
 
 func init() { //nolint:gochecknoinits // required to init the scheme
