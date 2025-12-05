@@ -29,9 +29,12 @@ LABEL \
     io.k8s.description="The Security Profiles Operator makes it easier for cluster admins to manage their seccomp, or SELinux profiles and apply them to Kubernetes' workloads." \
     io.openshift.tags="security,seccomp,selinux" \
     com.redhat.delivery.appregistry="false" \
+    description="The Security Profiles Operator makes it easier for cluster admins to manage their seccomp, or SELinux profiles and apply them to Kubernetes' workloads." \
+    summary="Security Profiles Operator" \
     maintainer="Red Hat ISC <isc-team@redhat.com>" \
     License="APL 2.0" \
     name="openshift-security-profiles-operator" \
+    cpe="cpe:/a:redhat:openshift_security_profiles_operator:1::el9" \
     com.redhat.component="openshift-security-profiles-operator-container" \
     io.openshift.maintainer.product="OpenShift Container Platform" \
     io.openshift.maintainer.component="Security Profiles Operator" \
@@ -47,6 +50,7 @@ ENV OPERATOR=/usr/local/bin/security-profiles-operator \
 COPY --from=builder /go/src/github.com/openshift/security-profiles-operator/build/security-profiles-operator ${OPERATOR}
 # This is required for the bundle build.
 COPY --from=builder /go/src/github.com/openshift/security-profiles-operator/bundle /bundle
+COPY --from=builder /go/src/github.com/openshift/security-profiles-operator/LICENSE /licenses/LICENSE
 
 ENTRYPOINT ["/usr/local/bin/security-profiles-operator"]
 
