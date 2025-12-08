@@ -38,7 +38,7 @@ LABEL \
     com.redhat.component="openshift-security-profiles-operator-container" \
     io.openshift.maintainer.product="OpenShift Container Platform" \
     io.openshift.maintainer.component="Security Profiles Operator" \
-    version=0.8.4
+    version=0.10.0
 
 ENV OPERATOR=/usr/local/bin/security-profiles-operator \
     USER_UID=65534 \
