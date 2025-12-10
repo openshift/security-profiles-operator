@@ -1,8 +1,24 @@
 {
+  "extends": [
+    "config:recommended"
+  ],
   "branchPrefix": "kflux/mintmaker/",
   "schedule": [
     "at any time"
   ],
+  "gomod": {
+    "packageRules": [
+      {
+        "matchManagers": [
+          "gomod"
+        ],
+        "matchBaseBranches": [
+          "/^release-.*/"
+        ],
+        "enabled": false
+      }
+    ]
+  },
   "tekton": {
     "managerFilePatterns": [
       "/\\.yaml$/",
