@@ -434,7 +434,7 @@ github.com/buildkite/interpolate
 # github.com/buildkite/roko v1.3.1
 ## explicit; go 1.18
 github.com/buildkite/roko
-# github.com/cenkalti/backoff/v5 v5.0.2
+# github.com/cenkalti/backoff/v5 v5.0.3
 ## explicit; go 1.23
 github.com/cenkalti/backoff/v5
 # github.com/cert-manager/cert-manager v1.18.2
