@@ -431,8 +431,8 @@ github.com/buildkite/go-pipeline/warning
 # github.com/buildkite/interpolate v0.1.5
 ## explicit; go 1.22
 github.com/buildkite/interpolate
-# github.com/buildkite/roko v1.3.1
-## explicit; go 1.18
+# github.com/buildkite/roko v1.4.0
+## explicit; go 1.21
 github.com/buildkite/roko
 # github.com/cenkalti/backoff/v5 v5.0.2
 ## explicit; go 1.23

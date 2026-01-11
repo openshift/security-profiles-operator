@@ -118,7 +118,7 @@ require (
 	github.com/buildkite/agent/v3 v3.102.1 // indirect
 	github.com/buildkite/go-pipeline v0.14.0 // indirect
 	github.com/buildkite/interpolate v0.1.5 // indirect
-	github.com/buildkite/roko v1.3.1 // indirect
+	github.com/buildkite/roko v1.4.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.2 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/chrismellard/docker-credential-acr-env v0.0.0-20230304212654-82a0ddb27589 // indirect
