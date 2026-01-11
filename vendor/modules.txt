@@ -290,8 +290,8 @@ github.com/aquasecurity/libbpfgo
 # github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2
 ## explicit; go 1.13
 github.com/asaskevich/govalidator
-# github.com/avast/retry-go/v4 v4.6.1
-## explicit; go 1.18
+# github.com/avast/retry-go/v4 v4.7.0
+## explicit; go 1.20
 github.com/avast/retry-go/v4
 # github.com/aws/aws-sdk-go-v2 v1.36.5
 ## explicit; go 1.22
@@ -1383,7 +1383,7 @@ github.com/spiffe/go-spiffe/v2/workloadapi
 # github.com/stoewer/go-strcase v1.3.0
 ## explicit; go 1.11
 github.com/stoewer/go-strcase
-# github.com/stretchr/testify v1.10.0
+# github.com/stretchr/testify v1.11.1
 ## explicit; go 1.17
 github.com/stretchr/testify/assert
 github.com/stretchr/testify/assert/yaml
