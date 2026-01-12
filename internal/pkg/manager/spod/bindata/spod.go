@@ -930,7 +930,7 @@ var metricsService = &corev1.Service{
 }
 
 func CustomLogVolume(mountPath string, logVolumeSource *corev1.VolumeSource) (corev1.Volume, corev1.VolumeMount) {
-	const volumeName = "json-enricher-log-output-volume"
+	const volumeName = "json-enricher-custom-audit-log-volume"
 
 	return corev1.Volume{
 			Name:         volumeName,

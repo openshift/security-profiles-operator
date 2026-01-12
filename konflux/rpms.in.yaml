@@ -1,0 +1,25 @@
+# RPM dependencies for security-profiles-operator
+# These packages are installed during the container build in Dockerfile.openshift
+
+packages:
+  # Build dependencies for security-profiles-operator
+  - git
+  - libseccomp-devel
+  # BPF (Berkeley Packet Filter) support dependencies
+  - libbpf-devel
+  - elfutils-libelf-devel
+  - zlib-devel
+  - libzstd-devel
+
+contentOrigin:
+  # Repository configuration for RHEL 9 packages
+  repofiles:
+    - ./redhat.repo
+
+arches:
+  # Multi-architecture support matching the Tekton pipeline configuration
+  - x86_64
+  - ppc64le
+
+context:
+  containerfile: ../Dockerfile.ubi
