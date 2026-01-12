@@ -27,10 +27,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	spodv1alpha1 "sigs.k8s.io/security-profiles-operator/api/spod/v1alpha1"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/config"
@@ -93,17 +96,30 @@ func (r *ReconcileSPOd) Setup(
 	r.watchNamespace = dt.watchNamespace
 	r.namespace = config.GetOperatorNamespace()
 
-	return ctrl.NewControllerManagedBy(mgr).
-		Named(r.Name()).
-		For(&spodv1alpha1.SecurityProfilesOperatorDaemon{}).
-		Owns(&appsv1.DaemonSet{}).
-		WithEventFilter(predicate.Funcs{
-			CreateFunc:  func(e event.CreateEvent) bool { return isInOperatorNamespace(e.Object) },
-			DeleteFunc:  func(e event.DeleteEvent) bool { return isInOperatorNamespace(e.Object) },
-			UpdateFunc:  func(e event.UpdateEvent) bool { return isInOperatorNamespace(e.ObjectNew) },
-			GenericFunc: func(e event.GenericEvent) bool { return isInOperatorNamespace(e.Object) },
-		}).
-		Complete(r)
+    return ctrl.NewControllerManagedBy(mgr).
+        Named(r.Name()).
+        For(&spodv1alpha1.SecurityProfilesOperatorDaemon{}).
+        Owns(&appsv1.DaemonSet{}).
+        WithEventFilter(predicate.Funcs{
+            CreateFunc:  func(e event.CreateEvent) bool { return isInOperatorNamespace(e.Object) },
+            DeleteFunc:  func(e event.DeleteEvent) bool { return isInOperatorNamespace(e.Object) },
+            UpdateFunc:  func(e event.UpdateEvent) bool { return isInOperatorNamespace(e.ObjectNew) },
+            GenericFunc: func(e event.GenericEvent) bool { return isInOperatorNamespace(e.Object) },
+        }).
+        Watches(
+            &corev1.ConfigMap{},
+            handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+                if obj.GetName() == util.OperatorConfigMap &&
+                    obj.GetNamespace() == config.GetOperatorNamespace() {
+                    // Trigger reconciliation for all SPODs
+                    return []reconcile.Request{{NamespacedName: types.NamespacedName{
+                        Name: "spod", Namespace: config.GetOperatorNamespace(),
+                    }}}
+                }
+                return nil
+            }),
+        ).
+        Complete(r)
 }
 
 func (r *ReconcileSPOd) createConfigIfNotExist(ctx context.Context) error {
