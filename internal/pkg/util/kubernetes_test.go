@@ -188,6 +188,10 @@ func TestMatchSelinuxdImageVersion(t *testing.T) {
 		{
 			"regex":"(.*)(CoreOS).*([\\d+])\\.9[\\d+]\\.(.*)|(.*)(CoreOS)([\\s+])9\\.(.*)",
 			"imageFromVar":"RELATED_IMAGE_RHEL9_SELINUXD"
+		},
+		{
+			"regex":"(.*)(CoreOS)([\\s+])10\\.(.*)",
+			"imageFromVar":"RELATED_IMAGE_RHEL10_SELINUXD"
 		}
 	]`
 
@@ -228,6 +232,28 @@ func TestMatchSelinuxdImageVersion(t *testing.T) {
 				},
 			},
 			want: "RELATED_IMAGE_RHEL9_SELINUXD",
+		},
+		{
+			name: "Should return el10 for RHEL 10",
+			node: &corev1.Node{
+				Status: corev1.NodeStatus{
+					NodeInfo: corev1.NodeSystemInfo{
+						OSImage: "Red Hat Enterprise Linux CoreOS 10.0.20250425-0 (Codename)",
+					},
+				},
+			},
+			want: "RELATED_IMAGE_RHEL10_SELINUXD",
+		},
+		{
+			name: "Should return el10 for RHEL 10 with patch version",
+			node: &corev1.Node{
+				Status: corev1.NodeStatus{
+					NodeInfo: corev1.NodeSystemInfo{
+						OSImage: "Red Hat Enterprise Linux CoreOS 10.1.20250525-0 (Codename)",
+					},
+				},
+			},
+			want: "RELATED_IMAGE_RHEL10_SELINUXD",
 		},
 		{
 			name: "Does not match anything",
