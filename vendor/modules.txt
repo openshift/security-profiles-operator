@@ -831,7 +831,7 @@ github.com/googleapis/gax-go/v2/internallog
 github.com/googleapis/gax-go/v2/internallog/grpclog
 github.com/googleapis/gax-go/v2/internallog/internal
 github.com/googleapis/gax-go/v2/iterator
-# github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.1
+# github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.2
 ## explicit; go 1.23.0
 github.com/grpc-ecosystem/grpc-gateway/v2/internal/httprule
 github.com/grpc-ecosystem/grpc-gateway/v2/runtime
@@ -1596,7 +1596,7 @@ go.opentelemetry.io/otel/trace
 go.opentelemetry.io/otel/trace/embedded
 go.opentelemetry.io/otel/trace/internal/telemetry
 go.opentelemetry.io/otel/trace/noop
-# go.opentelemetry.io/proto/otlp v1.7.0
+# go.opentelemetry.io/proto/otlp v1.9.0
 ## explicit; go 1.23.0
 go.opentelemetry.io/proto/otlp/collector/trace/v1
 go.opentelemetry.io/proto/otlp/common/v1
@@ -1784,7 +1784,7 @@ google.golang.org/genproto/googleapis/type/calendarperiod
 google.golang.org/genproto/googleapis/type/date
 google.golang.org/genproto/googleapis/type/expr
 google.golang.org/genproto/googleapis/type/timeofday
-# google.golang.org/genproto/googleapis/api v0.0.0-20250707201910-8d1bb00bc6a7
+# google.golang.org/genproto/googleapis/api v0.0.0-20250825161204-c5933d9347a5
 ## explicit; go 1.23.0
 google.golang.org/genproto/googleapis/api
 google.golang.org/genproto/googleapis/api/annotations
@@ -1794,12 +1794,12 @@ google.golang.org/genproto/googleapis/api/httpbody
 google.golang.org/genproto/googleapis/api/label
 google.golang.org/genproto/googleapis/api/metric
 google.golang.org/genproto/googleapis/api/monitoredres
-# google.golang.org/genproto/googleapis/rpc v0.0.0-20250707201910-8d1bb00bc6a7
+# google.golang.org/genproto/googleapis/rpc v0.0.0-20250825161204-c5933d9347a5
 ## explicit; go 1.23.0
 google.golang.org/genproto/googleapis/rpc/code
 google.golang.org/genproto/googleapis/rpc/errdetails
 google.golang.org/genproto/googleapis/rpc/status
-# google.golang.org/grpc v1.75.0
+# google.golang.org/grpc v1.75.1
 ## explicit; go 1.23.0
 google.golang.org/grpc
 google.golang.org/grpc/attributes
@@ -1957,8 +1957,8 @@ google.golang.org/grpc/xds/internal/xdsclient/xdsresource/version
 # google.golang.org/grpc/cmd/protoc-gen-go-grpc v1.5.1
 ## explicit; go 1.21
 google.golang.org/grpc/cmd/protoc-gen-go-grpc
-# google.golang.org/protobuf v1.36.7
-## explicit; go 1.22
+# google.golang.org/protobuf v1.36.10
+## explicit; go 1.23
 google.golang.org/protobuf/cmd/protoc-gen-go
 google.golang.org/protobuf/cmd/protoc-gen-go/internal_gengo
 google.golang.org/protobuf/compiler/protogen
