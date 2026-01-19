@@ -1,6 +1,6 @@
 FROM brew.registry.redhat.io/rh-osbs/openshift-golang-builder:rhel_9_golang_1.24 as builder
 
-RUN yum -y install git libseccomp-devel libbpf-devel && yum clean all && \
+RUN yum -y install --allowerasing git libseccomp-devel libbpf-devel && yum clean all && \
     yum -y clean all && rm -rf /var/cache/yum
 
 WORKDIR /go/src/github.com/openshift/security-profiles-operator
