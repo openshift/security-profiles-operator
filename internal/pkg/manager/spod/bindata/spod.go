@@ -242,6 +242,7 @@ chmod 750 /etc/selinux.d
 semodule -i /usr/share/selinuxd/templates/*.cil
 semodule -i /opt/spo-profiles/selinuxd.cil
 semodule -i /opt/spo-profiles/selinuxrecording.cil
+semodule -R
 `,
 						},
 						VolumeMounts: []corev1.VolumeMount{
