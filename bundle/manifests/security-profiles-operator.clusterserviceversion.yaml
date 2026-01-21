@@ -682,6 +682,8 @@ spec:
                   value: quay.io/security-profiles-operator/selinuxd-el8:latest
                 - name: RELATED_IMAGE_SELINUXD_EL9
                   value: quay.io/security-profiles-operator/selinuxd-el9:latest
+                - name: RELATED_IMAGE_SELINUXD_EL10
+                  value: quay.io/security-profiles-operator/selinuxd-el10:latest
                 - name: RELATED_IMAGE_SELINUXD_FEDORA
                   value: quay.io/security-profiles-operator/selinuxd-fedora:latest
                 - name: OPERATOR_NAMESPACE
@@ -807,6 +809,8 @@ spec:
     name: selinuxd-el8
   - image: quay.io/security-profiles-operator/selinuxd-el9:latest
     name: selinuxd-el9
+  - image: quay.io/security-profiles-operator/selinuxd-el10:latest
+    name: selinuxd-el10
   - image: quay.io/security-profiles-operator/selinuxd-fedora:latest
     name: selinuxd-fedora
   replaces: security-profiles-operator.v0.9.1
