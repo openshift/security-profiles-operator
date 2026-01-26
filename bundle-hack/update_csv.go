@@ -137,7 +137,8 @@ func addRequiredAnnotations(m map[string]interface{}) error {
 // addRequiredLabels adds required labels under metadata.labels
 func addRequiredLabels(m map[string]interface{}) error {
 	requiredLabels := map[string]string{
-		"operatorframework.io/arch.amd64": "supported",
+		"operatorframework.io/arch.amd64":   "supported",
+		"operatorframework.io/arch.ppc64le": "supported",
 	}
 
 	metadata, ok := m["metadata"].(map[string]interface{})
