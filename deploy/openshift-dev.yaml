@@ -3345,8 +3345,11 @@ data:
       (blockinherit container)
       (typepermissive process)
       (typeattributeset file_type (process))
+      (typeattributeset svirt_sandbox_domain (process))
+      (typeattributeset mcs_constrained_type (process))
       (allow container_runtime_t process (file (relabelfrom relabelto)))
       (allow container_runtime_t process (dir (relabelfrom relabelto)))
+      (allow container_runtime_t process (key (create)))
     )
   spo-apparmor.yaml: |
     apiVersion: security-profiles-operator.x-k8s.io/v1alpha1
