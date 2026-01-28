@@ -27,8 +27,9 @@ import (
 )
 
 const (
-	typePermissive         = "(typepermissive process)"
-	systemContainerInherit = "container"
+	typePermissive           = "(typepermissive process)"
+	systemContainerInherit   = "container"
+	containerRuntimePerms    = "(typeattributeset file_type (process))\n(typeattributeset svirt_sandbox_domain (process))\n(typeattributeset mcs_constrained_type (process))\n(allow container_runtime_t process (file (relabelfrom relabelto)))\n(allow container_runtime_t process (dir (relabelfrom relabelto)))\n(allow container_runtime_t process (key (create)))"
 )
 
 func Object2CIL(
@@ -47,6 +48,14 @@ func Object2CIL(
 	// inherited in that case.
 	if len(objInherits) == 0 {
 		cilbuilder.WriteString(getCILInheritline(systemContainerInherit))
+
+		// Add required attributes and permissions for OpenShift 4.20+ (CRI-O/crun 1.23+)
+		// to allow keycreate context validation. This fixes "Invalid argument" errors
+		// when containers try to set SELinux contexts. Only add when inheriting from
+		// system templates; when inheriting from another SelinuxProfile, it already
+		// has these permissions.
+		cilbuilder.WriteString(containerRuntimePerms)
+		cilbuilder.WriteString("\n")
 	}
 
 	for _, inherit := range systemInherits {
