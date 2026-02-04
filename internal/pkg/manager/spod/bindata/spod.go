@@ -269,8 +269,9 @@ semodule -R
 							},
 						},
 						SecurityContext: &corev1.SecurityContext{
-							AllowPrivilegeEscalation: &falsely,
+							AllowPrivilegeEscalation: &truly,
 							ReadOnlyRootFilesystem:   &truly,
+							Privileged:               &truly, // Required for semodule -R to reload the kernel policy
 							Capabilities: &corev1.Capabilities{
 								Drop: []corev1.Capability{"ALL"},
 								Add:  []corev1.Capability{"CHOWN", "FOWNER", "FSETID", "DAC_OVERRIDE"},
