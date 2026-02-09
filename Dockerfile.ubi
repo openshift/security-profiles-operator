@@ -18,7 +18,7 @@
 # for more details
 
 # hash below referred to latest
-FROM registry.ci.openshift.org/ocp/builder:rhel-9-golang-1.25-openshift-4.20 AS build
+FROM registry.ci.openshift.org/ocp/builder:rhel-9-golang-1.25-openshift-4.22 AS build
 USER root
 WORKDIR /work
 
