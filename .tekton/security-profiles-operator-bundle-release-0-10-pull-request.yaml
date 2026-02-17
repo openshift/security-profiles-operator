@@ -9,7 +9,7 @@ metadata:
     pipelinesascode.tekton.dev/cancel-in-progress: "true"
     pipelinesascode.tekton.dev/max-keep-runs: "3"
     pipelinesascode.tekton.dev/on-cel-expression: event == "pull_request" && target_branch
-      == "release-0.10" && ("bundle-hack/***".pathChanged() || "bundle/***".pathChanged() || ".tekton/*bundle-release-0-10*.yaml".pathChanged())
+      == "release-0.10" && ("bundle-hack/***".pathChanged() || "bundle/***".pathChanged() || "bundle.openshift.Dockerfile".pathChanged() || ".tekton/*bundle-release-0-10*.yaml".pathChanged())
   creationTimestamp: null
   labels:
     appstudio.openshift.io/application: security-profiles-operator-release-0-10
