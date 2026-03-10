@@ -213,7 +213,7 @@ func (i *baseDocEqIndex) Lookup(resolver ValueResolver) (*IndexResult, error) {
 	return result, nil
 }
 
-func (i *baseDocEqIndex) AllRules(_ ValueResolver) (*IndexResult, error) {
+func (i *baseDocEqIndex) AllRules(ValueResolver) (*IndexResult, error) {
 	tr := newTrieTraversalResult()
 
 	// Walk over the rule trie and accumulate _all_ rules
@@ -285,14 +285,14 @@ func newrefindices(isVirtual func(Ref) bool) *refindices {
 	}
 }
 
+// anyValue is a fake variable we used to put "naked ref" expressions
+// into the rule index
+var anyValue = Var("__any__")
+
 // Update attempts to update the refindices for the given expression in the
 // given rule. If the expression cannot be indexed the update does not affect
 // the indices.
 func (i *refindices) Update(rule *Rule, expr *Expr) {
-
-	if expr.Negated {
-		return
-	}
 
 	if len(expr.With) > 0 {
 		// NOTE(tsandall): In the future, we may need to consider expressions
@@ -300,18 +300,36 @@ func (i *refindices) Update(rule *Rule, expr *Expr) {
 		return
 	}
 
-	op := expr.Operator()
+	if expr.Negated {
+		// NOTE(sr): We could try to cover simple expressions, like
+		// not input.funky => input.funky == false or undefined (two refindex?)
+		return
+	}
 
+	op := expr.Operator()
+	if op == nil {
+		if ts, ok := expr.Terms.(*Term); ok {
+			// NOTE(sr): If we wanted to cover function args, we'd need to also
+			// check for type "Var" here. But since it's impossible to call a
+			// function with a undefined argument, there's no point to recording
+			// "needs to be anything" for function args
+			if ref, ok := ts.Value.(Ref); ok { // "naked ref"
+				i.updateEq(rule, ref, anyValue)
+			}
+		}
+	}
+
+	a, b := expr.Operand(0), expr.Operand(1)
 	switch {
 	case op.Equal(equalityRef):
-		i.updateEq(rule, expr)
+		i.updateEq(rule, a.Value, b.Value)
 
 	case op.Equal(equalRef) && len(expr.Operands()) == 2:
 		// NOTE(tsandall): if equal() is called with more than two arguments the
 		// output value is being captured in which case the indexer cannot
 		// exclude the rule if the equal() call would return false (because the
 		// false value must still be produced.)
-		i.updateEq(rule, expr)
+		i.updateEq(rule, a.Value, b.Value)
 
 	case op.Equal(globMatchRef) && len(expr.Operands()) == 3:
 		// NOTE(sr): Same as with equal() above -- 4 operands means the output
@@ -366,8 +384,7 @@ func (i *refindices) Mapper(rule *Rule, ref Ref) *valueMapper {
 	return nil
 }
 
-func (i *refindices) updateEq(rule *Rule, expr *Expr) {
-	a, b := expr.Operand(0), expr.Operand(1)
+func (i *refindices) updateEq(rule *Rule, a, b Value) {
 	args := rule.Head.Args
 	if idx, ok := eqOperandsToRefAndValue(i.isVirtual, args, a, b); ok {
 		i.insert(rule, idx)
@@ -395,7 +412,7 @@ func (i *refindices) updateGlobMatch(rule *Rule, expr *Expr) {
 		if _, ok := match.Value.(Var); ok {
 			var ref Ref
 			for _, other := range i.rules[rule] {
-				if _, ok := other.Value.(Var); ok && other.Value.Compare(match.Value) == 0 {
+				if ov, ok := other.Value.(Var); ok && ov.Equal(match.Value) {
 					ref = other.Ref
 				}
 			}
@@ -426,12 +443,7 @@ func (i *refindices) updateGlobMatch(rule *Rule, expr *Expr) {
 }
 
 func (i *refindices) insert(rule *Rule, index *refindex) {
-
-	count, ok := i.frequency.Get(index.Ref)
-	if !ok {
-		count = 0
-	}
-
+	count, _ := i.frequency.Get(index.Ref)
 	i.frequency.Put(index.Ref, count+1)
 
 	for pos, other := range i.rules[rule] {
@@ -454,7 +466,7 @@ func (i *refindices) index(rule *Rule, ref Ref) *refindex {
 }
 
 type trieWalker interface {
-	Do(x any) trieWalker
+	Do(any) trieWalker
 }
 
 type trieTraversalResult struct {
@@ -574,28 +586,24 @@ func newTrieNodeImpl() *trieNode {
 }
 
 func (node *trieNode) Do(walker trieWalker) {
+	if node == nil {
+		return
+	}
 	next := walker.Do(node)
 	if next == nil {
 		return
 	}
-	if node.any != nil {
-		node.any.Do(next)
-	}
-	if node.undefined != nil {
-		node.undefined.Do(next)
-	}
+
+	node.any.Do(next)
+	node.undefined.Do(next)
 
 	node.scalars.Iter(func(_ Value, child *trieNode) bool {
 		child.Do(next)
 		return false
 	})
 
-	if node.array != nil {
-		node.array.Do(next)
-	}
-	if node.next != nil {
-		node.next.Do(next)
-	}
+	node.array.Do(next)
+	node.next.Do(next)
 }
 
 func (node *trieNode) Insert(ref Ref, value Value, mapper *valueMapper) *trieNode {
@@ -687,7 +695,6 @@ func (node *trieNode) insertArray(arr *Array) *trieNode {
 }
 
 func (node *trieNode) traverse(resolver ValueResolver, tr *trieTraversalResult) error {
-
 	if node == nil {
 		return nil
 	}
@@ -700,31 +707,31 @@ func (node *trieNode) traverse(resolver ValueResolver, tr *trieTraversalResult) 
 		return err
 	}
 
-	if node.undefined != nil {
-		err = node.undefined.Traverse(resolver, tr)
-		if err != nil {
-			return err
-		}
+	err = node.undefined.Traverse(resolver, tr)
+	if err != nil {
+		return err
 	}
 
 	if v == nil {
 		return nil
 	}
 
-	if node.any != nil {
-		err = node.any.Traverse(resolver, tr)
-		if err != nil {
-			return err
-		}
+	err = node.any.Traverse(resolver, tr)
+	if err != nil {
+		return err
 	}
 
-	if err := node.traverseValue(resolver, tr, v); err != nil {
+	err = node.traverseValue(resolver, tr, v)
+	if err != nil {
 		return err
 	}
 
 	for i := range node.mappers {
-		if err := node.traverseValue(resolver, tr, node.mappers[i].MapValue(v)); err != nil {
-			return err
+		mapped := node.mappers[i].MapValue(v)
+		if !ValueEqual(mapped, v) {
+			if err := node.traverseValue(resolver, tr, mapped); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -735,9 +742,6 @@ func (node *trieNode) traverseValue(resolver ValueResolver, tr *trieTraversalRes
 
 	switch value := value.(type) {
 	case *Array:
-		if node.array == nil {
-			return nil
-		}
 		return node.array.traverseArray(resolver, tr, value)
 
 	case Null, Boolean, Number, String:
@@ -752,16 +756,17 @@ func (node *trieNode) traverseValue(resolver ValueResolver, tr *trieTraversalRes
 }
 
 func (node *trieNode) traverseArray(resolver ValueResolver, tr *trieTraversalResult, arr *Array) error {
+	if node == nil {
+		return nil
+	}
 
 	if arr.Len() == 0 {
 		return node.Traverse(resolver, tr)
 	}
 
-	if node.any != nil {
-		err := node.any.traverseArray(resolver, tr, arr.Slice(1, -1))
-		if err != nil {
-			return err
-		}
+	err := node.any.traverseArray(resolver, tr, arr.Slice(1, -1))
+	if err != nil {
+		return err
 	}
 
 	head := arr.Elem(0).Value
@@ -772,10 +777,7 @@ func (node *trieNode) traverseArray(resolver ValueResolver, tr *trieTraversalRes
 
 	switch head := head.(type) {
 	case Null, Boolean, Number, String:
-		child, ok := node.scalars.Get(head)
-		if !ok {
-			return nil
-		}
+		child, _ := node.scalars.Get(head)
 		return child.traverseArray(resolver, tr, arr.Slice(1, -1))
 	}
 
@@ -783,7 +785,6 @@ func (node *trieNode) traverseArray(resolver ValueResolver, tr *trieTraversalRes
 }
 
 func (node *trieNode) traverseUnknown(resolver ValueResolver, tr *trieTraversalResult) error {
-
 	if node == nil {
 		return nil
 	}
@@ -816,11 +817,11 @@ func (node *trieNode) traverseUnknown(resolver ValueResolver, tr *trieTraversalR
 // for the argument number. So for `f(x, y) { x = 10; y = 12 }`, we'll
 // bind `args[0]` and `args[1]` to this rule when called for (x=10) and
 // (y=12) respectively.
-func eqOperandsToRefAndValue(isVirtual func(Ref) bool, args []*Term, a, b *Term) (*refindex, bool) {
-	switch v := a.Value.(type) {
+func eqOperandsToRefAndValue(isVirtual func(Ref) bool, args []*Term, a, b Value) (*refindex, bool) {
+	switch v := a.(type) {
 	case Var:
 		for i, arg := range args {
-			if arg.Value.Compare(a.Value) == 0 {
+			if arg.Value.Compare(a) == 0 {
 				if bval, ok := indexValue(b); ok {
 					return &refindex{Ref: Ref{FunctionArgRootDocument, InternedTerm(i)}, Value: bval}, true
 				}
@@ -843,8 +844,8 @@ func eqOperandsToRefAndValue(isVirtual func(Ref) bool, args []*Term, a, b *Term)
 	return nil, false
 }
 
-func indexValue(b *Term) (Value, bool) {
-	switch b := b.Value.(type) {
+func indexValue(b Value) (Value, bool) {
+	switch b := b.(type) {
 	case Null, Boolean, Number, String, Var:
 		return b, true
 	case *Array:
@@ -872,7 +873,6 @@ func indexValue(b *Term) (Value, bool) {
 }
 
 func globDelimiterToString(delim *Term) (string, bool) {
-
 	arr, ok := delim.Value.(*Array)
 	if !ok {
 		return "", false
@@ -883,14 +883,16 @@ func globDelimiterToString(delim *Term) (string, bool) {
 	if arr.Len() == 0 {
 		result = "."
 	} else {
+		sb := strings.Builder{}
 		for i := range arr.Len() {
 			term := arr.Elem(i)
 			s, ok := term.Value.(String)
 			if !ok {
 				return "", false
 			}
-			result += string(s)
+			sb.WriteString(string(s))
 		}
+		result = sb.String()
 	}
 
 	return result, true
