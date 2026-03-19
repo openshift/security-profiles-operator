@@ -850,8 +850,8 @@ github.com/hashicorp/go-retryablehttp
 github.com/hashicorp/golang-lru/v2
 github.com/hashicorp/golang-lru/v2/internal
 github.com/hashicorp/golang-lru/v2/simplelru
-# github.com/in-toto/attestation v1.1.2
-## explicit; go 1.22
+# github.com/in-toto/attestation v1.2.0
+## explicit; go 1.23
 github.com/in-toto/attestation/go/v1
 # github.com/in-toto/in-toto-golang v0.9.0
 ## explicit; go 1.20
@@ -1383,7 +1383,7 @@ github.com/spiffe/go-spiffe/v2/workloadapi
 # github.com/stoewer/go-strcase v1.3.0
 ## explicit; go 1.11
 github.com/stoewer/go-strcase
-# github.com/stretchr/testify v1.10.0
+# github.com/stretchr/testify v1.11.1
 ## explicit; go 1.17
 github.com/stretchr/testify/assert
 github.com/stretchr/testify/assert/yaml
@@ -1957,8 +1957,8 @@ google.golang.org/grpc/xds/internal/xdsclient/xdsresource/version
 # google.golang.org/grpc/cmd/protoc-gen-go-grpc v1.5.1
 ## explicit; go 1.21
 google.golang.org/grpc/cmd/protoc-gen-go-grpc
-# google.golang.org/protobuf v1.36.7
-## explicit; go 1.22
+# google.golang.org/protobuf v1.36.11
+## explicit; go 1.23
 google.golang.org/protobuf/cmd/protoc-gen-go
 google.golang.org/protobuf/cmd/protoc-gen-go/internal_gengo
 google.golang.org/protobuf/compiler/protogen
