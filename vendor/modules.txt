@@ -466,7 +466,7 @@ github.com/cncf/xds/go/xds/data/orca/v3
 github.com/cncf/xds/go/xds/service/orca/v3
 github.com/cncf/xds/go/xds/type/matcher/v3
 github.com/cncf/xds/go/xds/type/v3
-# github.com/cockroachdb/apd/v3 v3.2.1
+# github.com/cockroachdb/apd/v3 v3.2.3
 ## explicit; go 1.17
 github.com/cockroachdb/apd/v3
 # github.com/common-nighthawk/go-figure v0.0.0-20210622060536-734e95fb86be
