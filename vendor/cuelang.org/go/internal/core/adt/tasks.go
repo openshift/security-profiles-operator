@@ -16,6 +16,7 @@ package adt
 
 import (
 	"fmt"
+	"slices"
 
 	"cuelang.org/go/cue/ast"
 	"cuelang.org/go/cue/token"
@@ -52,24 +53,22 @@ func init() {
 	handlePatternConstraint = &runner{
 		name:      "PatternConstraint",
 		f:         processPatternConstraint,
-		completes: allTasksCompleted | fieldConjunctsKnown,
+		completes: fieldConjunct,
 	}
 	handleComprehension = &runner{
 		name:      "Comprehension",
 		f:         processComprehension,
-		completes: valueKnown | allTasksCompleted | fieldConjunctsKnown,
+		completes: fieldConjunct,
 	}
 	handleListLit = &runner{
 		name:      "ListLit",
 		f:         processListLit,
 		completes: fieldConjunct,
-		needs:     listTypeKnown,
 	}
 	handleListVertex = &runner{
 		name:      "ListVertex",
 		f:         processListVertex,
 		completes: fieldConjunct,
-		needs:     listTypeKnown,
 	}
 	handleDisjunctions = &runner{
 		name:      "Disjunctions",
@@ -84,7 +83,10 @@ func init() {
 func processExpr(ctx *OpContext, t *task, mode runMode) {
 	x := t.x.(Expr)
 
-	state := combineMode(concreteKnown, mode)
+	state := Flags{
+		condition: concreteKnown,
+		mode:      mode,
+	}
 	v, ci := ctx.evalStateCI(x, state)
 	if ci.CycleType == IsCyclic && t.node.node.IsPatternConstraint {
 		// This is an optional cycle that we will ignore.
@@ -101,23 +103,47 @@ func processResolver(ctx *OpContext, t *task, mode runMode) {
 	// be conclusive, we could avoid triggering evaluating disjunctions. This
 	// would be a pretty significant rework, though.
 
-	arc := r.resolve(ctx, oldOnly(0))
+	// Resolving may recursively run tasks on other nodes, including nested
+	// processResolver calls; save and restore the flag so that they do not
+	// clobber ours.
+	savedPendingParent := ctx.lookupPendingParent
+	ctx.lookupPendingParent = false
+	arc := r.resolve(ctx, Flags{
+		condition: fieldSetKnown,
+		mode:      mode,
+	})
+	pendingParent := ctx.lookupPendingParent
+	ctx.lookupPendingParent = savedPendingParent
 	// TODO: ensure that resolve always returns one of these two.
 	if arc == nil || arc == emptyNode {
 		// TODO: yield instead?
+		if arc == nil && mode == attemptOnly && !ctx.HasErr() &&
+			pendingParent {
+			// A parent task, such as a comprehension this task ran ahead
+			// of, may still produce the field. Retry later rather than
+			// silently dropping this conjunct.
+			t.retry = true
+		}
 		return
 	}
+	ci := ctx.ci
+	if arc.OpenedShared || t.id.Opened {
+		ci.Opened = true
+	}
+	if t.id.ConjunctOpened {
+		ci.ConjunctOpened = true
+	}
+
 	arc = arc.DerefNonDisjunct()
 
-	ctx.Logf(t.node.node, "RESOLVED %v to %v %v", r, arc.Label, fmt.Sprintf("%p", arc))
-	// TODO: consider moving after markCycle or removing.
+	if ctx.LogEval > 0 {
+		ctx.Logf(t.node.node, "RESOLVED %v to %v %v", r, arc.Label, fmt.Sprintf("%p", arc))
+	}
 	d := arc.DerefDisjunct()
-
-	ci := t.updateCI(ctx.ci)
 
 	// A reference that points to itself indicates equality. In that case
 	// we are done computing and we can return the arc as is.
-	ci, skip := t.node.detectCycleV3(d, t.env, r, ci)
+	ci, skip := t.node.detectCycle(d, t.env, r, ci)
 	if skip {
 		// Either we have a structure cycle or we are unifying with another
 		// conjunct. In either case, we are no longer structure sharing here.
@@ -145,8 +171,28 @@ func processDynamic(ctx *OpContext, t *task, mode runMode) {
 
 	field := t.x.(*DynamicField)
 
-	v := ctx.scalarValue(t, field.Key)
+	v := ctx.value(field.Key, Flags{
+		condition: scalarValue,
+		mode:      mode,
+	})
 	if v == nil {
+		return
+	}
+
+	// A key that resolves to a vertex that is still being evaluated has no
+	// settled value yet: an embedded scalar may still change its kind.
+	// Report an incomplete error rather than failing on the partial value.
+	//
+	// This check does not hold for ctx.value callers in general: most
+	// tolerate a partial value or report their own incomplete errors, and
+	// only this caller makes a permanent decision based on the value's kind.
+	if vx, ok := v.(*Vertex); ok && vx.Status() == evaluating {
+		n.addBottom(&Bottom{
+			Code: IncompleteError,
+			Node: n.node,
+			Err: ctx.NewPosf(Pos(field.Key),
+				"key value of dynamic field not yet known"),
+		})
 		return
 	}
 
@@ -154,7 +200,7 @@ func processDynamic(ctx *OpContext, t *task, mode runMode) {
 		n.addBottom(&Bottom{
 			Code: IncompleteError,
 			Node: n.node,
-			Err: ctx.NewPosf(pos(field.Key),
+			Err: ctx.NewPosf(Pos(field.Key),
 				"key value of dynamic field must be concrete, found %v", v),
 		})
 		return
@@ -163,7 +209,7 @@ func processDynamic(ctx *OpContext, t *task, mode runMode) {
 	f := ctx.Label(field.Key, v)
 	// TODO: remove this restriction.
 	if f.IsInt() {
-		n.addErr(ctx.NewPosf(pos(field.Key), "integer fields not supported"))
+		n.addErr(ctx.NewPosf(Pos(field.Key), "integer fields not supported"))
 		return
 	}
 
@@ -171,9 +217,20 @@ func processDynamic(ctx *OpContext, t *task, mode runMode) {
 	// unevaluated.
 	ci := t.id
 
-	c := MakeConjunct(t.env, field, ci)
-	// TODO(evalv3): this does not seem to be necessary and even treacherous.
-	c.CloseInfo.cc = nil
+	// TODO: consider using a different mechanism where we do not have to
+	// copy the environment every time. If we do not have an alternative,
+	// we could use the same technique in pattern constraints to at least
+	// not have to copy it in most cases.
+	env := t.env
+	if x := field.Src; x != nil && x.Alias != nil && x.Alias.Label != nil {
+		e := *(t.env)
+		if f.Index() < MaxIndex {
+			e.DynamicLabel = f
+		}
+		env = &e
+	}
+
+	c := MakeConjunct(env, field, ci)
 	n.insertArc(f, field.ArcType, c, ci, true)
 }
 
@@ -184,7 +241,10 @@ func processPatternConstraint(ctx *OpContext, t *task, mode runMode) {
 
 	// Note that the result may be a disjunction. Be sure to not take the
 	// default value as we want to retain the options of the disjunction.
-	v := ctx.evalState(field.Filter, require(0, scalarKnown))
+	v := ctx.evalState(field.Filter, Flags{
+		condition: scalarValue,
+		mode:      yield,
+	})
 	if v == nil {
 		return
 	}
@@ -199,17 +259,16 @@ func processPatternConstraint(ctx *OpContext, t *task, mode runMode) {
 func processComprehension(ctx *OpContext, t *task, mode runMode) {
 	n := t.node
 
+	c := t.x.(*Comprehension)
+
 	y := &envYield{
-		envComprehension: t.comp,
-		leaf:             t.leaf,
-		env:              t.env,
-		id:               t.id,
-		expr:             t.x,
+		comp: c,
+		env:  t.env,
+		id:   t.id,
 	}
 
 	err := n.processComprehension(y, 0)
 	t.err = CombineErrors(nil, t.err, err)
-	t.comp.vertex.state.addBottom(err)
 }
 
 func processDisjunctions(c *OpContext, t *task, mode runMode) {
@@ -218,32 +277,34 @@ func processDisjunctions(c *OpContext, t *task, mode runMode) {
 	t.err = CombineErrors(nil, t.err, err)
 }
 
-func processFinalizeDisjunctions(c *OpContext, t *task, mode runMode) {
-	n := t.node
-	n.finalizeDisjunctions()
-}
-
 func processListLit(c *OpContext, t *task, mode runMode) {
 	n := t.node
 
 	l := t.x.(*ListLit)
 
-	n.updateCyclicStatusV3(t.id)
+	n.updateCyclicStatus(t.id)
 
 	var ellipsis Node
 
+	id := c.subField(t.id)
+
 	index := int64(0)
 	hasComprehension := false
+
+	// List literals with static elements are common;
+	// grow the capacity ahead of time to make space for their arcs.
+	n.node.Arcs = slices.Grow(n.node.Arcs, len(l.Elems))
+
 	for j, elem := range l.Elems {
 		// TODO: Terminate early in case of runaway comprehension.
 
 		switch x := elem.(type) {
 		case *Comprehension:
-			err := c.yield(nil, t.env, x, 0, func(e *Environment) {
+			indexBefore := index
+			err := c.yield(nil, t.env, x, Flags{status: partial, mode: mode}, func(e *Environment) {
 				label, err := MakeLabel(x.Source(), index, IntLabel)
 				n.addErr(err)
 				index++
-				id := t.id
 				// id.setOptional(t.node)
 				c := MakeConjunct(e, x.Value, id)
 				n.insertArc(label, ArcMember, c, id, true)
@@ -252,6 +313,15 @@ func processListLit(c *OpContext, t *task, mode runMode) {
 			if err != nil {
 				n.addBottom(err)
 				return
+			}
+			// If comprehension yielded zero values and has an else clause,
+			// insert the else clause's struct contents as list elements.
+			if index == indexBefore && x.Fallback != nil {
+				label, err := MakeLabel(x.Source(), index, IntLabel)
+				n.addErr(err)
+				index++
+				conj := MakeConjunct(t.env, x.Fallback, id)
+				n.insertArc(label, ArcMember, conj, id, true)
 			}
 
 		case *Ellipsis:
@@ -268,8 +338,8 @@ func processListLit(c *OpContext, t *task, mode runMode) {
 				elem = &Top{}
 			}
 
-			id := t.id
-			id.setOptionalV3(t.node)
+			id := id
+			id.setOptional(t.node)
 
 			c := MakeConjunct(t.env, elem, id)
 			pat := &BoundValue{
@@ -283,13 +353,8 @@ func processListLit(c *OpContext, t *task, mode runMode) {
 			label, err := MakeLabel(x.Source(), index, IntLabel)
 			n.addErr(err)
 			index++
-			c := MakeConjunct(t.env, x, t.id)
-			n.insertArc(label, ArcMember, c, t.id, true)
-		}
-
-		if max := n.maxListLen; n.listIsClosed && int(index) > max {
-			n.invalidListLength(max, len(l.Elems), n.maxNode, l)
-			return
+			c := MakeConjunct(t.env, x, id)
+			n.insertArc(label, ArcMember, c, id, true)
 		}
 	}
 
@@ -302,15 +367,27 @@ func processListLit(c *OpContext, t *task, mode runMode) {
 			return
 		}
 
-	case int(index) > max,
-		isClosed && !n.listIsClosed,
+	case int(index) > max:
+		// This list is longer than an earlier one. If that earlier list
+		// was closed, the lengths are incompatible. Note that index
+		// reflects the fully expanded length, including any comprehensions,
+		// so the reported lengths are accurate.
+		if n.listIsClosed {
+			n.invalidListLength(max, int(index), n.maxNode, l)
+			return
+		}
+		n.maxListLen = int(index)
+		n.maxNode = l
+		n.listIsClosed = isClosed
+
+	case isClosed && !n.listIsClosed,
 		(isClosed == n.listIsClosed) && !hasComprehension:
 		n.maxListLen = int(index)
 		n.maxNode = l
 		n.listIsClosed = isClosed
 	}
 
-	n.updateListType(l, t.id, isClosed, ellipsis)
+	n.updateListType(l, id, isClosed, ellipsis)
 }
 
 func processListVertex(c *OpContext, t *task, mode runMode) {
@@ -318,7 +395,7 @@ func processListVertex(c *OpContext, t *task, mode runMode) {
 
 	l := t.x.(*Vertex)
 
-	elems := l.Elems()
+	elems := slices.Collect(l.Elems())
 	isClosed := l.IsClosedList()
 
 	// TODO: Share with code above.
@@ -350,7 +427,6 @@ func processListVertex(c *OpContext, t *task, mode runMode) {
 			continue
 		}
 		for _, c := range a.Conjuncts {
-			c.CloseInfo.cc = t.id.cc
 			n.insertArc(a.Label, ArcMember, c, t.id, true)
 		}
 	}
@@ -360,7 +436,6 @@ func processListVertex(c *OpContext, t *task, mode runMode) {
 
 func (n *nodeContext) updateListType(list Expr, id CloseInfo, isClosed bool, ellipsis Node) {
 	if n.kind == 0 {
-		n.node.updateStatus(finalized) // TODO(neweval): remove once transitioned.
 		return
 	}
 	m, ok := n.node.BaseValue.(*ListMarker)

@@ -31,13 +31,12 @@ func (v *visitor) dynamic(n *adt.Vertex, top bool) {
 	found := false
 	// TODO: Consider if we should only visit the conjuncts of the disjunction
 	// for dynamic mode.
-	n.VisitLeafConjuncts(func(c adt.Conjunct) bool {
+	for c := range n.LeafConjuncts() {
 		if v.marked[c.Expr()] {
 			found = true
-			return false
+			break
 		}
-		return true
-	})
+	}
 
 	if !found {
 		return
@@ -70,10 +69,9 @@ func (m marked) markExpr(x adt.Expr) {
 
 	case nil:
 	case *adt.Vertex:
-		x.VisitLeafConjuncts(func(c adt.Conjunct) bool {
+		for c := range x.LeafConjuncts() {
 			m.markExpr(c.Expr())
-			return true
-		})
+		}
 
 	case *adt.BinaryExpr:
 		if x.Op == adt.AndOp {
@@ -135,5 +133,28 @@ func (m marked) markExpr(x adt.Expr) {
 }
 
 func (m marked) markComprehension(y *adt.Comprehension) {
+	// Walk the clause expressions: their references are dependencies of the
+	// comprehension. Pre-pushdown the cascading rewrite distributed comp
+	// clauses across individual fields, so the clause exprs were reached via
+	// other paths; without that rewrite the comp keeps its clauses and we
+	// must walk them here.
+	for _, y := range y.Clauses {
+		switch x := y.(type) {
+		case *adt.ForClause:
+			m.markExpr(x.Src)
+		case *adt.LetClause:
+			m.markExpr(x.Expr)
+		case *adt.IfClause:
+			m.markExpr(x.Condition)
+		case *adt.TryClause:
+			if x.Expr != nil {
+				m.markExpr(x.Expr)
+			}
+		}
+	}
+
 	m.markExpr(adt.ToExpr(y.Value))
+	if y.Fallback != nil {
+		m.markExpr(y.Fallback)
+	}
 }

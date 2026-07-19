@@ -8,16 +8,13 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
-	"time"
-
-	"golang.org/x/mod/module"
 )
 
 // LanguageVersion returns the CUE language version.
 // This determines the latest version of CUE that
 // is accepted by the module.
 func LanguageVersion() string {
-	return "v0.12.0"
+	return "v0.17.1"
 }
 
 // ModuleVersion returns the version of the cuelang.org/go module as best as can
@@ -43,32 +40,7 @@ var moduleVersionOnce = sync.OnceValue(func() string {
 		// module name; it also happens when running the cue tests.
 		return "(no-cue-module)"
 	}
-	version := cueMod.Version
-	if version != "(devel)" {
-		return version
-	}
-	// A specific version was not provided by the buildInfo
-	// so attempt to make our own.
-	var vcsTime time.Time
-	var vcsRevision string
-	for _, s := range bi.Settings {
-		switch s.Key {
-		case "vcs.time":
-			// If the format is invalid, we'll print a zero timestamp.
-			vcsTime, _ = time.Parse(time.RFC3339Nano, s.Value)
-		case "vcs.revision":
-			vcsRevision = s.Value
-			// module.PseudoVersion recommends the revision to be a 12-byte
-			// commit hash prefix, which is what cmd/go uses as well.
-			if len(vcsRevision) > 12 {
-				vcsRevision = vcsRevision[:12]
-			}
-		}
-	}
-	if vcsRevision != "" {
-		version = module.PseudoVersion("", "", vcsTime, vcsRevision)
-	}
-	return version
+	return cueMod.Version
 })
 
 func findCUEModule(bi *debug.BuildInfo) *debug.Module {
@@ -92,7 +64,7 @@ func findCUEModule(bi *debug.BuildInfo) *debug.Module {
 //
 // Example:
 //
-//	Cue/v0.8.0 (cuelang.org/go; vxXXX) Go/go1.22.0 (linux/amd64)
+//	Cue/v0.16.0 (cuelang.org/go; lang v0.16.0) Go/go1.26.0 (linux/amd64)
 func UserAgent(clientType string) string {
 	if clientType == "" {
 		clientType = "cuelang.org/go"

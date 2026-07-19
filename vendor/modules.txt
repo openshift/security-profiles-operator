@@ -65,15 +65,15 @@ cloud.google.com/go/storage/experimental
 cloud.google.com/go/storage/internal
 cloud.google.com/go/storage/internal/apiv2
 cloud.google.com/go/storage/internal/apiv2/storagepb
-# cuelabs.dev/go/oci/ociregistry v0.0.0-20241125120445-2c00c104c6e1
-## explicit; go 1.22
+# cuelabs.dev/go/oci/ociregistry v0.0.0-20260601085548-328ff8e2c943
+## explicit; go 1.24.0
 cuelabs.dev/go/oci/ociregistry
 cuelabs.dev/go/oci/ociregistry/internal/ocirequest
 cuelabs.dev/go/oci/ociregistry/ociauth
 cuelabs.dev/go/oci/ociregistry/ociclient
 cuelabs.dev/go/oci/ociregistry/ociref
-# cuelang.org/go v0.12.1
-## explicit; go 1.22.0
+# cuelang.org/go v0.17.1
+## explicit; go 1.25.0
 cuelang.org/go/cue
 cuelang.org/go/cue/ast
 cuelang.org/go/cue/ast/astutil
@@ -81,6 +81,7 @@ cuelang.org/go/cue/build
 cuelang.org/go/cue/cuecontext
 cuelang.org/go/cue/errors
 cuelang.org/go/cue/format
+cuelang.org/go/cue/inject/embed
 cuelang.org/go/cue/literal
 cuelang.org/go/cue/load
 cuelang.org/go/cue/parser
@@ -95,8 +96,11 @@ cuelang.org/go/encoding/protobuf/jsonpb
 cuelang.org/go/encoding/protobuf/pbinternal
 cuelang.org/go/encoding/protobuf/textproto
 cuelang.org/go/encoding/toml
+cuelang.org/go/encoding/xml/koala
 cuelang.org/go/encoding/yaml
 cuelang.org/go/internal
+cuelang.org/go/internal/anyhash
+cuelang.org/go/internal/anyunique
 cuelang.org/go/internal/astinternal
 cuelang.org/go/internal/buildattr
 cuelang.org/go/internal/cli
@@ -107,10 +111,11 @@ cuelang.org/go/internal/core/debug
 cuelang.org/go/internal/core/dep
 cuelang.org/go/internal/core/eval
 cuelang.org/go/internal/core/export
+cuelang.org/go/internal/core/format
+cuelang.org/go/internal/core/layer
 cuelang.org/go/internal/core/runtime
 cuelang.org/go/internal/core/subsume
 cuelang.org/go/internal/core/toposort
-cuelang.org/go/internal/core/validate
 cuelang.org/go/internal/core/walk
 cuelang.org/go/internal/cueconfig
 cuelang.org/go/internal/cuedebug
@@ -122,7 +127,11 @@ cuelang.org/go/internal/encoding/json
 cuelang.org/go/internal/encoding/yaml
 cuelang.org/go/internal/envflag
 cuelang.org/go/internal/filetypes
-cuelang.org/go/internal/golangorgx/tools/robustio
+cuelang.org/go/internal/filetypes/internal
+cuelang.org/go/internal/filetypes/internal/genstruct
+cuelang.org/go/internal/filetypes/internal/opt
+cuelang.org/go/internal/iterutil
+cuelang.org/go/internal/mod/modfiledata
 cuelang.org/go/internal/mod/modimports
 cuelang.org/go/internal/mod/modload
 cuelang.org/go/internal/mod/modpkgload
@@ -132,6 +141,7 @@ cuelang.org/go/internal/mod/mvs
 cuelang.org/go/internal/mod/semver
 cuelang.org/go/internal/par
 cuelang.org/go/internal/pkg
+cuelang.org/go/internal/robustio
 cuelang.org/go/internal/source
 cuelang.org/go/internal/task
 cuelang.org/go/internal/types
@@ -153,6 +163,7 @@ cuelang.org/go/pkg/encoding/base64
 cuelang.org/go/pkg/encoding/csv
 cuelang.org/go/pkg/encoding/hex
 cuelang.org/go/pkg/encoding/json
+cuelang.org/go/pkg/encoding/openapi
 cuelang.org/go/pkg/encoding/toml
 cuelang.org/go/pkg/encoding/yaml
 cuelang.org/go/pkg/html
@@ -175,6 +186,7 @@ cuelang.org/go/pkg/tool/file
 cuelang.org/go/pkg/tool/http
 cuelang.org/go/pkg/tool/os
 cuelang.org/go/pkg/uuid
+cuelang.org/go/tools/flow
 # dario.cat/mergo v1.0.2
 ## explicit; go 1.13
 dario.cat/mergo
@@ -466,7 +478,7 @@ github.com/cncf/xds/go/xds/data/orca/v3
 github.com/cncf/xds/go/xds/service/orca/v3
 github.com/cncf/xds/go/xds/type/matcher/v3
 github.com/cncf/xds/go/xds/type/v3
-# github.com/cockroachdb/apd/v3 v3.2.1
+# github.com/cockroachdb/apd/v3 v3.2.3
 ## explicit; go 1.17
 github.com/cockroachdb/apd/v3
 # github.com/common-nighthawk/go-figure v0.0.0-20210622060536-734e95fb86be
@@ -526,7 +538,7 @@ github.com/dustin/go-humanize
 ## explicit; go 1.13
 github.com/emicklei/go-restful/v3
 github.com/emicklei/go-restful/v3/log
-# github.com/emicklei/proto v1.13.4
+# github.com/emicklei/proto v1.14.3
 ## explicit; go 1.12
 github.com/emicklei/proto
 # github.com/envoyproxy/go-control-plane/envoy v1.32.4
@@ -1104,11 +1116,10 @@ github.com/opentracing/opentracing-go/log
 # github.com/pborman/uuid v1.2.1
 ## explicit
 github.com/pborman/uuid
-# github.com/pelletier/go-toml/v2 v2.2.4
+# github.com/pelletier/go-toml/v2 v2.3.1
 ## explicit; go 1.21.0
 github.com/pelletier/go-toml/v2
 github.com/pelletier/go-toml/v2/internal/characters
-github.com/pelletier/go-toml/v2/internal/danger
 github.com/pelletier/go-toml/v2/internal/tracker
 github.com/pelletier/go-toml/v2/unstable
 # github.com/pjbgf/go-apparmor v0.1.3-0.20241107184909-1375e5e7aa89
@@ -1155,24 +1166,31 @@ github.com/prometheus/common/model
 github.com/prometheus/procfs
 github.com/prometheus/procfs/internal/fs
 github.com/prometheus/procfs/internal/util
-# github.com/protocolbuffers/txtpbfmt v0.0.0-20241112170944-20d2c9ebc01d
-## explicit; go 1.18
+# github.com/protocolbuffers/txtpbfmt v0.0.0-20260420112717-c39628bde8b5
+## explicit; go 1.19
 github.com/protocolbuffers/txtpbfmt/ast
+github.com/protocolbuffers/txtpbfmt/config
+github.com/protocolbuffers/txtpbfmt/descriptor
+github.com/protocolbuffers/txtpbfmt/impl
+github.com/protocolbuffers/txtpbfmt/logger
 github.com/protocolbuffers/txtpbfmt/parser
+github.com/protocolbuffers/txtpbfmt/printer
+github.com/protocolbuffers/txtpbfmt/quote
+github.com/protocolbuffers/txtpbfmt/sort
 github.com/protocolbuffers/txtpbfmt/unquote
+github.com/protocolbuffers/txtpbfmt/wrap
 # github.com/rcrowley/go-metrics v0.0.0-20201227073835-cf1acfcdf475
 ## explicit
 github.com/rcrowley/go-metrics
 # github.com/rivo/uniseg v0.4.7
 ## explicit; go 1.18
 github.com/rivo/uniseg
-# github.com/rogpeppe/go-internal v1.14.1
-## explicit; go 1.23
+# github.com/rogpeppe/go-internal v1.15.0
+## explicit; go 1.25
 github.com/rogpeppe/go-internal/internal/syscall/windows
 github.com/rogpeppe/go-internal/internal/syscall/windows/sysdll
 github.com/rogpeppe/go-internal/lockedfile
 github.com/rogpeppe/go-internal/lockedfile/internal/filelock
-github.com/rogpeppe/go-internal/robustio
 # github.com/russross/blackfriday/v2 v2.1.0
 ## explicit
 github.com/russross/blackfriday/v2
@@ -1351,10 +1369,10 @@ github.com/spf13/afero/mem
 # github.com/spf13/cast v1.7.1
 ## explicit; go 1.19
 github.com/spf13/cast
-# github.com/spf13/cobra v1.9.1
+# github.com/spf13/cobra v1.10.2
 ## explicit; go 1.15
 github.com/spf13/cobra
-# github.com/spf13/pflag v1.0.6
+# github.com/spf13/pflag v1.0.10
 ## explicit; go 1.12
 github.com/spf13/pflag
 # github.com/spf13/viper v1.20.1
@@ -1619,8 +1637,11 @@ go.uber.org/zap/zapcore
 # go.yaml.in/yaml/v2 v2.4.2
 ## explicit; go 1.15
 go.yaml.in/yaml/v2
-# golang.org/x/crypto v0.41.0
-## explicit; go 1.23.0
+# go.yaml.in/yaml/v3 v3.0.4
+## explicit; go 1.16
+go.yaml.in/yaml/v3
+# golang.org/x/crypto v0.53.0
+## explicit; go 1.25.0
 golang.org/x/crypto/blake2b
 golang.org/x/crypto/blowfish
 golang.org/x/crypto/cast5
@@ -1655,14 +1676,14 @@ golang.org/x/crypto/ssh/terminal
 ## explicit; go 1.23.0
 golang.org/x/exp/maps
 golang.org/x/exp/slices
-# golang.org/x/mod v0.27.0
-## explicit; go 1.23.0
+# golang.org/x/mod v0.37.0
+## explicit; go 1.25.0
 golang.org/x/mod/internal/lazyregexp
 golang.org/x/mod/module
 golang.org/x/mod/semver
 golang.org/x/mod/sumdb/note
-# golang.org/x/net v0.43.0
-## explicit; go 1.23.0
+# golang.org/x/net v0.56.0
+## explicit; go 1.25.0
 golang.org/x/net/bpf
 golang.org/x/net/context
 golang.org/x/net/http/httpguts
@@ -1670,13 +1691,14 @@ golang.org/x/net/http2
 golang.org/x/net/http2/hpack
 golang.org/x/net/idna
 golang.org/x/net/internal/httpcommon
+golang.org/x/net/internal/httpsfv
 golang.org/x/net/internal/socks
 golang.org/x/net/internal/timeseries
 golang.org/x/net/proxy
 golang.org/x/net/trace
 golang.org/x/net/websocket
-# golang.org/x/oauth2 v0.30.0
-## explicit; go 1.23.0
+# golang.org/x/oauth2 v0.36.0
+## explicit; go 1.25.0
 golang.org/x/oauth2
 golang.org/x/oauth2/authhandler
 golang.org/x/oauth2/google
@@ -1687,23 +1709,23 @@ golang.org/x/oauth2/google/internal/stsexchange
 golang.org/x/oauth2/internal
 golang.org/x/oauth2/jws
 golang.org/x/oauth2/jwt
-# golang.org/x/sync v0.16.0
-## explicit; go 1.23.0
+# golang.org/x/sync v0.21.0
+## explicit; go 1.25.0
 golang.org/x/sync/errgroup
 golang.org/x/sync/semaphore
 golang.org/x/sync/singleflight
-# golang.org/x/sys v0.35.0
-## explicit; go 1.23.0
+# golang.org/x/sys v0.46.0
+## explicit; go 1.25.0
 golang.org/x/sys/cpu
 golang.org/x/sys/plan9
 golang.org/x/sys/unix
 golang.org/x/sys/windows
 golang.org/x/sys/windows/registry
-# golang.org/x/term v0.34.0
-## explicit; go 1.23.0
+# golang.org/x/term v0.44.0
+## explicit; go 1.25.0
 golang.org/x/term
-# golang.org/x/text v0.28.0
-## explicit; go 1.23.0
+# golang.org/x/text v0.38.0
+## explicit; go 1.25.0
 golang.org/x/text/cases
 golang.org/x/text/encoding
 golang.org/x/text/encoding/internal
@@ -1730,9 +1752,11 @@ golang.org/x/text/unicode/norm
 # golang.org/x/time v0.12.0
 ## explicit; go 1.23.0
 golang.org/x/time/rate
-# golang.org/x/tools v0.35.0
-## explicit; go 1.23.0
+# golang.org/x/tools v0.45.0
+## explicit; go 1.25.0
 golang.org/x/tools/go/ast/astutil
+golang.org/x/tools/go/ast/edge
+golang.org/x/tools/go/ast/inspector
 golang.org/x/tools/go/gcexportdata
 golang.org/x/tools/go/packages
 golang.org/x/tools/go/types/objectpath
@@ -1747,7 +1771,6 @@ golang.org/x/tools/internal/gcimporter
 golang.org/x/tools/internal/gocommand
 golang.org/x/tools/internal/gopathwalk
 golang.org/x/tools/internal/imports
-golang.org/x/tools/internal/modindex
 golang.org/x/tools/internal/packagesinternal
 golang.org/x/tools/internal/pkgbits
 golang.org/x/tools/internal/stdlib

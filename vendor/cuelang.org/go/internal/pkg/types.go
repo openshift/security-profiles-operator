@@ -15,6 +15,8 @@
 package pkg
 
 import (
+	"iter"
+
 	"cuelang.org/go/cue"
 	"cuelang.org/go/internal/core/adt"
 )
@@ -25,13 +27,12 @@ type Schema = cue.Value
 
 // List represents a CUE list, which can be open or closed.
 type List struct {
-	runtime adt.Runtime
-	node    *adt.Vertex
-	isOpen  bool
+	node   *adt.Vertex
+	isOpen bool
 }
 
 // Elems returns the elements of a list.
-func (l *List) Elems() []*adt.Vertex {
+func (l *List) Elems() iter.Seq[*adt.Vertex] {
 	return l.node.Elems()
 }
 
@@ -42,8 +43,7 @@ func (l *List) IsOpen() bool {
 
 // Struct represents a CUE struct, which can be open or closed.
 type Struct struct {
-	runtime adt.Runtime
-	node    *adt.Vertex
+	node *adt.Vertex
 }
 
 // Arcs returns all arcs of s.
@@ -64,17 +64,15 @@ func (s *Struct) Len() int {
 
 // IsOpen reports whether s is open or has pattern constraints.
 func (s *Struct) IsOpen() bool {
-	if !s.node.IsClosedStruct() {
+	if s.node.IsOpenStruct() {
 		return true
 	}
-	// Technically this is not correct, but it is in the context of where
-	// it is used.
+	// Check for pattern constraints which indicate openness.
 	if s.node.PatternConstraints != nil && len(s.node.PatternConstraints.Pairs) > 0 {
 		return true
 	}
-	// The equivalent code for the old implementation.
-	ot := s.node.OptionalTypes()
-	return ot&^adt.HasDynamic != 0
+	// After removing OptionalTypes, we rely on other checks for openness.
+	return false
 }
 
 // NumConstraintFields reports the number of explicit optional and required

@@ -30,20 +30,18 @@ func _() {
 	_ = x[SubtractOp-19]
 	_ = x[MultiplyOp-20]
 	_ = x[FloatQuotientOp-21]
-	_ = x[IntQuotientOp-22]
-	_ = x[IntRemainderOp-23]
-	_ = x[IntDivideOp-24]
-	_ = x[IntModuloOp-25]
-	_ = x[InterpolationOp-26]
+	_ = x[InterpolationOp-22]
+	_ = x[SpreadOp-23]
 }
 
-const _Op_name = "NoOp&|.[][:]()&&||==!!=<<=>>==~!~+-*/quoremdivmod\\()"
+const _Op_name = "NoOp&|.[][:]()&&||==!!=<<=>>==~!~+-*/\\()..."
 
-var _Op_index = [...]uint8{0, 4, 5, 6, 7, 9, 12, 14, 16, 18, 20, 21, 23, 24, 26, 27, 29, 31, 33, 34, 35, 36, 37, 40, 43, 46, 49, 52}
+var _Op_index = [...]uint8{0, 4, 5, 6, 7, 9, 12, 14, 16, 18, 20, 21, 23, 24, 26, 27, 29, 31, 33, 34, 35, 36, 37, 40, 43}
 
 func (i Op) String() string {
-	if i < 0 || i >= Op(len(_Op_index)-1) {
+	idx := int(i) - 0
+	if i < 0 || idx >= len(_Op_index)-1 {
 		return "Op(" + strconv.FormatInt(int64(i), 10) + ")"
 	}
-	return _Op_name[_Op_index[i]:_Op_index[i+1]]
+	return _Op_name[_Op_index[idx]:_Op_index[idx+1]]
 }

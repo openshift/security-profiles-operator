@@ -18,12 +18,15 @@ import (
 	"strings"
 
 	"cuelang.org/go/cue/ast"
+	"cuelang.org/go/cue/build"
 	"cuelang.org/go/cue/errors"
 	"cuelang.org/go/cue/literal"
 	"cuelang.org/go/cue/token"
 	"cuelang.org/go/internal"
 	"cuelang.org/go/internal/astinternal"
 	"cuelang.org/go/internal/core/adt"
+	"cuelang.org/go/internal/cueexperiment"
+	"cuelang.org/go/internal/mod/semver"
 )
 
 // A Scope represents a nested scope of Vertices.
@@ -44,23 +47,28 @@ type Config struct {
 	// Under normal circumstances, identifiers bind to import specifications,
 	// which get resolved to an ImportReference. Use this option to
 	// automatically resolve identifiers to imports.
-	Imports func(x *ast.Ident) (pkgPath string)
+	Imports func(x *ast.Ident) string
 
 	// pkgPath is used to qualify the scope of hidden fields. The default
 	// scope is "_".
 	pkgPath string
 }
 
-// Files compiles the given files as a single instance. It disregards
-// the package names and it is the responsibility of the user to verify that
-// the packages names are consistent. The pkgID must be a unique identifier
-// for a package in a module, for instance as obtained from build.Instance.ID.
+// Files is a convenience method that wraps [Instance].
+func Files(cfg *Config, r adt.Runtime, pkgID string, files ...*ast.File) (*adt.Vertex, errors.Error) {
+	return Instance(cfg, r, &build.Instance{
+		ImportPath: pkgID,
+		Files:      files,
+	})
+}
+
+// Instance compiles the given instance.
 //
 // Files may return a completed parse even if it has errors.
-func Files(cfg *Config, r adt.Runtime, pkgID string, files ...*ast.File) (*adt.Vertex, errors.Error) {
-	c := newCompiler(cfg, pkgID, r)
+func Instance(cfg *Config, r adt.Runtime, inst *build.Instance) (*adt.Vertex, errors.Error) {
+	c := newCompiler(cfg, inst, r)
 
-	v := c.compileFiles(files)
+	v := c.compileFiles(inst.Files) // TODO use inst.BuildFiles?
 
 	if c.errs != nil {
 		return v, c.errs
@@ -72,7 +80,9 @@ func Files(cfg *Config, r adt.Runtime, pkgID string, files ...*ast.File) (*adt.V
 // unique identifier for a package in a module, for instance as obtained from
 // build.Instance.ID.
 func Expr(cfg *Config, r adt.Runtime, pkgPath string, x ast.Expr) (adt.Conjunct, errors.Error) {
-	c := newCompiler(cfg, pkgPath, r)
+	c := newCompiler(cfg, &build.Instance{
+		ImportPath: pkgPath,
+	}, r)
 
 	v := c.compileExpr(x)
 
@@ -82,28 +92,33 @@ func Expr(cfg *Config, r adt.Runtime, pkgPath string, x ast.Expr) (adt.Conjunct,
 	return v, nil
 }
 
-func newCompiler(cfg *Config, pkgPath string, r adt.Runtime) *compiler {
+func newCompiler(cfg *Config, inst *build.Instance, r adt.Runtime) *compiler {
 	c := &compiler{
+		inst:  inst,
 		index: r,
 	}
 	if cfg != nil {
 		c.Config = *cfg
 	}
-	if pkgPath == "" {
-		pkgPath = "_"
-	}
-	c.Config.pkgPath = pkgPath
+	c.Config.pkgPath = inst.ID()
 	return c
 }
 
 type compiler struct {
 	Config
+
+	// inst holds the build instance within which the current
+	// expression is being compiler. This is used to resolve
+	// imports to instances
+	inst *build.Instance
+
 	upCountOffset int32 // 1 for files; 0 for expressions
 
 	index adt.StringIndexer
 
-	stack      []frame
-	inSelector int
+	experiments cueexperiment.File
+
+	stack []frame
 
 	// refersToForVariable tracks whether an expression refers to a key or
 	// value produced by a for comprehension embedded within a struct.
@@ -115,6 +130,11 @@ type compiler struct {
 	// TODO(perf): use this to compute when a field can be structure shared
 	// across different iterations of the same field.
 	refersToForVariable bool
+
+	// inTryContext tracks the nesting depth of try clauses. The ? marker on
+	// references is only valid when inTryContext > 0. In the future, this may
+	// also be set by other contexts like exists() builtins or query contexts.
+	inTryContext int
 
 	fileScope map[adt.Feature]bool
 
@@ -215,7 +235,8 @@ func (c *compiler) lookupAlias(k int, id *ast.Ident) aliasEntry {
 	entry, ok := m[name]
 
 	if !ok {
-		err := c.errf(id, "could not find LetClause associated with identifier %q", name)
+		err := c.errf(id,
+			"could not find let or alias associated with identifier %q", name)
 		return aliasEntry{expr: err}
 	}
 
@@ -278,9 +299,14 @@ func (c *compiler) compileFiles(a []*ast.File) *adt.Vertex { // Or value?
 		if f.PackageName() == "" {
 			continue
 		}
+
 		for _, d := range f.Decls {
 			if f, ok := d.(*ast.Field); ok {
-				if id, ok := f.Label.(*ast.Ident); ok {
+				label := f.Label
+				if a, ok := label.(*ast.Alias); ok {
+					label, _ = a.Expr.(ast.Label)
+				}
+				if id, ok := label.(*ast.Ident); ok {
 					c.fileScope[c.label(id)] = true
 				}
 			}
@@ -302,6 +328,8 @@ func (c *compiler) compileFiles(a []*ast.File) *adt.Vertex { // Or value?
 	}
 
 	for _, file := range a {
+		c.experiments = file.Pos().Experiment()
+
 		c.pushScope(nil, 0, file) // File scope
 		v := &adt.StructLit{Src: file}
 		c.addDecls(v, file.Decls)
@@ -327,6 +355,66 @@ func (c *compiler) compileExpr(x ast.Expr) adt.Conjunct {
 	return adt.MakeRootConjunct(env, expr)
 }
 
+// requireVersion checks if a feature is available in the current language version.
+// Returns an error if the feature requires a newer version, nil otherwise.
+func (c *compiler) requireVersion(n ast.Node, minVersion, feature string) *adt.Bottom {
+	v := c.experiments.LanguageVersion()
+	if v == "" {
+		return nil
+	}
+	if semver.Compare(minVersion, v) > 0 {
+		return c.errf(n, "%s requires language version %s or later; current version is %s", feature, minVersion, v)
+	}
+	return nil
+}
+
+// verifyVersion checks whether n is a Builtin and then checks whether the
+// Added version is compatible with the file version registered in c.
+func (c *compiler) verifyVersion(src ast.Node, n adt.Expr) adt.Expr {
+	var kind, name, added string
+	switch x := n.(type) {
+	default:
+		return n
+
+	case *adt.Builtin:
+		if x.Added == "" {
+			// No version check needed.
+			return n
+		}
+
+		kind = "builtin"
+		name = x.Name
+		added = x.Added
+
+	case *adt.ValueReference:
+		// NOTE: this is always self or __self.
+		kind = "predeclared identifier"
+		name = x.Src.Name
+		// Check if Self experiment is enabled
+		if !c.experiments.AliasV2 {
+			return c.errf(src, "%s %q requires @experiment(aliasv2)", kind, name)
+		}
+		x.Label = adt.MakeStringLabel(c.index, name)
+		return n
+	}
+
+	v := c.experiments.LanguageVersion()
+	if v == "" {
+		// We assume "latest" if the file is not associated with a version.
+		return n
+	}
+
+	if semver.Compare(added, v) <= 0 {
+		// The feature is available in the file version.
+		return n
+	}
+
+	// The feature is not available in the file version.
+	// NonConcrete builtins are not allowed in older versions.
+	return c.errf(src, "%s %q is not available in version %v; "+
+		"it was added in version %q", kind, name, v, added)
+}
+
 // resolve assumes that all existing resolutions are legal. Validation should
 // be done in a separate step if required.
 //
@@ -336,9 +424,17 @@ func (c *compiler) resolve(n *ast.Ident) adt.Expr {
 	// X in import "path/X"
 	// X in import X "path"
 	if imp, ok := n.Node.(*ast.ImportSpec); ok {
+		importPath := c.label(imp.Path)
+		importPathStr := importPath.StringValue(c.index)
+		inst := c.inst.LookupImport(importPathStr)
+		if inst == nil && !isStdlibPackage(importPathStr) {
+			// It's an external package, which should be mentioned in [build.Instance.Imports].
+			c.errf(n, "import %q not found", importPathStr)
+		}
 		return &adt.ImportReference{
 			Src:        n,
 			ImportPath: c.label(imp.Path),
+			Instance:   inst,
 			Label:      c.label(n),
 		}
 	}
@@ -347,6 +443,15 @@ func (c *compiler) resolve(n *ast.Ident) adt.Expr {
 
 	if label == adt.InvalidLabel { // `_`
 		return &adt.Top{Src: n}
+	}
+
+	// Predeclared name references created via [ast.NewPredeclared].
+	if n.IsPredeclared() {
+		p := predeclared(n)
+		if p == nil {
+			return c.errf(n, "predeclared name %q not found", n.Name)
+		}
+		return c.verifyVersion(n, p)
 	}
 
 	// Unresolved field.
@@ -381,6 +486,8 @@ func (c *compiler) resolve(n *ast.Ident) adt.Expr {
 
 		if c.Config.Imports != nil {
 			if pkgPath := c.Config.Imports(n); pkgPath != "" {
+				// Note: Config.Imports is (currently) only used for stdlib
+				// imports, so we can leave the Instance field nil.
 				return &adt.ImportReference{
 					Src:        n,
 					ImportPath: adt.MakeStringLabel(c.index, pkgPath),
@@ -389,8 +496,9 @@ func (c *compiler) resolve(n *ast.Ident) adt.Expr {
 			}
 		}
 
+		// Predeclared name references created without [ast.NewPredeclared].
 		if p := predeclared(n); p != nil {
-			return p
+			return c.verifyVersion(n, p)
 		}
 
 		return c.errf(n, "reference %q not found", n.Name)
@@ -415,9 +523,35 @@ func (c *compiler) resolve(n *ast.Ident) adt.Expr {
 			UpCount: upCount,
 		}
 
-		switch f := n.Node.(type) {
+		switch x := n.Node.(type) {
+		case *ast.Ident:
+			// If the identifier refers to a label alias, we link to that.
+			if f.Alias != nil && f.Alias.Label == x {
+				switch lab := f.Label.(type) {
+				case *ast.Ident:
+					if internal.IsDefOrHidden(lab.Name) {
+						return c.errf(x, "label alias cannot reference definition or hidden field")
+					}
+					return c.expr(ast.NewString(lab.Name))
+				case *ast.BasicLit:
+					return c.expr(lab)
+				}
+			}
 		case *ast.Field:
-			_ = c.lookupAlias(k, f.Label.(*ast.Alias).Ident) // mark as used
+			var ident *ast.Ident
+			if alias, _ := x.Label.(*ast.Alias); alias != nil {
+				if x.Alias != nil {
+					return c.errf(x,
+						"field has both label alias and postfix alias")
+				}
+				ident = alias.Ident
+			} else if x.Alias != nil {
+				ident = x.Alias.Field
+			} else {
+				return c.errf(x, "label reference has no alias")
+			}
+
+			_ = c.lookupAlias(k, ident) // mark as used
 			// The expression of field Label is always done in the same
 			// Environment as pointed to by the UpCount of the DynamicReference
 			// and the evaluation of a DynamicReference assumes this.
@@ -430,11 +564,11 @@ func (c *compiler) resolve(n *ast.Ident) adt.Expr {
 			}
 
 		case *ast.Alias:
-			_ = c.lookupAlias(k, f.Ident) // mark as used
+			_ = c.lookupAlias(k, x.Ident) // mark as used
 			return &adt.ValueReference{
 				Src:     n,
 				UpCount: upCount,
-				Label:   c.label(f.Ident),
+				Label:   c.label(x.Ident),
 			}
 		}
 		return label
@@ -484,26 +618,43 @@ func (c *compiler) resolve(n *ast.Ident) adt.Expr {
 			X:       entry.expr, // TODO: remove usage
 		}
 
-	// TODO: handle new-style aliases
-
+	// Handle new-style postfix aliases: a~X or a~(K,V)
 	case *ast.Field:
-		// X=x: y
-		// X=(x): y
-		// X="\(x)": y
-		a, ok := f.Label.(*ast.Alias)
-		if !ok {
+		var ident *ast.Ident
+		lab := f.Label
+		// Old-style label aliases: X=x: y, X=(x): y, X="\(x)":
+
+		if a, ok := f.Label.(*ast.Alias); ok {
+			ident = a.Ident
+			if f.Alias != nil {
+				return c.errf(f, "field has both label alias and postfix alias")
+			}
+			label, ok := a.Expr.(ast.Label)
+			if !ok {
+				return c.errf(a.Expr, "invalid label expression")
+			}
+			lab = label
+		} else if f.Alias != nil {
+			// Check if this identifier refers to the Field alias or Label alias
+			// The Field alias (X or V) is the value reference
+			// The Label alias (K) in dual form is a string reference
+			if f.Alias.Field == nil {
+				return c.errf(f, "postfix alias must have field component")
+			}
+			ident = f.Alias.Field
+		} else {
 			return c.errf(n, "illegal reference %s", n.Name)
 		}
-		aliasInfo := c.lookupAlias(k, a.Ident) // marks alias as used.
-		lab, ok := a.Expr.(ast.Label)
-		if !ok {
-			return c.errf(a.Expr, "invalid label expression")
-		}
+
+		aliasInfo := c.lookupAlias(k, ident) // marks alias as used.
+
 		name, _, err := ast.LabelName(lab)
 		switch {
 		case errors.Is(err, ast.ErrIsExpression):
 			if aliasInfo.expr == nil {
-				panic("unreachable")
+				// This can happen when we have a cyclic reference like (x)~x: 3
+				// where the label expression references the alias being defined.
+				return c.errf(n, "cyclic reference in field alias")
 			}
 			return &adt.DynamicReference{
 				Src:     n,
@@ -543,6 +694,10 @@ func (c *compiler) addDecls(st *adt.StructLit, a []ast.Decl) {
 	}
 }
 
+func isNonBlank(a *ast.Ident) bool {
+	return a != nil && a.Name != "_"
+}
+
 func (c *compiler) markAlias(d ast.Decl) {
 	switch x := d.(type) {
 	case *ast.Field:
@@ -555,6 +710,15 @@ func (c *compiler) markAlias(d ast.Decl) {
 			e := aliasEntry{source: a}
 
 			c.insertAlias(a.Ident, e)
+		}
+
+		// Register postfix aliases for regular fields (not pattern constraints)
+		// Pattern constraints register aliases in value scope only
+		// Regular field: register in parent scope
+		// Store the Field in the label so we can find it later
+		// Skip _ (blank identifier)
+		if a := x.Alias; a != nil && isNonBlank(a.Field) {
+			c.insertAlias(a.Field, aliasEntry{source: a})
 		}
 
 	case *ast.LetClause:
@@ -586,6 +750,8 @@ func (c *compiler) decl(d ast.Decl) adt.Decl {
 
 		v := x.Value
 		var value adt.Expr
+
+		// Handle value aliases. Deprecated in new aliases.
 		if a, ok := v.(*ast.Alias); ok {
 			c.pushScope(nil, 0, a)
 			c.insertAlias(a.Ident, aliasEntry{source: a})
@@ -603,12 +769,10 @@ func (c *compiler) decl(d ast.Decl) adt.Decl {
 				return c.errf(x, "cannot use _ as label")
 			}
 
-			t, _ := internal.ConstraintToken(x)
-
 			return &adt.Field{
 				Src:     x,
 				Label:   label,
-				ArcType: adt.ConstraintFromToken(t),
+				ArcType: adt.ConstraintFromToken(x.Constraint),
 				Value:   value,
 			}
 
@@ -626,6 +790,12 @@ func (c *compiler) decl(d ast.Decl) adt.Decl {
 				elem = a.Expr
 			}
 
+			// For postfix aliases, use the Field identifier (X or V)
+			// For dual form ~(K,V), we use V as the primary label
+			if a := x.Alias; a != nil && isNonBlank(a.Label) {
+				label = c.label(a.Label)
+			}
+
 			return &adt.BulkOptionalField{
 				Src:    x,
 				Filter: c.expr(elem),
@@ -634,22 +804,18 @@ func (c *compiler) decl(d ast.Decl) adt.Decl {
 			}
 
 		case *ast.ParenExpr:
-			t, _ := internal.ConstraintToken(x)
-
 			return &adt.DynamicField{
 				Src:     x,
 				Key:     c.expr(l),
-				ArcType: adt.ConstraintFromToken(t),
+				ArcType: adt.ConstraintFromToken(x.Constraint),
 				Value:   value,
 			}
 
 		case *ast.Interpolation:
-			t, _ := internal.ConstraintToken(x)
-
 			return &adt.DynamicField{
 				Src:     x,
 				Key:     c.expr(l),
-				ArcType: adt.ConstraintFromToken(t),
+				ArcType: adt.ConstraintFromToken(x.Constraint),
 				Value:   value,
 			}
 		}
@@ -679,8 +845,6 @@ func (c *compiler) decl(d ast.Decl) adt.Decl {
 			Value:   value,
 		}
 
-	// case: *ast.Alias: // TODO(value alias)
-
 	case *ast.CommentGroup:
 		// Nothing to do for a free-floating comment group.
 
@@ -697,10 +861,6 @@ func (c *compiler) decl(d ast.Decl) adt.Decl {
 		return c.comprehension(x, false)
 
 	case *ast.EmbedDecl: // Deprecated
-		for _, c := range ast.Comments(x.Expr) {
-			ast.AddComment(x, c)
-		}
-		ast.SetComments(x.Expr, x.Comments())
 		return c.expr(x.Expr)
 
 	case ast.Expr:
@@ -713,19 +873,31 @@ func (c *compiler) addLetDecl(d ast.Decl) {
 	switch x := d.(type) {
 	case *ast.Field:
 		lab := x.Label
+		var ident *ast.Ident
 		if a, ok := lab.(*ast.Alias); ok {
+			if x.Alias != nil {
+				c.errf(x, "field has both label alias and postfix alias")
+				return
+			}
+
 			if lab, ok = a.Expr.(ast.Label); !ok {
 				// error reported elsewhere
 				return
 			}
+			ident = a.Ident
 
-			switch lab.(type) {
-			case *ast.Ident, *ast.BasicLit, *ast.ListLit:
-				// Even though we won't need the alias, we still register it
-				// for duplicate and failed reference detection.
-			default:
-				c.updateAlias(a.Ident, c.expr(a.Expr))
-			}
+		} else if a := x.Alias; a != nil && isNonBlank(a.Field) {
+			ident = x.Alias.Field
+		} else {
+			break
+		}
+
+		switch lab.(type) {
+		case *ast.Ident, *ast.BasicLit, *ast.ListLit:
+			// Even though we won't need the alias, we still register it
+			// for duplicate and failed reference detection.
+		default:
+			c.updateAlias(ident, c.expr(lab.(ast.Expr)))
 		}
 
 	case *ast.Alias:
@@ -752,6 +924,7 @@ func (c *compiler) elem(n ast.Expr) adt.Elem {
 
 func (c *compiler) comprehension(x *ast.Comprehension, inList bool) adt.Elem {
 	var a []adt.Yielder
+	hasTry := false
 	for _, v := range x.Clauses {
 		switch x := v.(type) {
 		case *ast.ForClause:
@@ -795,11 +968,53 @@ func (c *compiler) comprehension(x *ast.Comprehension, inList bool) adt.Elem {
 			defer c.popScope()
 			f.isComprehensionVar = !inList && refsCompVar
 			a = append(a, y)
+
+		case *ast.TryClause:
+			// Check experiment flag
+			if !c.experiments.Try {
+				return c.errf(x, "try clause requires the try experiment (language version v0.16.0 or later)")
+			}
+			y := &adt.TryClause{Src: x}
+			if x.Ident == nil {
+				// Struct form: try { ... }
+				hasTry = true
+			} else {
+				// Bind form try x = expr
+				savedUses := c.refersToForVariable
+				c.refersToForVariable = false
+
+				// Enable try context for the expression
+				c.inTryContext++
+				expr := c.expr(x.Expr)
+				c.inTryContext--
+
+				refsCompVar := c.refersToForVariable
+				c.refersToForVariable = savedUses || refsCompVar
+
+				y.Label = c.label(x.Ident)
+				y.Expr = expr
+
+				// Push a scope for the identifier binding.
+				f := c.pushScope((*tryScope)(x), 1, v)
+				defer c.popScope()
+				f.isComprehensionVar = !inList && refsCompVar
+			}
+			// Struct form: body is in Comprehension.Value, compiled with try context
+			a = append(a, y)
 		}
 
 		if _, ok := a[0].(*adt.LetClause); ok {
 			return c.errf(x,
 				"first comprehension clause must be 'if' or 'for'")
+		}
+
+		// Check that struct-form try (without assignment) is the last clause.
+		// It gets its body from Comprehension.Value, so it must be last.
+		for i, clause := range a[:len(a)-1] {
+			if tc, ok := clause.(*adt.TryClause); ok && tc.Expr == nil {
+				return c.errf(x.Clauses[i],
+					"struct-form try clause must be the last clause in a comprehension")
+			}
 		}
 	}
 
@@ -809,7 +1024,14 @@ func (c *compiler) comprehension(x *ast.Comprehension, inList bool) adt.Elem {
 			"comprehension value must be struct, found %T", y)
 	}
 
+	// Enable try context for struct form try clause body
+	if hasTry {
+		c.inTryContext++
+	}
 	y := c.expr(x.Value)
+	if hasTry {
+		c.inTryContext--
+	}
 
 	st, ok := y.(*adt.StructLit)
 	if !ok {
@@ -821,11 +1043,50 @@ func (c *compiler) comprehension(x *ast.Comprehension, inList bool) adt.Elem {
 		return c.errf(x, "comprehension value without clauses")
 	}
 
-	return &adt.Comprehension{
+	comp := &adt.Comprehension{
 		Syntax:  x,
 		Clauses: a,
 		Value:   st,
 	}
+
+	// Compile fallback clause in the outer scope (before comprehension variables).
+	// The fallback clause should NOT have access to for/let variables.
+	if x.Fallback != nil {
+		// Both 'else' (with if) and 'fallback' (with for) require the try experiment.
+		if !c.experiments.Try {
+			// Use appropriate keyword in error message based on clause type.
+			keyword := "fallback"
+			if len(x.Clauses) == 1 {
+				switch x.Clauses[0].(type) {
+				case *ast.IfClause, *ast.TryClause:
+					keyword = "else"
+				}
+			}
+			return c.errf(x.Fallback, "%s clause requires the try experiment (language version v0.16.0 or later)", keyword)
+		}
+
+		// Pop all comprehension scopes temporarily to compile fallback in outer scope.
+		// We need to compile the fallback body outside the comprehension's scope chain.
+		savedStack := c.stack
+		// Find the scope depth before the comprehension clauses were pushed.
+		// Each for/let clause pushes one scope.
+		outerDepth := len(savedStack)
+		for _, clause := range x.Clauses {
+			switch clause.(type) {
+			case *ast.ForClause, *ast.LetClause:
+				outerDepth--
+			}
+		}
+		// Temporarily truncate to outer scope depth.
+		c.stack = savedStack[:outerDepth]
+		fallbackBody := c.expr(x.Fallback.Body)
+		c.stack = savedStack // Restore full stack
+		if fallbackSt, ok := fallbackBody.(*adt.StructLit); ok {
+			comp.Fallback = fallbackSt
+		}
+	}
+
+	return comp
 }
 
 func (c *compiler) labeledExpr(f ast.Decl, lab labeler, expr ast.Expr) adt.Expr {
@@ -835,12 +1096,21 @@ func (c *compiler) labeledExpr(f ast.Decl, lab labeler, expr ast.Expr) adt.Expr 
 
 func (c *compiler) labeledExprAt(k int, f ast.Decl, lab labeler, expr ast.Expr) adt.Expr {
 	saved := c.stack[k]
+	savedStack := c.stack
 
 	c.stack[k].label = lab
 	c.stack[k].field = f
 
+	if k < len(c.stack)-1 {
+		// Limit the capacity, so that if there is growth, we don't overwrite
+		// any values we need to restore later. This shouldn't happen too often,
+		// as this will result in a non-reclaimable allocation.
+		c.stack = c.stack[: k+1 : k+1]
+	}
+
 	value := c.expr(expr)
 
+	c.stack = savedStack
 	c.stack[k] = saved
 	return value
 }
@@ -855,9 +1125,9 @@ func (c *compiler) expr(expr ast.Expr) adt.Expr {
 	case *ast.Func:
 		// We don't yet support function types natively in
 		// CUE.  ast.Func exists only to support external
-		// interpreters. Function values (really, adt.Builtin)
+		// injections. Function values (really, adt.Builtin)
 		// are only created by the runtime, or injected by
-		// external interpreters.
+		// external injections.
 		//
 		// TODO: revise this when we add function types.
 		return c.resolve(ast.NewIdent("_"))
@@ -872,7 +1142,7 @@ func (c *compiler) expr(expr ast.Expr) adt.Expr {
 	case *ast.ListLit:
 		c.pushScope(nil, 1, n)
 		v := &adt.ListLit{Src: n}
-		elts, ellipsis := internal.ListEllipsis(n)
+		elts, ellipsis := listEllipsis(n)
 		for _, d := range elts {
 			elem := c.elem(d)
 
@@ -895,13 +1165,16 @@ func (c *compiler) expr(expr ast.Expr) adt.Expr {
 		return v
 
 	case *ast.SelectorExpr:
-		c.inSelector++
-		ret := &adt.SelectorExpr{
+		x := c.expr(n.X)
+		// TODO: check if x is an ImportReference, and if so, check if it a
+		// standard library, look up the builtin, and check its version. The
+		// index of standard libraries is available in c.index, which is really
+		// an adt.Runtime under the hood.
+		return &adt.SelectorExpr{
 			Src: n,
-			X:   c.expr(n.X),
-			Sel: c.label(n.Sel)}
-		c.inSelector--
-		return ret
+			X:   x,
+			Sel: c.label(n.Sel),
+		}
 
 	case *ast.IndexExpr:
 		return &adt.IndexExpr{
@@ -923,7 +1196,7 @@ func (c *compiler) expr(expr ast.Expr) adt.Expr {
 	case *ast.BottomLit:
 		return &adt.Bottom{
 			Src:  n,
-			Code: adt.UserError,
+			Code: adt.LegacyUserError,
 			Err:  errors.Newf(n.Pos(), "explicit error (_|_ literal) in source"),
 		}
 
@@ -934,17 +1207,10 @@ func (c *compiler) expr(expr ast.Expr) adt.Expr {
 		return c.parse(n)
 
 	case *ast.Interpolation:
-		if len(n.Elts) == 0 {
-			return c.errf(n, "invalid interpolation")
-		}
-		first, ok1 := n.Elts[0].(*ast.BasicLit)
-		last, ok2 := n.Elts[len(n.Elts)-1].(*ast.BasicLit)
-		if !ok1 || !ok2 {
-			return c.errf(n, "invalid interpolation")
-		}
 		if len(n.Elts) == 1 {
 			return c.expr(n.Elts[0])
 		}
+		first, last := n.Quotes()
 		lit := &adt.Interpolation{Src: n}
 		info, prefixLen, _, err := literal.ParseQuotes(first.Value, last.Value)
 		if err != nil {
@@ -994,6 +1260,11 @@ func (c *compiler) expr(expr ast.Expr) adt.Expr {
 				Op:  adt.OpFromToken(n.Op),
 				X:   c.expr(n.X),
 			}
+		case token.EQL:
+			if !c.experiments.StructCmp {
+				return c.errf(n, "unsupported unary operator %q", n.Op)
+			}
+			fallthrough
 		case token.GEQ, token.GTR, token.LSS, token.LEQ,
 			token.NEQ, token.MAT, token.NMAT:
 			return &adt.BoundExpr{
@@ -1028,17 +1299,77 @@ func (c *compiler) expr(expr ast.Expr) adt.Expr {
 			return &adt.BinaryExpr{Src: n, Op: op, X: x, Y: y} // )
 		}
 
+	case *ast.PostfixExpr:
+		switch n.Op {
+		case token.ELLIPSIS:
+			if !c.experiments.ExplicitOpen {
+				// TODO: consider not returning.
+				return c.errf(n, "postfix ... operator requires @experiment(explicitopen)")
+			}
+
+			return &adt.OpenExpr{
+				Src: n,
+				X:   c.expr(n.X),
+			}
+
+		case token.OPTION:
+			if !c.experiments.Try {
+				c.errf(n, "optional marker (?) requires the try experiment (language version v0.16.0 or later)")
+			} else if c.inTryContext == 0 {
+				c.errf(n, "optional marker (?) is only valid within a try clause")
+			}
+
+			// Compile the inner expression first, then validate.
+			// This gives better error output by showing the reference.
+			x := c.expr(n.X)
+			switch r := x.(type) {
+			case *adt.FieldReference:
+				r.Optional = true
+				return r
+			case *adt.SelectorExpr:
+				r.Optional = true
+				return r
+			case *adt.IndexExpr:
+				r.Optional = true
+				return r
+			case *adt.Bottom:
+				return r
+			default:
+				// NOTE: as the parser already enforces correct use of ?, this
+				// can only happen if a user builds an incorrect AST
+				// programmatically. We do not generate errors for invalid
+				// references as this just leads to distracting additional error
+				// messages.
+				return c.errf(n, "optional marker (?) can only be used on references")
+			}
+		default:
+			return c.errf(n, "unsupported postfix operator %s", n.Op)
+		}
+
 	default:
 		return c.errf(n, "%s values not allowed in this position", ast.Name(n))
 	}
 }
 
-func (c *compiler) assertConcreteIsPossible(src ast.Node, op adt.Op, x adt.Expr) bool {
+// listEllipsis reports the list type and remaining elements of a list. If we
+// ever relax the usage of ellipsis, this function will likely change. Using
+// this function will ensure keeping correct behavior or causing a compiler failure.
+func listEllipsis(n *ast.ListLit) (elts []ast.Expr, e *ast.Ellipsis) {
+	elts = n.Elts
+	if n := len(elts); n > 0 {
+		var ok bool
+		if e, ok = elts[n-1].(*ast.Ellipsis); ok {
+			elts = elts[:n-1]
+		}
+	}
+	return elts, e
+}
+
+func (c *compiler) assertConcreteIsPossible(src ast.Node, op adt.Op, x adt.Expr) {
 	if !adt.AssertConcreteIsPossible(op, x) {
 		str := astinternal.DebugStr(src)
 		c.errf(src, "invalid operand %s ('%s' requires concrete value)", str, op)
 	}
-	return false
 }
 
 func (c *compiler) addDisjunctionElem(d *adt.DisjunctionExpr, n ast.Expr, mark bool) {
@@ -1111,7 +1442,14 @@ func parseString(c *compiler, node ast.Expr, q literal.QuoteInfo, s string) (n a
 		return c.errf(node, "invalid string: %v", err)
 	}
 	if q.IsDouble() {
-		return &adt.String{Src: node, Str: str, RE: nil}
+		return &adt.String{Src: node, Str: str}
 	}
-	return &adt.Bytes{Src: node, B: []byte(str), RE: nil}
+	return &adt.Bytes{Src: node, B: []byte(str)}
+}
+
+// isStdlibPackage reports whether the given import
+// path looks like an import path in the standard library.
+func isStdlibPackage(pkgPath string) bool {
+	firstElem, _, _ := strings.Cut(pkgPath, "/")
+	return !strings.Contains(firstElem, ".")
 }

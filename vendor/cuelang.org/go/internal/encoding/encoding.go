@@ -37,6 +37,7 @@ import (
 	"cuelang.org/go/encoding/protobuf/jsonpb"
 	"cuelang.org/go/encoding/protobuf/textproto"
 	"cuelang.org/go/encoding/toml"
+	"cuelang.org/go/encoding/xml/koala"
 	"cuelang.org/go/internal"
 	"cuelang.org/go/internal/encoding/yaml"
 	"cuelang.org/go/internal/filetypes"
@@ -57,6 +58,7 @@ type Decoder struct {
 	file           *ast.File
 	filename       string // may change on iteration for some formats
 	index          int
+	size           int // length of the source file if known; -1 otherwise
 	err            error
 }
 
@@ -111,7 +113,13 @@ func (i *Decoder) File() *ast.File {
 	if i.file != nil {
 		return i.file
 	}
-	return internal.ToFile(i.expr)
+	return internal.ToFile(i.expr, false)
+}
+
+// SourceExpr returns the expression decoded from the source, before any
+// interpretation such as JSON Schema is applied.
+func (i *Decoder) SourceExpr() ast.Expr {
+	return i.expr
 }
 
 func (i *Decoder) Err() error {
@@ -138,7 +146,6 @@ type Config struct {
 	PkgName string // package name for files to generate
 
 	Force     bool // overwrite existing files
-	Strict    bool // strict mode for jsonschema (deprecated)
 	Stream    bool // potentially write more than one document per file
 	AllErrors bool
 
@@ -148,17 +155,24 @@ type Config struct {
 	InlineImports bool // expand references to non-core imports
 	ProtoPath     []string
 	Format        []format.Option
-	ParseFile     func(name string, src interface{}) (*ast.File, error)
+	ParserConfig  parser.Config
+	ParseFile     func(name string, src interface{}, cfg parser.Config) (*ast.File, error)
 }
 
 // NewDecoder returns a stream of non-rooted data expressions. The encoding
 // type of f must be a data type, but does not have to be an encoding that
 // can stream. stdin is used in case the file is "-".
 //
-// This may change the contents of f.
+// NewDecoder may set f.Source to the raw bytes it reads, so that callers
+// can recover them without re-reading from disk. f must not be used
+// concurrently with NewDecoder.
 func NewDecoder(ctx *cue.Context, f *build.File, cfg *Config) *Decoder {
 	if cfg == nil {
 		cfg = &Config{}
+	}
+	if !cfg.ParserConfig.IsValid() {
+		// Avoid mutating cfg.
+		cfg.ParserConfig = parser.NewConfig(parser.ParseComments)
 	}
 	i := &Decoder{filename: f.Filename, ctx: ctx, cfg: cfg}
 	i.next = func() (ast.Expr, error) {
@@ -178,14 +192,15 @@ func NewDecoder(ctx *cue.Context, f *build.File, cfg *Config) *Decoder {
 	if f.Source == nil && f.Filename == "-" {
 		// TODO: should we allow this?
 		r = cfg.Stdin
+		i.size = -1
 	} else {
-		rc, err := source.Open(f.Filename, f.Source)
-		i.closer = rc
-		i.err = err
+		r, i.size, i.err = source.Open(f.Filename, f.Source)
+		if c, ok := r.(io.Closer); ok {
+			i.closer = c
+		}
 		if i.err != nil {
 			return i
 		}
-		r = rc
 	}
 
 	switch f.Interpretation {
@@ -232,17 +247,26 @@ func NewDecoder(ctx *cue.Context, f *build.File, cfg *Config) *Decoder {
 	path := f.Filename
 	switch f.Encoding {
 	case build.CUE:
+		b, err := source.ReadAllSize(r, i.size)
+		if err != nil {
+			i.err = err
+			break
+		}
+		// Stash the raw bytes back on the build.File so callers (such as
+		// cue fix or cue trim) can compare a re-formatted file against its
+		// original contents without reading the file from disk again.
+		f.Source = b
 		if cfg.ParseFile == nil {
-			i.file, i.err = parser.ParseFile(path, r, parser.ParseComments)
+			i.file, i.err = parser.ParseFile(path, b, cfg.ParserConfig)
 		} else {
-			i.file, i.err = cfg.ParseFile(path, r)
+			i.file, i.err = cfg.ParseFile(path, b, cfg.ParserConfig)
 		}
 		i.validate(i.file, f)
 		if i.err == nil {
 			i.doInterpret()
 		}
 	case build.JSON:
-		b, err := io.ReadAll(r)
+		b, err := source.ReadAllSize(r, i.size)
 		if err != nil {
 			i.err = err
 			break
@@ -255,19 +279,27 @@ func NewDecoder(ctx *cue.Context, f *build.File, cfg *Config) *Decoder {
 		i.next = json.NewDecoder(nil, path, r).Extract
 		i.Next()
 	case build.YAML:
-		b, err := io.ReadAll(r)
+		b, err := source.ReadAllSize(r, i.size)
 		i.err = err
 		i.next = yaml.NewDecoder(path, b).Decode
 		i.Next()
 	case build.TOML:
 		i.next = toml.NewDecoder(path, r).Decode
 		i.Next()
+	case build.XML:
+		switch {
+		case f.BoolTags["koala"]:
+			i.next = koala.NewDecoder(path, r).Decode
+			i.Next()
+		default:
+			i.err = fmt.Errorf("xml requires a variant, such as: xml+koala")
+		}
 	case build.Text:
-		b, err := io.ReadAll(r)
+		b, err := source.ReadAllSize(r, i.size)
 		i.err = err
 		i.expr = ast.NewString(string(b))
 	case build.Binary:
-		b, err := io.ReadAll(r)
+		b, err := source.ReadAllSize(r, i.size)
 		i.err = err
 		s := literal.Bytes.WithTabIndent(1).Quote(string(b))
 		i.expr = ast.NewLit(token.STRING, s)
@@ -278,7 +310,7 @@ func NewDecoder(ctx *cue.Context, f *build.File, cfg *Config) *Decoder {
 		}
 		i.file, i.err = protobuf.Extract(path, r, paths)
 	case build.TextProto:
-		b, err := io.ReadAll(r)
+		b, err := source.ReadAllSize(r, i.size)
 		i.err = err
 		if err == nil {
 			d := textproto.NewDecoder()
@@ -304,8 +336,9 @@ func jsonSchemaFunc(cfg *Config, f *build.File) interpretFunc {
 			// The strictKeywords and strictFeatures tags are
 			// set by internal/filetypes from the strict tag when appropriate.
 
-			StrictKeywords: cfg.Strict || tags["strictKeywords"],
-			StrictFeatures: cfg.Strict || tags["strictFeatures"],
+			StrictKeywords:       tags["strictKeywords"],
+			StrictFeatures:       tags["strictFeatures"],
+			OpenOnlyWhenExplicit: tags["openOnlyWhenExplicit"],
 		}
 		file, err = jsonschema.Extract(v, cfg)
 		// TODO: simplify currently erases file line info. Reintroduce after fix.
@@ -323,8 +356,8 @@ func openAPIFunc(c *Config, f *build.File) interpretFunc {
 			// Note: don't populate Strict (see more detailed
 			// comment in jsonSchemaFunc)
 
-			StrictKeywords: c.Strict || tags["strictKeywords"],
-			StrictFeatures: c.Strict || tags["strictFeatures"],
+			StrictKeywords: tags["strictKeywords"],
+			StrictFeatures: tags["strictFeatures"],
 		})
 		// TODO: simplify currently erases file line info. Reintroduce after fix.
 		// file, err = simplify(file, err)
@@ -449,7 +482,6 @@ func (v *validator) validate(n ast.Node) bool {
 	case *ast.Field:
 		check(n, i.Definitions, "definitions", internal.IsDefinition(x.Label))
 		check(n, i.Data, "regular fields", internal.IsRegularField(x))
-		check(n, constraints, "optional fields", x.Optional != token.NoPos)
 
 		_, _, err := ast.LabelName(x.Label)
 		check(n, constraints, "optional fields", err != nil)

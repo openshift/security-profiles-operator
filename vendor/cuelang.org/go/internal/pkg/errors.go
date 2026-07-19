@@ -48,7 +48,7 @@ func (c *CallCtxt) errf(underlying error, format string, args ...interface{}) {
 	case error:
 		errs = errors.Promote(x, "")
 	}
-	vErr := c.ctx.NewPosf(c.Pos(), format, args...)
+	vErr := c.ctx.NewPosf(c.ctx.Pos(), format, args...)
 	c.Err = &callError{&adt.Bottom{Code: code, Err: errors.Wrap(vErr, errs)}}
 }
 
@@ -56,15 +56,6 @@ func (c *CallCtxt) errcf(code adt.ErrorCode, format string, args ...interface{})
 	err := c.ctx.NewErrf(format, args...)
 	err.Code = code
 	c.Err = &callError{err}
-}
-
-func wrapCallErr(c *CallCtxt, b *adt.Bottom) *adt.Bottom {
-	var err errors.Error
-	for _, e := range errors.Errors(b.Err) {
-		ne := c.ctx.Newf("error in call to %s", c.builtin.name(c.ctx))
-		err = errors.Append(err, errors.Wrap(ne, e))
-	}
-	return &adt.Bottom{Code: b.Code, Err: err}
 }
 
 func (c *CallCtxt) invalidArgType(arg adt.Value, i int, typ string, err error) {
@@ -80,11 +71,11 @@ func (c *CallCtxt) invalidArgType(arg adt.Value, i int, typ string, err error) {
 	// a reference.
 	if err != nil {
 		c.errf(err,
-			"cannot use %s (type %s) as %s in argument %d to %s",
-			arg, arg.Kind(), typ, i, c.Name())
+			"cannot use %s (type %s) as %s in argument %d",
+			arg, arg.Kind(), typ, i)
 	} else {
 		c.errf(err,
-			"cannot use %s (type %s) as %s in argument %d to %s",
-			arg, arg.Kind(), typ, i, c.Name())
+			"cannot use %s (type %s) as %s in argument %d",
+			arg, arg.Kind(), typ, i)
 	}
 }

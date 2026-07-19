@@ -16,6 +16,7 @@ package format
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"cuelang.org/go/cue/ast"
@@ -35,6 +36,11 @@ func printNode(node interface{}, f *printer) error {
 	case *ast.File:
 		if f.cfg.simplify {
 			ls.markReferences(x)
+		}
+		// Prefer the language version from the AST (set by the parser from the
+		// module file) over any explicit option, which is used as a fallback.
+		if x.LanguageVersion != "" {
+			f.cfg.languageVersion = x.LanguageVersion
 		}
 		s.file(x)
 	case ast.Expr:
@@ -62,10 +68,6 @@ func printNode(node interface{}, f *printer) error {
 
 unsupported:
 	return fmt.Errorf("cue/format: unsupported node type %T", node)
-}
-
-func isRegularField(tok token.Token) bool {
-	return tok == token.ILLEGAL || tok == token.COLON
 }
 
 // Helper functions for common node lists. They may be empty.
@@ -101,6 +103,18 @@ func hasDocComments(d ast.Decl) bool {
 	return false
 }
 
+// hasNoSignificantComments checks if an import spec has no comments that
+// would require formatting with parentheses. Trailing comments (Position > 1)
+// that appear after the import statement don't require parentheses.
+func hasNoSignificantComments(spec *ast.ImportSpec) bool {
+	for _, cg := range ast.Comments(spec) {
+		if cg.Position <= 1 {
+			return false
+		}
+	}
+	return true
+}
+
 func (f *formatter) walkDeclList(list []ast.Decl) {
 	f.before(nil)
 	d := 0
@@ -127,7 +141,7 @@ func (f *formatter) walkDeclList(list []ast.Decl) {
 				}
 			}
 		}
-		if f.printer.cfg.simplify && internal.IsEllipsis(x) {
+		if f.printer.cfg.simplify && isEllipsis(x) {
 			ellipsis = x
 			continue
 		}
@@ -166,6 +180,33 @@ func (f *formatter) walkDeclList(list []ast.Decl) {
 	f.after(nil)
 }
 
+// isEllipsis reports whether the declaration can be represented as an ellipsis.
+func isEllipsis(x ast.Decl) bool {
+	// ...
+	if _, ok := x.(*ast.Ellipsis); ok {
+		return true
+	}
+
+	// [string]: _ or [_]: _
+	f, ok := x.(*ast.Field)
+	if !ok {
+		return false
+	}
+	v, ok := f.Value.(*ast.Ident)
+	if !ok || v.Name != "_" {
+		return false
+	}
+	l, ok := f.Label.(*ast.ListLit)
+	if !ok || len(l.Elts) != 1 {
+		return false
+	}
+	i, ok := l.Elts[0].(*ast.Ident)
+	if !ok {
+		return false
+	}
+	return i.Name == "string" || i.Name == "_"
+}
+
 func (f *formatter) walkSpecList(list []*ast.ImportSpec) {
 	f.before(nil)
 	for _, x := range list {
@@ -190,22 +231,68 @@ func (f *formatter) walkClauseList(list []ast.Clause, ws whiteSpace) {
 	f.after(nil)
 }
 
-func (f *formatter) walkListElems(list []ast.Expr) {
+func fallbackKeyword(n *ast.Comprehension) token.Token {
+	if len(n.Clauses) > 1 {
+		return token.OTHERWISE
+	} else if _, ok := n.Clauses[0].(*ast.ForClause); ok {
+		return token.OTHERWISE
+	}
+	return token.ELSE
+}
+
+// listOmitsCommas reports whether the list source omits commas between
+// elements. It returns true when any inter-element comma is missing, meaning
+// the formatter should use the comma-free style. For single-element lists
+// the trailing comma (before ']') is checked instead.
+//
+// The Scanned bit on lbrack distinguishes scanner-produced lists from
+// programmatically constructed ASTs. For programmatic ASTs (where Scanned
+// is false), this always returns false to keep commas.
+//
+// TODO: consider whether programmatic ASTs should default to comma-free
+// style, which would remove the need for this check.
+func listOmitsCommas(list []ast.Expr, lbrack, rbrack token.Pos) bool {
+	if len(list) == 0 || !lbrack.Scanned() {
+		return false
+	}
+	// Check commas between consecutive elements: element[i].Pos().HasComma()
+	// indicates an explicit comma preceded that token (i.e. after element[i-1]).
+	for i := 1; i < len(list); i++ {
+		if !list[i].Pos().HasComma() {
+			return true
+		}
+	}
+	// For single-element lists there are no inter-element gaps to check,
+	// so use the trailing comma (before ']') to determine style.
+	if len(list) == 1 {
+		return !rbrack.HasComma()
+	}
+	return false
+}
+
+func (f *formatter) walkListElems(list []ast.Expr, lbrack, rbrack token.Pos) {
 	f.before(nil)
-	for _, x := range list {
+	// Use declcomma (same mechanism as struct fields) when commas should be
+	// omitted. This prints ", " only when elements are on the same line.
+	// The separator is placed before the next element so that trailing
+	// comments on the previous element are printed without a comma.
+	//
+	// Commas are omitted when the source is missing a comma between any
+	// two consecutive elements.
+	useNewCommaStyle := listOmitsCommas(list, lbrack, rbrack)
+	for i, x := range list {
+		if i > 0 && useNewCommaStyle {
+			f.print(declcomma)
+		}
 		f.before(x)
 
-		// This is a hack to ensure that comments are printed correctly in lists.
-		// A comment must be printed after each element in a list, but we can't
-		// print a comma at the end of a comment because it will be considered
-		// part of the comment and ignored.
-		// To fix this we collect all comments that appear after the element,
-		// and only handle them after it's formatted.
+		// Collect comments that appear after the element's start position.
+		// These need to be printed after the comma, not before it.
 		var commentsAfter []*ast.CommentGroup
 		splitComments := x.Pos().IsValid()
 		if splitComments {
 			for _, cg := range ast.Comments(x) {
-				if x.Pos().Before(cg.Pos()) {
+				if x.Pos().Compare(cg.Pos()) < 0 {
 					commentsAfter = append(commentsAfter, cg)
 				}
 			}
@@ -219,9 +306,25 @@ func (f *formatter) walkListElems(list []ast.Expr) {
 			f.walkClauseList(n.Clauses, blank)
 			f.print(blank, nooverride)
 			f.expr(n.Value)
+			if n.Fallback != nil {
+				// Use FALLBACK keyword for 'for' comprehensions, ELSE for 'if'/'try'
+				kw := fallbackKeyword(n)
+				f.print(blank, n.Fallback.Fallback, kw, blank)
+				f.expr(n.Fallback.Body)
+			}
 
 		case *ast.Ellipsis:
-			f.ellipsis(n)
+			// For ellipsis, also collect trailing comments from the type
+			// since they're attached to the nested node, not the ellipsis itself.
+			f.print(n.Ellipsis, token.ELLIPSIS)
+			if n.Type != nil && !isTop(n.Type) {
+				for _, cg := range ast.Comments(n.Type) {
+					if n.Type.Pos().Compare(cg.Pos()) < 0 {
+						commentsAfter = append(commentsAfter, cg)
+					}
+				}
+				f.exprRaw(n.Type, token.LowestPrec, 1)
+			}
 
 		case *ast.Alias:
 			f.expr(n.Ident)
@@ -233,8 +336,9 @@ func (f *formatter) walkListElems(list []ast.Expr) {
 		case ast.Expr:
 			f.exprRaw(n, token.LowestPrec, 1)
 		}
-		f.print(comma, blank)
-
+		if !useNewCommaStyle {
+			f.print(comma, blank)
+		}
 		if splitComments {
 			f.current.cg = commentsAfter
 		}
@@ -305,15 +409,34 @@ func (f *formatter) decl(decl ast.Decl) {
 
 	switch n := decl.(type) {
 	case *ast.Field:
-		constraint, _ := internal.ConstraintToken(n)
-		f.label(n.Label, constraint)
+		// Format label without constraint (we'll add constraint after alias)
+		f.label(n.Label, token.ILLEGAL)
 
-		regular := isRegularField(n.Token)
-		if regular {
-			f.print(noblank, nooverride, n.TokenPos, token.COLON)
-		} else {
-			f.print(blank, nooverride, n.Token)
+		// Format postfix alias if present
+		if a := n.Alias; a != nil {
+			f.print(a.Tilde, token.TILDE, noblank)
+			if a.Label != nil {
+				// Dual form: ~(K,V)
+				// Assumes that ILLEGAL tokens are no-ops.
+				f.print(a.Lparen, token.LPAREN, noblank)
+				f.expr(a.Label)
+				f.print(a.Comma, token.COMMA, noblank)
+				f.expr(a.Field)
+				f.print(a.Rparen, token.RPAREN, noblank)
+			} else {
+				// Simple form: always output with parens ~(X)
+				f.print(a.Lparen, token.LPAREN, noblank)
+				f.expr(a.Field)
+				f.print(a.Rparen, token.RPAREN, noblank)
+			}
 		}
+
+		// Format constraint marker (?, !) if present
+		if n.Constraint != token.ILLEGAL {
+			f.print(n.Constraint)
+		}
+
+		f.print(noblank, nooverride, n.TokenPos, token.COLON)
 		f.visitComments(f.current.pos)
 
 		if mem := f.inlineField(n); mem != nil {
@@ -321,7 +444,7 @@ func (f *formatter) decl(decl ast.Decl) {
 			default:
 				fallthrough
 
-			case regular && f.cfg.simplify:
+			case f.cfg.simplify:
 				f.print(blank, nooverride)
 				f.decl(mem)
 
@@ -382,7 +505,7 @@ func (f *formatter) decl(decl ast.Decl) {
 			break
 		}
 		switch {
-		case len(n.Specs) == 1 && len(n.Specs[0].Comments()) == 0:
+		case len(n.Specs) == 1 && hasNoSignificantComments(n.Specs[0]):
 			if !n.Lparen.IsValid() {
 				f.print(blank)
 				f.walkSpecList(n.Specs)
@@ -434,6 +557,12 @@ func (f *formatter) embedding(decl ast.Expr) {
 		f.walkClauseList(n.Clauses, blank)
 		f.print(blank, nooverride)
 		f.expr(n.Value)
+		if n.Fallback != nil {
+			// Use FALLBACK keyword for 'for' comprehensions, ELSE for 'if'/'try'
+			kw := fallbackKeyword(n)
+			f.print(blank, n.Fallback.Fallback, kw, blank)
+			f.expr(n.Fallback.Body)
+		}
 
 	case *ast.Ellipsis:
 		f.ellipsis(n)
@@ -466,6 +595,8 @@ func (f *formatter) nextNeedsFormfeed(n ast.Expr) bool {
 		return f.nextNeedsFormfeed(x.X)
 	case *ast.UnaryExpr:
 		return f.nextNeedsFormfeed(x.X)
+	case *ast.PostfixExpr:
+		return f.nextNeedsFormfeed(x.X)
 	case *ast.BinaryExpr:
 		return f.nextNeedsFormfeed(x.X) || f.nextNeedsFormfeed(x.Y)
 	case *ast.IndexExpr:
@@ -473,10 +604,8 @@ func (f *formatter) nextNeedsFormfeed(n ast.Expr) bool {
 	case *ast.SelectorExpr:
 		return f.nextNeedsFormfeed(x.X)
 	case *ast.CallExpr:
-		for _, arg := range x.Args {
-			if f.nextNeedsFormfeed(arg) {
-				return true
-			}
+		if slices.ContainsFunc(x.Args, f.nextNeedsFormfeed) {
+			return true
 		}
 	}
 	return false
@@ -506,7 +635,7 @@ func (f *formatter) label(l ast.Label, constraint token.Token) {
 		// if the AST is not generated by the parser.
 		name := n.Name
 		if !ast.IsValidIdent(name) {
-			name = literal.Label.Quote(n.Name)
+			name = literal.Label.Quote(name)
 		}
 		f.print(n.NamePos, name)
 
@@ -562,7 +691,6 @@ func (f *formatter) expr1(expr ast.Expr, prec1, depth int) {
 }
 
 func (f *formatter) exprRaw(expr ast.Expr, prec1, depth int) {
-
 	switch x := expr.(type) {
 	case *ast.BadExpr:
 		f.print(x.From, "_|_")
@@ -599,13 +727,26 @@ func (f *formatter) exprRaw(expr ast.Expr, prec1, depth int) {
 			f.expr1(x.X, prec, depth)
 		}
 
+	case *ast.PostfixExpr:
+		f.expr1(x.X, token.HighestPrec, depth)
+		f.print(x.Op)
+
 	case *ast.BasicLit:
 		f.print(x.ValuePos, x)
 
 	case *ast.Interpolation:
 		f.before(nil)
-		for _, x := range x.Elts {
-			f.expr0(x, depth+1)
+		// For multi-line string literals, enforce that the newlines
+		// surrounding each interpolation expression are either both
+		// present or both absent; if only one is present, force the
+		// other. For single-line string literals, collapse all newlines
+		// inside interpolation expressions so the result stays on one line.
+		forceNewline := interpolationNormalize(x)
+		for i, el := range x.Elts {
+			if i < len(forceNewline) && forceNewline[i] {
+				f.print(newline, nooverride)
+			}
+			f.expr0(el, depth+1)
 		}
 		f.after(nil)
 
@@ -670,7 +811,7 @@ func (f *formatter) exprRaw(expr ast.Expr, prec1, depth int) {
 		case len(x.Elts) == 0:
 			// collapse curly braces if the body is empty.
 			ffAlt := blank | nooverride
-			for _, c := range x.Comments() {
+			for _, c := range ast.Comments(x) {
 				if c.Position == 1 {
 					ffAlt = ff
 					break
@@ -700,7 +841,7 @@ func (f *formatter) exprRaw(expr ast.Expr, prec1, depth int) {
 		if len(x.Elts) == 0 {
 			// collapse square brackets if the body is empty.
 			collapseWs := blank | nooverride
-			for _, c := range x.Comments() {
+			for _, c := range ast.Comments(x) {
 				if c.Position == 1 {
 					collapseWs = ws
 					break
@@ -710,7 +851,7 @@ func (f *formatter) exprRaw(expr ast.Expr, prec1, depth int) {
 		}
 
 		f.print(x.Lbrack, token.LBRACK, ws)
-		f.walkListElems(x.Elts)
+		f.walkListElems(x.Elts, x.Lbrack, x.Rbrack)
 		f.print(trailcomma, noblank)
 		f.visitComments(f.current.pos)
 		f.matchUnindent()
@@ -722,6 +863,59 @@ func (f *formatter) exprRaw(expr ast.Expr, prec1, depth int) {
 	default:
 		panic(fmt.Sprintf("unimplemented type %T", x))
 	}
+}
+
+// interpolationNormalize normalizes the whitespace surrounding each
+// \(...) interpolation expression in x.
+//
+// For multi-line string literals, it returns a slice of the same length
+// as x.Elts indicating which elements should be preceded by an inserted
+// newline so that the leading and trailing newlines around each
+// interpolation expression are either both present or both absent.
+//
+// For single-line string literals, it mutates positions within each
+// interpolation expression and its closing fragment so that no
+// position-driven newlines are emitted, collapsing the interpolation
+// to a single line.
+func interpolationNormalize(x *ast.Interpolation) []bool {
+	first, last := x.Quotes()
+	qi, _, _, _ := literal.ParseQuotes(first.Value, last.Value)
+	if !qi.IsMulti() {
+		// Remove newlines from all elements except the first.
+		for _, e := range x.Elts[1:] {
+			ast.Walk(e, func(n ast.Node) bool {
+				if n != nil && n.Pos().RelPos() >= token.Newline {
+					ast.SetRelPos(n, token.NoRelPos)
+				}
+				return true
+			}, nil)
+		}
+		return nil
+	}
+	var force []bool
+	for i := 1; i+1 < len(x.Elts); i += 2 {
+		prev, expr, next := x.Elts[i-1], x.Elts[i], x.Elts[i+1]
+		// Skip if any relevant position is missing, as can happen for
+		// AST nodes synthesized without positions.
+		if !expr.Pos().IsValid() || !prev.End().IsValid() ||
+			!next.Pos().IsValid() || !expr.End().IsValid() {
+			continue
+		}
+		hasLeading := expr.Pos().Line() > prev.End().Line()
+		hasTrailing := next.Pos().Line() > expr.End().Line()
+		if hasLeading == hasTrailing {
+			continue
+		}
+		if force == nil {
+			force = make([]bool, len(x.Elts))
+		}
+		if hasLeading {
+			force[i+1] = true
+		} else {
+			force[i] = true
+		}
+	}
+	return force
 }
 
 func (f *formatter) clause(clause ast.Clause) {
@@ -756,6 +950,18 @@ func (f *formatter) clause(clause ast.Clause) {
 		f.print(blank, nooverride, n.Equal, token.BIND, blank)
 		f.expr(n.Expr)
 		f.markUnindentLine()
+
+	case *ast.TryClause:
+		f.print(n.Try, token.TRY)
+		if n.Ident != nil {
+			// Assignment form: try x = expr
+			f.print(blank, nooverride, indent)
+			f.expr(n.Ident)
+			f.print(blank, nooverride, n.Equal, token.BIND, blank)
+			f.expr(n.Expr)
+			f.markUnindentLine()
+		}
+		// Struct form: just "try" - body comes from Comprehension.Value
 
 	default:
 		panic("unknown clause type")

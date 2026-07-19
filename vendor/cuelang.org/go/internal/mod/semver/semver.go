@@ -73,6 +73,11 @@ func Major(v string) string {
 	return v[:1+len(pv.major)]
 }
 
+// IsMajor reports whether v holds a major version only.
+func IsMajor(v string) bool {
+	return Major(v) == v
+}
+
 // MajorMinor returns the major.minor version prefix of the semantic version v.
 // For example, MajorMinor("v2.1.0") == "v2.1".
 // If v is an invalid semantic version string, MajorMinor returns the empty string.
@@ -295,20 +300,10 @@ func isNum(v string) bool {
 }
 
 func compareInt(x, y string) int {
-	if x == y {
-		return 0
+	if c := cmp.Compare(len(x), len(y)); c != 0 {
+		return c
 	}
-	if len(x) < len(y) {
-		return -1
-	}
-	if len(x) > len(y) {
-		return +1
-	}
-	if x < y {
-		return -1
-	} else {
-		return +1
-	}
+	return cmp.Compare(x, y)
 }
 
 func comparePrerelease(x, y string) int {
@@ -352,18 +347,11 @@ func comparePrerelease(x, y string) int {
 				}
 			}
 			if ix {
-				if len(dx) < len(dy) {
-					return -1
-				}
-				if len(dx) > len(dy) {
-					return +1
+				if c := cmp.Compare(len(dx), len(dy)); c != 0 {
+					return c
 				}
 			}
-			if dx < dy {
-				return -1
-			} else {
-				return +1
-			}
+			return cmp.Compare(dx, dy)
 		}
 	}
 	if x == "" {

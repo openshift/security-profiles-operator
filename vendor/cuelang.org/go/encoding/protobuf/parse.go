@@ -20,6 +20,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"text/scanner"
@@ -258,36 +259,52 @@ func (p *protoConverter) resolve(pos scanner.Position, name string, options []*p
 		return expr
 	}
 	if strings.HasPrefix(name, ".") {
-		return p.resolveTopScope(pos, name[1:], options)
+		// A leading dot indicates the path should be resolved in the top-level scope.
+		return p.resolveUsingScopes(pos, name[1:], p.scope[:1])
 	}
-	for i := len(p.scope) - 1; i > 0; i-- {
-		if m, ok := p.scope[i][name]; ok {
-			return m.cue()
-		}
-	}
-	expr := p.resolveTopScope(pos, name, options)
+	// Non-absolute names need to be resolved using the nearest lexical scopes.
+	expr := p.resolveUsingScopes(pos, name, p.scope)
 	return expr
 }
 
-func (p *protoConverter) resolveTopScope(pos scanner.Position, name string, options []*proto.Option) ast.Expr {
+// resolveUsingScopes resolves a name using the nearest lexical scopes.
+// If the name is package-qualified, for this package, we trim the package prefix before searching.
+// If the name is dotted, we split the name and look for the first segment in the nearest lexical scope.
+// If the name is not found, we fail (panic with error).
+// scopes is a list of scopes to search, starting from the nearest scope;
+// to limit the search to a specific scope, pass that scope alone.
+func (p *protoConverter) resolveUsingScopes(pos scanner.Position, name string, scopes []map[string]mapping) ast.Expr {
 	for i := 0; i < len(name); i++ {
+		// Get the first segment of the name, advancing the index to the next dot.
 		k := strings.IndexByte(name[i:], '.')
 		i += k
 		if k == -1 {
 			i = len(name)
 		}
-		if m, ok := p.scope[0][name[:i]]; ok {
+		curName := name[:i]
+		// If the name is package-qualified, for this package, we can use the local name.
+		if local, ok := strings.CutPrefix(curName, p.protoPkg+"."); ok {
+			curName = local
+		}
+		// Look for the name in the nearest scope.
+		for _, scope := range slices.Backward(scopes) {
+			m, ok := scope[curName]
+			if !ok {
+				continue
+			}
 			if m.pkg != nil {
 				p.imported[m.pkg.qualifiedImportPath()] = true
 			}
 			expr := m.cue()
 			for i < len(name) {
+				// The actual expression is pointing to a nested message, so we need to namespace it:
 				name = name[i+1:]
 				if i = strings.IndexByte(name, '.'); i == -1 {
 					i = len(name)
 				}
 				expr = ast.NewSel(expr, "#"+name[:i])
 			}
+
 			ast.SetPos(expr, p.toCUEPos(pos))
 			return expr
 		}
@@ -297,7 +314,7 @@ func (p *protoConverter) resolveTopScope(pos scanner.Position, name string, opti
 }
 
 func (p *protoConverter) doImport(v *proto.Import) error {
-	if v.Filename == "cue/cue.proto" {
+	if p.mapBuiltinPackage(v.Filename) {
 		return nil
 	}
 
@@ -316,10 +333,6 @@ func (p *protoConverter) doImport(v *proto.Import) error {
 		err := errors.Newf(p.toCUEPos(v.Position), "could not find import %q", v.Filename)
 		p.state.addErr(err)
 		return err
-	}
-
-	if !p.mapBuiltinPackage(v.Position, v.Filename, filename == "") {
-		return nil
 	}
 
 	imp, err := p.state.parse(filename, nil)
@@ -528,7 +541,7 @@ func (p *protoConverter) messageField(s *ast.StructLit, i int, v proto.Visitee) 
 		p.addTag(f, o.tags)
 
 		if !o.required {
-			f.Optional = token.NoSpace.Pos()
+			f.Constraint = token.OPTION
 		}
 
 	case *proto.Enum:
@@ -705,7 +718,7 @@ func (p *protoConverter) oneOf(x *proto.Oneof) {
 	s := ast.NewStruct()
 	ast.SetRelPos(s, token.Newline)
 	embed := &ast.EmbedDecl{Expr: s}
-	embed.AddComment(comment(x.Comment, true))
+	ast.AddComment(embed, comment(x.Comment, true))
 
 	p.addDecl(embed)
 
@@ -721,7 +734,7 @@ func (p *protoConverter) oneOf(x *proto.Oneof) {
 		case *proto.OneOfField:
 			newStruct()
 			oneOf := p.parseField(s, 0, x.Field)
-			oneOf.Optional = token.NoPos
+			oneOf.Constraint = token.ILLEGAL
 
 		case *proto.Comment:
 			cg := comment(x, false)
@@ -760,7 +773,7 @@ func (p *protoConverter) parseField(s *ast.StructLit, i int, x *proto.Field) *as
 	p.addTag(f, o.tags)
 
 	if !o.required {
-		f.Optional = token.NoSpace.Pos()
+		f.Constraint = token.OPTION
 	}
 	return f
 }
@@ -794,7 +807,7 @@ func (p *optionParser) parse(options []*proto.Option) {
 			addComments(constraint, 1, o.Comment, o.InlineComment)
 			p.message.Elts = append(p.message.Elts, constraint)
 			if !p.required {
-				constraint.Optional = token.NoSpace.Pos()
+				constraint.Constraint = token.OPTION
 			}
 		case "(google.api.field_behavior)":
 			if o.Constant.Source == "REQUIRED" {

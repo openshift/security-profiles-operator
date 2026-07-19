@@ -15,9 +15,6 @@
 package export
 
 import (
-	"cmp"
-	"slices"
-
 	"cuelang.org/go/internal/core/adt"
 	"cuelang.org/go/internal/core/toposort"
 )
@@ -29,36 +26,19 @@ import (
 // features than for which there are arcs and also includes features for
 // optional fields. It assumes the Structs fields are initialized and evaluated.
 func VertexFeatures(c *adt.OpContext, v *adt.Vertex) []adt.Feature {
-	if c.TopoSort {
-		return toposort.VertexFeatures(c, v)
-	} else {
-		return vertexFeatures(v)
-	}
+	return toposort.VertexFeatures(c, v)
 }
 
-func vertexFeatures(v *adt.Vertex) []adt.Feature {
-	sets := extractFeatures(v.Structs)
-	m := sortArcs(sets) // TODO: use for convenience.
-
-	// Add features that are not in m. This may happen when fields were
-	// dynamically created.
-	var a []adt.Feature
-	for _, arc := range v.Arcs {
-		if _, ok := m[arc.Label]; !ok {
-			a = append(a, arc.Label)
+func extractFeatures(in []adt.StructInfo) (a [][]adt.Feature) {
+	// Calculate total entries accounting for repeats.
+	// Total occurrences = 1 + Repeats for each StructInfo.
+	totalEntries := 0
+	for _, s := range in {
+		if len(s.Decls) > 0 {
+			totalEntries += int(1 + s.Repeats)
 		}
 	}
-
-	sets = extractFeatures(v.Structs)
-	if len(a) > 0 {
-		sets = append(sets, a)
-	}
-
-	return sortedArcs(sets)
-}
-
-func extractFeatures(in []*adt.StructInfo) (a [][]adt.Feature) {
-	a = make([][]adt.Feature, 0, len(in))
+	a = make([][]adt.Feature, 0, totalEntries)
 	for _, s := range in {
 		sorted := make([]adt.Feature, 0, len(s.Decls))
 		for _, e := range s.Decls {
@@ -71,7 +51,11 @@ func extractFeatures(in []*adt.StructInfo) (a [][]adt.Feature) {
 		// Lists with a single element may still be useful to distinguish
 		// between known and unknown fields: unknown fields are sorted last.
 		if len(sorted) > 0 {
-			a = append(a, sorted)
+			occurrences := 1 + s.Repeats
+			// Add this front (1 + Repeats) times to give it proper weight
+			for range occurrences {
+				a = append(a, sorted)
+			}
 		}
 	}
 	return a
@@ -108,28 +92,6 @@ func VertexFeaturesUnsorted(v *adt.Vertex) (features []adt.Feature) {
 	}
 
 	return features
-}
-
-// sortedArcs is like sortArcs, but returns the features of optional and
-// required fields in an sorted slice. Ultimately, the implementation should
-// use merge sort everywhere, and this will be the preferred method. Also,
-// when querying optional fields as well, this helps identifying the optional
-// fields.
-func sortedArcs(fronts [][]adt.Feature) []adt.Feature {
-	m := sortArcs(fronts)
-	return sortedArcsFromMap(m)
-}
-
-func sortedArcsFromMap(m map[adt.Feature]int) []adt.Feature {
-	a := make([]adt.Feature, 0, len(m))
-
-	for k := range m {
-		a = append(a, k)
-	}
-
-	slices.SortFunc(a, func(a1, a2 adt.Feature) int { return -cmp.Compare(m[a1], m[a2]) })
-
-	return a
 }
 
 // sortArcs does a topological sort of arcs based on a variant of Kahn's

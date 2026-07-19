@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 
@@ -20,17 +21,19 @@ import (
 	"cuelang.org/go/internal/cueconfig"
 	"cuelang.org/go/internal/cueversion"
 	"cuelang.org/go/internal/mod/modload"
+	"cuelang.org/go/internal/mod/modpkgload"
 	"cuelang.org/go/internal/mod/modresolve"
 	"cuelang.org/go/mod/modcache"
+	"cuelang.org/go/mod/modfile"
 	"cuelang.org/go/mod/modregistry"
 	"cuelang.org/go/mod/module"
 )
 
 // Registry is used to access CUE modules from external sources.
 type Registry interface {
-	// Requirements returns a list of the modules required by the given module
-	// version.
-	Requirements(ctx context.Context, m module.Version) ([]module.Version, error)
+	// ModFile returns the module file for the given module version.
+	// The caller must not mutate the returned value.
+	ModFile(ctx context.Context, mv module.Version) (*modfile.File, error)
 
 	// Fetch returns the location of the contents for the given module
 	// version, downloading it if necessary.
@@ -41,12 +44,27 @@ type Registry interface {
 	ModuleVersions(ctx context.Context, mpath string) ([]string, error)
 }
 
-// We don't want to make modload part of the cue/load API,
-// so we define the above type independently, but we want
-// it to be interchangeable, so check that statically here.
+// CachedRegistry is optionally implemented by a [Registry] that
+// contains a cache.
+type CachedRegistry interface {
+	Registry
+
+	// FetchFromCache looks up the given module in the cache.
+	// It returns an error that satisfies [errors.Is]([modregistry.ErrNotFound]) if the
+	// module is not present in the cache at this version or if there
+	// is no cache.
+	FetchFromCache(mv module.Version) (module.SourceLoc, error)
+}
+
 var (
+	// We don't want to make modload part of the cue/load API,
+	// so we define the above type independently, but we want
+	// it to be interchangeable, so check that statically here.
 	_ Registry         = modload.Registry(nil)
 	_ modload.Registry = Registry(nil)
+
+	// [modpkgload.CachedRegistry] is a subset of [CachedRegistry].
+	_ modpkgload.CachedRegistry = CachedRegistry(nil)
 )
 
 // DefaultRegistry is the default registry host.
@@ -74,6 +92,12 @@ type Config struct {
 	// the current process's environment will be used.
 	Env []string
 
+	// CUERegistry specifies the registry or registries to use
+	// to resolve modules. If it is empty, $CUE_REGISTRY
+	// is used.
+	// Experimental: this field might go away in a future version.
+	CUERegistry string
+
 	// ClientType is used as part of the User-Agent header
 	// that's added in each outgoing HTTP request.
 	// If it's empty, it defaults to "cuelang.org/go".
@@ -94,7 +118,10 @@ func NewResolver(cfg *Config) (*Resolver, error) {
 	getenv := getenvFunc(cfg.Env)
 	var configData []byte
 	var configPath string
-	cueRegistry := getenv("CUE_REGISTRY")
+	cueRegistry := cfg.CUERegistry
+	if cueRegistry == "" {
+		cueRegistry = getenv("CUE_REGISTRY")
+	}
 	kind, rest, _ := strings.Cut(cueRegistry, ":")
 	switch kind {
 	case "file":
@@ -104,7 +131,7 @@ func NewResolver(cfg *Config) (*Resolver, error) {
 		}
 		configData, configPath = data, rest
 	case "inline":
-		configData, configPath = []byte(rest), "$CUE_REGISTRY"
+		configData, configPath = []byte(rest), "inline"
 	case "simple":
 		cueRegistry = rest
 	}
@@ -116,7 +143,7 @@ func NewResolver(cfg *Config) (*Resolver, error) {
 		resolver, err = modresolve.ParseCUERegistry(cueRegistry, DefaultRegistry)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("bad value for $CUE_REGISTRY: %v", err)
+		return nil, fmt.Errorf("bad value for registry: %v", err)
 	}
 	return &Resolver{
 		resolver: resolver,
@@ -329,10 +356,10 @@ func (t *cueLoginsTransport) _init() error {
 	return nil
 }
 
-// NewRegistry returns an implementation of the Registry
+// NewRegistry returns an implementation of the [CachedRegistry]
 // interface suitable for passing to [load.Instances].
 // It uses the standard CUE cache directory.
-func NewRegistry(cfg *Config) (Registry, error) {
+func NewRegistry(cfg *Config) (CachedRegistry, error) {
 	cfg = newRef(cfg)
 	resolver, err := NewResolver(cfg)
 	if err != nil {
@@ -345,13 +372,71 @@ func NewRegistry(cfg *Config) (Registry, error) {
 	return modcache.New(modregistry.NewClientWithResolver(resolver), cacheDir)
 }
 
+// LazyRegistry implements [CachedRegistry] such that any configuration or setup errors,
+// such as an invalid `CUE_REGISTRY` value or an inaccessible `CUE_CACHE_DIR` directory
+// are only surfaced as fatal errors for the user once the registry is actually needed.
+//
+// Notably, interacting with a CUE registry or the CUE disk caches is not required for many
+// simple scenarios, such as loading and evaluating local files or modules
+// without any external module dependencies.
+type LazyRegistry struct {
+	// New constructs the underlying registry. It is called at most once,
+	// the first time any of the registry's methods is used.
+	New func() (CachedRegistry, error)
+
+	once    sync.Once
+	onceReg CachedRegistry
+	onceErr error
+}
+
+var _ CachedRegistry = (*LazyRegistry)(nil)
+
+func (r *LazyRegistry) registry() (CachedRegistry, error) {
+	r.once.Do(func() {
+		r.onceReg, r.onceErr = r.New()
+	})
+	return r.onceReg, r.onceErr
+}
+
+func (r *LazyRegistry) ModFile(ctx context.Context, m module.Version) (*modfile.File, error) {
+	reg, err := r.registry()
+	if err != nil {
+		return nil, err
+	}
+	return reg.ModFile(ctx, m)
+}
+
+func (r *LazyRegistry) Fetch(ctx context.Context, m module.Version) (module.SourceLoc, error) {
+	reg, err := r.registry()
+	if err != nil {
+		return module.SourceLoc{}, err
+	}
+	return reg.Fetch(ctx, m)
+}
+
+func (r *LazyRegistry) FetchFromCache(m module.Version) (module.SourceLoc, error) {
+	reg, err := r.registry()
+	if err != nil {
+		return module.SourceLoc{}, err
+	}
+	return reg.FetchFromCache(m)
+}
+
+func (r *LazyRegistry) ModuleVersions(ctx context.Context, mpath string) ([]string, error) {
+	reg, err := r.registry()
+	if err != nil {
+		return nil, err
+	}
+	return reg.ModuleVersions(ctx, mpath)
+}
+
 func getenvFunc(env []string) func(string) string {
 	if env == nil {
 		return os.Getenv
 	}
 	return func(key string) string {
-		for i := len(env) - 1; i >= 0; i-- {
-			if e := env[i]; len(e) >= len(key)+1 && e[len(key)] == '=' && e[:len(key)] == key {
+		for _, e := range slices.Backward(env) {
+			if len(e) >= len(key)+1 && e[len(key)] == '=' && e[:len(key)] == key {
 				return e[len(key)+1:]
 			}
 		}

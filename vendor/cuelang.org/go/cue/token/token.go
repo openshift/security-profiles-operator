@@ -19,7 +19,7 @@ package token
 // Token is the set of lexical tokens of the CUE configuration language.
 type Token int
 
-//go:generate go run golang.org/x/tools/cmd/stringer -type=Token -linecomment
+//go:generate go tool stringer -type=Token -linecomment
 
 // The list of tokens.
 const (
@@ -57,11 +57,6 @@ const (
 	POW // ^
 	QUO // /
 
-	IQUO // quo
-	IREM // rem
-	IDIV // div
-	IMOD // mod
-
 	AND // &
 	OR  // |
 
@@ -95,14 +90,20 @@ const (
 	SEMICOLON // ;
 	COLON     // :
 	OPTION    // ?
+	TILDE     // ~
 	operatorEnd
 
 	keywordBeg
 
-	IF  // if
-	FOR // for
-	IN  // in
-	LET // let
+	IF   // if
+	ELSE // else
+	FOR  // for
+	IN   // in
+	LET  // let
+	TRY  // try
+	// TODO: remove in favor of OTHERWISE
+	FALLBACK  // fallback
+	OTHERWISE // otherwise
 	// experimental
 	FUNC // func
 
@@ -147,7 +148,7 @@ func (tok Token) Precedence() int {
 		return 5
 	case ADD, SUB:
 		return 6
-	case MUL, QUO, IDIV, IMOD, IQUO, IREM:
+	case MUL, QUO:
 		return 7
 	}
 	return lowestPrec

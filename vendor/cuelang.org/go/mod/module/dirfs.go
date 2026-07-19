@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"cuelang.org/go/cue/ast"
+	"cuelang.org/go/cue/parser"
 )
 
 // SourceLoc represents the location of some CUE source code.
@@ -15,18 +16,32 @@ type SourceLoc struct {
 	Dir string
 }
 
-// ReadCUE can be implemented by an [fs.FS]
+// ReadCUEFS can be implemented by an [fs.FS]
 // to provide an optimized (cached) way of
 // reading and parsing CUE syntax.
 type ReadCUEFS interface {
 	fs.FS
 
-	// ReadCUEFile reads CUE syntax from the given path.
+	// ReadCUEFile reads CUE syntax from the given path,
+	// parsing it with the given configuration.
 	//
 	// If this method is implemented, but the implementation
 	// does not support reading CUE files,
 	// it should return [errors.ErrUnsupported].
-	ReadCUEFile(path string) (*ast.File, error)
+	//
+	// This method may be called with paths which do not have a `.cue`
+	// suffix. If the implementation is unable to read-and-convert (as
+	// necessary) a path to a CUE AST, it should return (nil, nil).
+	ReadCUEFile(path string, cfg parser.Config) (*ast.File, error)
+
+	// IsDirWithCUEFiles reports whether the given path is a directory
+	// which contains files for which this implementation would attempt
+	// to read and parse, if its ReadCUEFile method were called.
+	//
+	// If this method is implemented, but the implementation does not
+	// support examining directories, it should return
+	// [errors.ErrUnsupported].
+	IsDirWithCUEFiles(path string) (bool, error)
 }
 
 // OSRootFS can be implemented by an [fs.FS]

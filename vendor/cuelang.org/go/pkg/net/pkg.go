@@ -78,7 +78,7 @@ var p = &pkg.Package{
 		Func: func(c *pkg.CallCtxt) {
 			ip := c.Value(0)
 			if c.Do() {
-				c.Ret = IPv4(ip)
+				c.Ret, c.Err = IPv4(ip)
 			}
 		},
 	}, {
@@ -90,7 +90,7 @@ var p = &pkg.Package{
 		Func: func(c *pkg.CallCtxt) {
 			ip := c.Value(0)
 			if c.Do() {
-				c.Ret = IPv6(ip)
+				c.Ret, c.Err = IPv6(ip)
 			}
 		},
 	}, {
@@ -102,7 +102,7 @@ var p = &pkg.Package{
 		Func: func(c *pkg.CallCtxt) {
 			ip := c.Value(0)
 			if c.Do() {
-				c.Ret = IP(ip)
+				c.Ret, c.Err = IP(ip)
 			}
 		},
 	}, {
@@ -126,7 +126,7 @@ var p = &pkg.Package{
 		Func: func(c *pkg.CallCtxt) {
 			ip := c.Value(0)
 			if c.Do() {
-				c.Ret = LoopbackIP(ip)
+				c.Ret, c.Err = LoopbackIP(ip)
 			}
 		},
 	}, {
@@ -138,7 +138,7 @@ var p = &pkg.Package{
 		Func: func(c *pkg.CallCtxt) {
 			ip := c.Value(0)
 			if c.Do() {
-				c.Ret = MulticastIP(ip)
+				c.Ret, c.Err = MulticastIP(ip)
 			}
 		},
 	}, {
@@ -150,7 +150,7 @@ var p = &pkg.Package{
 		Func: func(c *pkg.CallCtxt) {
 			ip := c.Value(0)
 			if c.Do() {
-				c.Ret = InterfaceLocalMulticastIP(ip)
+				c.Ret, c.Err = InterfaceLocalMulticastIP(ip)
 			}
 		},
 	}, {
@@ -162,7 +162,7 @@ var p = &pkg.Package{
 		Func: func(c *pkg.CallCtxt) {
 			ip := c.Value(0)
 			if c.Do() {
-				c.Ret = LinkLocalMulticastIP(ip)
+				c.Ret, c.Err = LinkLocalMulticastIP(ip)
 			}
 		},
 	}, {
@@ -174,7 +174,7 @@ var p = &pkg.Package{
 		Func: func(c *pkg.CallCtxt) {
 			ip := c.Value(0)
 			if c.Do() {
-				c.Ret = LinkLocalUnicastIP(ip)
+				c.Ret, c.Err = LinkLocalUnicastIP(ip)
 			}
 		},
 	}, {
@@ -186,7 +186,7 @@ var p = &pkg.Package{
 		Func: func(c *pkg.CallCtxt) {
 			ip := c.Value(0)
 			if c.Do() {
-				c.Ret = GlobalUnicastIP(ip)
+				c.Ret, c.Err = GlobalUnicastIP(ip)
 			}
 		},
 	}, {
@@ -198,7 +198,7 @@ var p = &pkg.Package{
 		Func: func(c *pkg.CallCtxt) {
 			ip := c.Value(0)
 			if c.Do() {
-				c.Ret = UnspecifiedIP(ip)
+				c.Ret, c.Err = UnspecifiedIP(ip)
 			}
 		},
 	}, {
@@ -235,6 +235,70 @@ var p = &pkg.Package{
 			ip := c.Value(0)
 			if c.Do() {
 				c.Ret, c.Err = IPString(ip)
+			}
+		},
+	}, {
+		Name: "AddIP",
+		Params: []pkg.Param{
+			{Kind: adt.TopKind},
+			{Kind: adt.IntKind},
+		},
+		Result: adt.StringKind,
+		Func: func(c *pkg.CallCtxt) {
+			ip, offset := c.Value(0), c.BigInt(1)
+			if c.Do() {
+				c.Ret, c.Err = AddIP(ip, offset)
+			}
+		},
+	}, {
+		Name: "AddIPCIDR",
+		Params: []pkg.Param{
+			{Kind: adt.TopKind},
+			{Kind: adt.IntKind},
+		},
+		Result: adt.StringKind,
+		Func: func(c *pkg.CallCtxt) {
+			ip, offset := c.Value(0), c.BigInt(1)
+			if c.Do() {
+				c.Ret, c.Err = AddIPCIDR(ip, offset)
+			}
+		},
+	}, {
+		Name: "ParseCIDR",
+		Params: []pkg.Param{
+			{Kind: adt.StringKind},
+		},
+		Result: adt.StructKind,
+		Func: func(c *pkg.CallCtxt) {
+			s := c.String(0)
+			if c.Do() {
+				c.Ret, c.Err = ParseCIDR(s)
+			}
+		},
+	}, {
+		Name: "InCIDR",
+		Params: []pkg.Param{
+			{Kind: adt.TopKind},
+			{Kind: adt.TopKind},
+		},
+		Result: adt.BoolKind,
+		Func: func(c *pkg.CallCtxt) {
+			ip, cidr := c.Value(0), c.Value(1)
+			if c.Do() {
+				c.Ret, c.Err = InCIDR(ip, cidr)
+			}
+		},
+	}, {
+		Name: "CompareIP",
+		Params: []pkg.Param{
+			{Kind: adt.TopKind},
+			{Kind: adt.TopKind},
+		},
+		Result: adt.IntKind,
+		Func: func(c *pkg.CallCtxt) {
+			ip1, ip2 := c.Value(0), c.Value(1)
+			if c.Do() {
+				c.Ret, c.Err = CompareIP(ip1, ip2)
 			}
 		},
 	}, {

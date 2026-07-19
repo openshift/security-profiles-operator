@@ -20,7 +20,7 @@ import "cuelang.org/go/cue/token"
 // use to evaluate a value.
 type Op int
 
-//go:generate go run golang.org/x/tools/cmd/stringer -type=Op -linecomment
+//go:generate go tool stringer -type=Op -linecomment
 
 // Values of Op.
 const (
@@ -52,12 +52,10 @@ const (
 	SubtractOp      // -
 	MultiplyOp      // *
 	FloatQuotientOp // /
-	IntQuotientOp   // quo
-	IntRemainderOp  // rem
-	IntDivideOp     // div
-	IntModuloOp     // mod
 
 	InterpolationOp // \()
+
+	SpreadOp // ...
 )
 
 // OpFromToken converts a token.Token to an Op.
@@ -78,11 +76,6 @@ var tokenMap = map[token.Token]Op{
 	token.SUB: SubtractOp,      // -
 	token.MUL: MultiplyOp,      // *
 	token.QUO: FloatQuotientOp, // /
-
-	token.IDIV: IntDivideOp,    // div
-	token.IMOD: IntModuloOp,    // mod
-	token.IQUO: IntQuotientOp,  // quo
-	token.IREM: IntRemainderOp, // rem
 
 	token.LAND: BoolAndOp, // &&
 	token.LOR:  BoolOrOp,  // ||

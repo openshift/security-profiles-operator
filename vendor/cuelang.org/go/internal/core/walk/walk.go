@@ -35,10 +35,13 @@ type Visitor struct {
 	// Feature is invoked for all field names.
 	Feature func(f adt.Feature, src adt.Node)
 
-	// Before is invoked for all nodes in pre-order traversal.
+	// Before, if non-nil, is invoked for all nodes in pre-order traversal.
 	// Returning false prevents the visitor from visiting the node's
 	// children.
 	Before func(adt.Node) bool
+
+	// After, if non-nil, is invoked for all nodes in post-order traversal.
+	After func(adt.Node)
 }
 
 func (w *Visitor) Elem(x adt.Elem) {
@@ -123,6 +126,9 @@ func (w *Visitor) node(n adt.Node) {
 		w.node(x.X)
 		w.node(x.Y)
 
+	case *adt.OpenExpr:
+		w.node(x.X)
+
 	case *adt.CallExpr:
 		w.node(x.Fun)
 		for _, arg := range x.Args {
@@ -164,6 +170,9 @@ func (w *Visitor) node(n adt.Node) {
 			w.node(c)
 		}
 		w.node(adt.ToExpr(x.Value))
+		if x.Fallback != nil {
+			w.node(x.Fallback)
+		}
 
 	case *adt.ForClause:
 		w.feature(x.Key, x)
@@ -176,9 +185,20 @@ func (w *Visitor) node(n adt.Node) {
 		w.feature(x.Label, x)
 		w.node(x.Expr)
 
+	case *adt.TryClause:
+		if x.Expr != nil {
+			// Assignment form
+			w.feature(x.Label, x)
+			w.node(x.Expr)
+		}
+		// Struct form: body is in Comprehension.Value, walked separately
+
 	case *adt.ValueClause:
 
 	default:
 		panic(fmt.Sprintf("unknown field %T", x))
+	}
+	if n != nil && w.After != nil {
+		w.After(n)
 	}
 }

@@ -1,41 +1,90 @@
 package cueexperiment
 
 import (
+	"fmt"
+	"os"
+	"strings"
 	"sync"
 
-	"cuelang.org/go/internal/envflag"
+	"cuelang.org/go/internal/cueversion"
 )
 
 // Flags holds the set of global CUE_EXPERIMENT flags. It is initialized by Init.
+var Flags Config
+
+// Config holds the set of known CUE_EXPERIMENT flags.
 //
-// When adding, deleting, or modifying entries below,
-// update cmd/cue/cmd/help.go as well for `cue help environment`.
-var Flags struct {
-	// EvalV3 enables the new evaluator. The new evaluator addresses various
-	// performance concerns.
-	EvalV3 bool
+// Keep the fields sorted from oldest to newest based on when the experiment was added.
+type Config struct {
+	// The flags in this first section describe active experiments.
+	// Sort from oldest to newest based on when they were introduced as a `preview`.
 
-	// Embed enables file embedding.
-	Embed bool `envflag:"default:true"`
+	// FormatV2 selects the Wadler-Lindig pretty-printer as the
+	// implementation behind "cue fmt" and "cue/format".
+	// It only exists from v0.18.0 onwards; v0.17 knows about it solely so that
+	// CUE_EXPERIMENT=formatv2=0 is accepted across both versions. Enabling it
+	// is rejected, as the implementation is not present.
+	FormatV2 bool `experiment:"preview:v0.18.0"`
 
-	// DecodeInt64 changes [cuelang.org/go/cue.Value.Decode] to choose
-	// `int64` rather than `int` as the default type for CUE integer values
-	// to ensure consistency with 32-bit platforms.
-	DecodeInt64 bool `envflag:"default:true"`
-
-	// Enable topological sorting of struct fields.
-	TopoSort bool `envflag:"default:true"`
-
-	// The flags below describe completed experiments; they can still be set
+	// The flags in this second section describe completed experiments; they can still be set
 	// as long as the value aligns with the final behavior once the experiment finished.
 	// Breaking users who set such a flag seems unnecessary,
 	// and it simplifies using the same experiment flags across a range of CUE versions.
+	// Sort from oldest to newest based on when they were completed as `stable` or `withdrawn`.
 
-	// Modules was an experiment which ran from early 2023 to late 2024.
-	Modules bool `envflag:"deprecated,default:true"`
+	// Modules enables support for the modules and package management proposal
+	// as described in https://cuelang.org/discussion/2939.
+	Modules bool `experiment:"preview:v0.8.0,default:v0.9.0,stable:v0.11.0"`
 
-	// YAMLV3Decoder was an experiment which ran from early 2024 to late 2024.
-	YAMLV3Decoder bool `envflag:"deprecated,default:true"`
+	// YAMLV3Decoder swaps the old internal/third_party/yaml decoder with the new
+	// decoder implemented in internal/encoding/yaml on top of yaml.v3.
+	YAMLV3Decoder bool `experiment:"preview:v0.9.0,default:v0.9.0,stable:v0.11.0"`
+
+	// DecodeInt64 changes [cuelang.org/go/cue.Value.Decode] to choose
+	// 'int64' rather than 'int' as the default type for CUE integer values
+	// to ensure consistency with 32-bit platforms.
+	DecodeInt64 bool `experiment:"preview:v0.11.0,default:v0.12.0,stable:v0.13.0"`
+
+	// Embed enables support for embedded data files as described in
+	// https://cuelang.org/discussion/3264.
+	Embed bool `experiment:"preview:v0.10.0,default:v0.12.0,stable:v0.14.0"`
+
+	// TopoSort enables topological sorting of struct fields.
+	// Provide feedback via https://cuelang.org/issue/3558.
+	TopoSort bool `experiment:"preview:v0.11.0,default:v0.12.0,stable:v0.14.0"`
+
+	// EvalV3 enables the new CUE evaluator, addressing performance issues
+	// and bringing better algorithms for disjunctions, closedness, and cycles.
+	EvalV3 bool `experiment:"preview:v0.9.0,default:v0.13.0,stable:v0.15.0"`
+
+	// KeepValidators prevents validators from simplifying into concrete values,
+	// even if their concrete value could be derived, such as '>=1 & <=1' to '1'.
+	// Proposal:     https://cuelang.org/discussion/3775.
+	// Spec change:  https://cuelang.org/cl/1217013
+	// Spec change:  https://cuelang.org/cl/1217014
+	KeepValidators bool `experiment:"preview:v0.14.0,default:v0.14.0,stable:v0.15.0"`
+
+	// CmdReferencePkg requires referencing an imported tool package to declare tasks.
+	// Otherwise, declaring tasks via "$id" or "kind" string fields is allowed.
+	CmdReferencePkg bool `experiment:"preview:v0.13.0,default:v0.14.0,stable:v0.16.0"`
+}
+
+// initExperimentFlags initializes the experiment flags by processing both
+// the experiment lifecycle and environment variable overrides.
+func initExperimentFlags() error {
+	a := strings.Split(os.Getenv("CUE_EXPERIMENT"), ",")
+	experiments, err := parseEnvExperiments(a...)
+	if err != nil {
+		return err
+	}
+
+	// Use this binary's language version rather than an empty version, which
+	// is treated as the newest version and would wrongly allow enabling
+	// experiments that only exist in later CUE versions.
+	if err := parseConfig(&Flags, cueversion.LanguageVersion(), experiments); err != nil {
+		return fmt.Errorf("error in CUE_EXPERIMENT: %w", err)
+	}
+	return nil
 }
 
 // Init initializes Flags. Note: this isn't named "init" because we
@@ -47,6 +96,4 @@ func Init() error {
 	return initOnce()
 }
 
-var initOnce = sync.OnceValue(func() error {
-	return envflag.Init(&Flags, "CUE_EXPERIMENT")
-})
+var initOnce = sync.OnceValue(initExperimentFlags)

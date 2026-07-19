@@ -30,13 +30,16 @@ import (
 	"cuelang.org/go/internal/core/runtime"
 )
 
-// A Context is used for creating CUE [Value]s.
+// A Context is used for creating CUE [Value] objects.
 //
 // A Context keeps track of loaded instances, indices of internal
-// representations of values, and defines the set of supported builtins. Any
-// operation that involves two Values should originate from the same Context.
+// representations of values, and defines the set of supported builtins.
 //
 // Use [cuelang.org/go/cue/cuecontext.New] to create a new context.
+//
+// Note that a context may grow in size as more values are created or loaded.
+// If memory usage becomes a problem, consider avoiding long-lived contexts,
+// such as using one context per task or periodically re-creating the context.
 type Context runtime.Runtime
 
 func (c *Context) runtime() *runtime.Runtime {
@@ -53,6 +56,12 @@ func (c *Context) ctx() *adt.OpContext {
 }
 
 // Context reports the Context with which this value was created.
+//
+// Deprecated: the returned context is undefined when values from
+// different contexts are combined. Note that it is now OK to combine
+// (for example with [Value.Unify] or [Value.FillPath]) values
+// that were created from different contexts, so it is OK
+// to create a new one-off context rather than using this method.
 func (v Value) Context() *Context {
 	return (*Context)(v.idx)
 }
@@ -358,7 +367,7 @@ func NilIsAny(isAny bool) EncodeOption {
 // Channel, complex, and function values cannot be encoded in CUE. Attempting to
 // encode such a value results in the returned value being an error, accessible
 // through the Err method.
-func (c *Context) Encode(x interface{}, option ...EncodeOption) Value {
+func (c *Context) Encode(x any, option ...EncodeOption) Value {
 	switch v := x.(type) {
 	case adt.Value:
 		return newValueRoot(c.runtime(), c.ctx(), v)
@@ -368,42 +377,28 @@ func (c *Context) Encode(x interface{}, option ...EncodeOption) Value {
 
 	ctx := c.ctx()
 	// TODO: is true the right default?
-	expr := convert.GoValueToValue(ctx, x, options.nilIsTop)
-	var n *adt.Vertex
-	if v, ok := expr.(*adt.Vertex); ok {
-		n = v
-	} else {
-		n = &adt.Vertex{}
-		n.AddConjunct(adt.MakeRootConjunct(nil, expr))
-	}
+	val := convert.FromGoValue(ctx, x, options.nilIsTop)
+	n := adt.ToVertex(val) // we know val is finalized
 	n.Finalize(ctx)
 	return c.make(n)
 }
 
-// Encode converts a Go type to a CUE [Value].
+// EncodeType converts a Go type to a CUE [Value].
 //
 // The returned value will represent an error, accessible through [Value.Err],
 // if any error occurred.
-func (c *Context) EncodeType(x interface{}, option ...EncodeOption) Value {
+func (c *Context) EncodeType(x any, option ...EncodeOption) Value {
 	switch v := x.(type) {
 	case *adt.Vertex:
 		return c.make(v)
 	}
 
 	ctx := c.ctx()
-	expr, err := convert.GoTypeToExpr(ctx, x)
+	v, err := convert.FromGoType(ctx, x)
 	if err != nil {
 		return c.makeError(err)
 	}
-	var n *adt.Vertex
-	if v, ok := expr.(*adt.Vertex); ok {
-		n = v
-	} else {
-		n = &adt.Vertex{}
-		n.AddConjunct(adt.MakeRootConjunct(nil, expr))
-	}
-	n.Finalize(ctx)
-	return c.make(n)
+	return c.make(v)
 }
 
 // NewList creates a Value that is a list of the given values.
@@ -412,9 +407,6 @@ func (c *Context) EncodeType(x interface{}, option ...EncodeOption) Value {
 func (c *Context) NewList(v ...Value) Value {
 	a := make([]adt.Value, len(v))
 	for i, x := range v {
-		if x.idx != (*runtime.Runtime)(c) {
-			panic("values must be from same Context")
-		}
 		a[i] = x.v
 	}
 	return c.make(c.ctx().NewList(a...))

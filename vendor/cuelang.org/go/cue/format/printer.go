@@ -131,7 +131,7 @@ func (p *printer) Print(v interface{}) {
 			// 2) simplified structs are explicitly referenced separately
 			//    in the AST.
 			if p.indent < 6 {
-				data = literal.IndentTabs(data, p.cfg.Indent+p.indent+1)
+				data = literal.IndentTabs(data, p.cfg.indent+p.indent+1)
 			}
 
 		case token.INT:
@@ -401,7 +401,7 @@ func (p *printer) writeString(s string, isLit bool) {
 }
 
 func (p *printer) writeByte(ch byte, n int) {
-	for i := 0; i < n; i++ {
+	for range n {
 		p.output = append(p.output, ch)
 	}
 
@@ -411,8 +411,8 @@ func (p *printer) writeByte(ch byte, n int) {
 		p.pos.Line += n
 		p.pos.Column = 1
 
-		n := p.cfg.Indent + p.indent // include base indentation
-		for i := 0; i < n; i++ {
+		n := p.cfg.indent + p.indent // include base indentation
+		for range n {
 			p.output = append(p.output, '\t')
 		}
 
@@ -440,8 +440,6 @@ func mayCombine(prev, next token.Token) (before, after bool) {
 		return true, true
 	}
 	switch prev {
-	case token.IQUO, token.IREM, token.IDIV, token.IMOD:
-		return false, false
 	case token.INT:
 		before = next == token.PERIOD // 1.
 	case token.ADD:

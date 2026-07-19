@@ -7,16 +7,15 @@ import (
 	"io"
 	"io/fs"
 	"log"
-	"math/rand"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
-	"github.com/rogpeppe/go-internal/robustio"
-
-	"cuelang.org/go/internal/mod/modload"
 	"cuelang.org/go/internal/par"
+	"cuelang.org/go/internal/robustio"
 	"cuelang.org/go/mod/modfile"
 	"cuelang.org/go/mod/modregistry"
 	"cuelang.org/go/mod/module"
@@ -33,39 +32,69 @@ const logging = false // TODO hook this up to CUE_DEBUG
 // returned by the registry implement the `OSRootFS` interface,
 // allowing a caller to find the native OS filepath where modules
 // are stored.
-func New(registry *modregistry.Client, dir string) (modload.Registry, error) {
+//
+// The returned type implements [modconfig.Registry]
+// and [modconfig.CachedRegistry].
+func New(registry *modregistry.Client, dir string) (*Cache, error) {
 	info, err := os.Stat(dir)
 	if err == nil && !info.IsDir() {
 		return nil, fmt.Errorf("%q is not a directory", dir)
 	}
-	return &cache{
+	return &Cache{
 		dir: filepath.Join(dir, "mod"),
 		reg: registry,
 	}, nil
 }
 
-type cache struct {
+type Cache struct {
 	dir              string // typically ${CUE_CACHE_DIR}/mod
 	reg              *modregistry.Client
 	downloadZipCache par.ErrCache[module.Version, string]
-	modFileCache     par.ErrCache[string, []byte]
+	modFileCache     par.ErrCache[module.Version, *modfile.File]
 }
 
-func (c *cache) Requirements(ctx context.Context, mv module.Version) ([]module.Version, error) {
-	data, err := c.downloadModFile(ctx, mv)
+// Deprecated: use [Cache.ModFile] instead.
+//
+//go:fix inline
+func (c *Cache) Requirements(ctx context.Context, mv module.Version) ([]module.Version, error) {
+	mf, err := c.ModFile(ctx, mv)
 	if err != nil {
 		return nil, err
-	}
-	mf, err := modfile.Parse(data, mv.String())
-	if err != nil {
-		return nil, fmt.Errorf("cannot parse module file from %v: %v", mv, err)
 	}
 	return mf.DepVersions(), nil
 }
 
+// ModFile returns the parsed module file for the given module version,
+// downloading it if necessary. Results are cached.
+func (c *Cache) ModFile(ctx context.Context, mv module.Version) (*modfile.File, error) {
+	return c.modFileCache.Do(mv, func() (*modfile.File, error) {
+		data, err := c.fetchModFileData(ctx, mv)
+		if err != nil {
+			return nil, err
+		}
+		mf, err := modfile.Parse(data, mv.String())
+		if err != nil {
+			return nil, fmt.Errorf("cannot parse module file from %v: %v", mv, err)
+		}
+		return mf, nil
+	})
+}
+
+// FetchFromCache implements [cuelang.org/go/mod/modconfig.CachedRegistry].
+func (c *Cache) FetchFromCache(mv module.Version) (module.SourceLoc, error) {
+	dir, err := c.downloadDir(mv)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return module.SourceLoc{}, modregistry.ErrNotFound
+		}
+		return module.SourceLoc{}, err
+	}
+	return c.dirToLocation(dir), nil
+}
+
 // Fetch returns the location of the contents for the given module
 // version, downloading it if necessary.
-func (c *cache) Fetch(ctx context.Context, mv module.Version) (module.SourceLoc, error) {
+func (c *Cache) Fetch(ctx context.Context, mv module.Version) (module.SourceLoc, error) {
 	dir, err := c.downloadDir(mv)
 	if err == nil {
 		// The directory has already been completely extracted (no .partial file exists).
@@ -133,7 +162,12 @@ func (c *cache) Fetch(ctx context.Context, mv module.Version) (module.SourceLoc,
 	if err := os.MkdirAll(parentDir, 0777); err != nil {
 		return module.SourceLoc{}, err
 	}
-	if err := os.WriteFile(partialPath, nil, 0666); err != nil {
+	// Upstream Go's modfetch uses a plain os.WriteFile here, but we hit
+	// transient Windows ERROR_ACCESS_DENIED on this path more often, likely
+	// because each testscript test starts with a cold module cache on an
+	// antivirus-scanned drive. Retry via robustio to absorb those.
+	// See https://cuelang.org/issue/3413.
+	if err := robustio.WriteFile(partialPath, nil, 0666); err != nil {
 		return module.SourceLoc{}, err
 	}
 	if err := modzip.Unzip(dir, mv, zipfile); err != nil {
@@ -150,12 +184,12 @@ func (c *cache) Fetch(ctx context.Context, mv module.Version) (module.SourceLoc,
 }
 
 // ModuleVersions implements [modload.Registry.ModuleVersions].
-func (c *cache) ModuleVersions(ctx context.Context, mpath string) ([]string, error) {
+func (c *Cache) ModuleVersions(ctx context.Context, mpath string) ([]string, error) {
 	// TODO should this do any kind of short-term caching?
 	return c.reg.ModuleVersions(ctx, mpath)
 }
 
-func (c *cache) downloadZip(ctx context.Context, mv module.Version) (zipfile string, err error) {
+func (c *Cache) downloadZip(ctx context.Context, mv module.Version) (zipfile string, err error) {
 	return c.downloadZipCache.Do(mv, func() (string, error) {
 		zipfile, err := c.cachePath(mv, "zip")
 		if err != nil {
@@ -180,7 +214,7 @@ func (c *cache) downloadZip(ctx context.Context, mv module.Version) (zipfile str
 	})
 }
 
-func (c *cache) downloadZip1(ctx context.Context, mod module.Version, zipfile string) (err error) {
+func (c *Cache) downloadZip1(ctx context.Context, mod module.Version, zipfile string) (err error) {
 	// Double-check that the zipfile was not created while we were waiting for
 	// the lock in downloadZip.
 	if _, err := os.Stat(zipfile); err == nil {
@@ -242,29 +276,27 @@ func (c *cache) downloadZip1(ctx context.Context, mod module.Version, zipfile st
 	return nil
 }
 
-func (c *cache) downloadModFile(ctx context.Context, mod module.Version) ([]byte, error) {
-	return c.modFileCache.Do(mod.String(), func() ([]byte, error) {
-		modfile, data, err := c.readDiskModFile(mod)
-		if err == nil {
-			return data, nil
-		}
-		logf("cue: downloading %s", mod)
-		unlock, err := c.lockVersion(mod)
-		if err != nil {
-			return nil, err
-		}
-		defer unlock()
-		// Double-check that the file hasn't been created while we were
-		// acquiring the lock.
-		_, data, err = c.readDiskModFile(mod)
-		if err == nil {
-			return data, nil
-		}
-		return c.downloadModFile1(ctx, mod, modfile)
-	})
+func (c *Cache) fetchModFileData(ctx context.Context, mod module.Version) ([]byte, error) {
+	modfile, data, err := c.readDiskModFile(mod)
+	if err == nil {
+		return data, nil
+	}
+	logf("cue: downloading %s", mod)
+	unlock, err := c.lockVersion(mod)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	// Double-check that the file hasn't been created while we were
+	// acquiring the lock.
+	_, data, err = c.readDiskModFile(mod)
+	if err == nil {
+		return data, nil
+	}
+	return c.downloadModFile1(ctx, mod, modfile)
 }
 
-func (c *cache) downloadModFile1(ctx context.Context, mod module.Version, modfile string) ([]byte, error) {
+func (c *Cache) downloadModFile1(ctx context.Context, mod module.Version, modfile string) ([]byte, error) {
 	m, err := c.reg.GetModule(ctx, mod)
 	if err != nil {
 		return nil, err
@@ -279,7 +311,7 @@ func (c *cache) downloadModFile1(ctx context.Context, mod module.Version, modfil
 	return data, nil
 }
 
-func (c *cache) dirToLocation(fpath string) module.SourceLoc {
+func (c *Cache) dirToLocation(fpath string) module.SourceLoc {
 	return module.SourceLoc{
 		FS:  module.OSDirFS(fpath),
 		Dir: ".",
@@ -305,8 +337,8 @@ func makeDirsReadOnly(dir string) {
 	})
 
 	// Run over list backward to chmod children before parents.
-	for i := len(dirs) - 1; i >= 0; i-- {
-		os.Chmod(dirs[i].path, dirs[i].mode&^0222)
+	for _, dir := range slices.Backward(dirs) {
+		os.Chmod(dir.path, dir.mode&^0222)
 	}
 }
 
@@ -346,8 +378,8 @@ func quoteGlob(s string) string {
 
 // tempFile creates a new temporary file with given permission bits.
 func tempFile(ctx context.Context, dir, prefix string, perm fs.FileMode) (f *os.File, err error) {
-	for i := 0; i < 10000; i++ {
-		name := filepath.Join(dir, prefix+strconv.Itoa(rand.Intn(1000000000))+".tmp")
+	for range 10000 {
+		name := filepath.Join(dir, prefix+strconv.Itoa(rand.IntN(1000000000))+".tmp")
 		f, err = os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, perm)
 		if os.IsExist(err) {
 			if ctx.Err() != nil {

@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package cuecontext creates [cue.Context] values,
+// which are needed for creating [cue.Value] values
+// and using the core API in the [cue] package.
 package cuecontext
 
 import (
 	"fmt"
 
 	"cuelang.org/go/cue"
+	"cuelang.org/go/cue/inject/embed"
 	"cuelang.org/go/internal"
 	"cuelang.org/go/internal/core/runtime"
 	"cuelang.org/go/internal/cuedebug"
@@ -40,42 +44,54 @@ type Option struct {
 // [cue help environment]: https://cuelang.org/docs/reference/command/cue-help-environment/
 func New(options ...Option) *cue.Context {
 	r := runtime.New()
+	// Embedding is always available.
+	r.AddInjection(embed.New())
 	for _, o := range options {
 		o.apply(r)
 	}
 	return (*cue.Context)(r)
 }
 
-// An ExternInterpreter creates a compiler that can produce implementations of
-// functions written in a language other than CUE. It is currently for internal
-// use only.
-type ExternInterpreter = runtime.Interpreter
+// Deprecated: use [Injection] instead.
+type ExternInterpreter = runtime.Injection
 
-// Interpreter associates an interpreter for external code with this context.
+// An Injection provides a way to inject runtime values
+// into imported CUE code.
+type Injection = runtime.Injection
+
+// Deprecated: use [WithInjection] instead.
 func Interpreter(i ExternInterpreter) Option {
+	return WithInjection(i)
+}
+
+// WithInjection associates an injection for external code with this context.
+// Note that several injections can be associated with the same extern
+// kind; if so, all apply and their results are unifed.
+func WithInjection(i Injection) Option {
 	return Option{func(r *runtime.Runtime) {
-		r.SetInterpreter(i)
+		r.AddInjection(i)
 	}}
 }
 
 type EvalVersion = internal.EvaluatorVersion
 
 const (
-	// EvalDefault is the latest stable version of the evaluator.
+	// EvalDefault is the default version of the evaluator, which is selected based on
+	// the CUE_EXPERIMENT environment variable described in [cue help environment].
+	//
+	// [cue help environment]: https://cuelang.org/docs/reference/command/cue-help-environment/
 	EvalDefault EvalVersion = internal.DefaultVersion
 
-	// EvalExperiment refers to the latest unstable version of the evaluator.
-	// Note that this version may change without notice.
+	// EvalDefault is the latest stable version of the evaluator, currently [EvalV3].
+	EvalStable EvalVersion = internal.StableVersion
+
+	// EvalExperiment refers to the latest in-development version of the evaluator,
+	// currently [EvalV3]. Note that this version may change without notice.
 	EvalExperiment EvalVersion = internal.DevVersion
 
-	// EvalV2 is the currently latest stable version of the evaluator.
-	// It was introduced in CUE version 0.3 and is being maintained until 2024.
-	EvalV2 EvalVersion = internal.EvalV2
-
-	// EvalV3 is the currently experimental version of the evaluator.
-	// It was introduced in 2024 and brought a new disjunction algorithm,
-	// a new closedness algorithm, a new core scheduler, and adds performance
-	// enhancements like structure sharing.
+	// EvalV3 is the current version of the evaluator. It was introduced in 2024
+	// and brought a new disjunction algorithm, a new closedness algorithm, a
+	// new core scheduler, and adds performance enhancements like structure sharing.
 	EvalV3 EvalVersion = internal.EvalV3
 )
 

@@ -23,9 +23,10 @@ import (
 	"sort"
 
 	"cuelang.org/go/cue"
-	"cuelang.org/go/internal"
+	"cuelang.org/go/cue/errors"
+	"cuelang.org/go/cue/token"
 	"cuelang.org/go/internal/core/adt"
-	"cuelang.org/go/internal/types"
+	"cuelang.org/go/internal/core/eval"
 )
 
 // valueSorter defines a sort.Interface; implemented in cue/builtinutil.go.
@@ -55,48 +56,7 @@ func (s *valueSorter) Less(i, j int) bool {
 		return false
 	}
 
-	if s.ctx.Version == internal.DevVersion {
-		return s.lessNew(i, j)
-	}
-
-	var x, y types.Value
-	s.a[i].Core(&x)
-	s.a[j].Core(&y)
-
-	// Save the state of all relevant arcs and restore later for the
-	// next comparison.
-	saveCmp := *s.cmp
-	saveLess := *s.less
-	saveX := *s.x
-	saveY := *s.y
-
-	s.x.InsertConjunctsFrom(x.V)
-	s.y.InsertConjunctsFrom(y.V)
-
-	// TODO(perf): if we can determine that the comparator values for
-	// x and y are idempotent (no arcs and a basevalue being top or
-	// a struct or list marker), then we do not need to reevaluate the input.
-	// In that case, we can use the below code instead of the above two loops
-	// setting the conjuncts. This may improve performance significantly.
-	//
-	// s.x.BaseValue = x.V.BaseValue
-	// s.x.Arcs = x.V.Arcs
-	// s.y.BaseValue = y.V.BaseValue
-	// s.y.Arcs = y.V.Arcs
-
-	s.less.Finalize(s.ctx)
-	isLess := s.ctx.BoolValue(s.less)
-	if b := s.less.Err(s.ctx); b != nil && s.err == nil {
-		s.err = b.Err
-		return true
-	}
-
-	*s.less = saveLess
-	*s.cmp = saveCmp
-	*s.x = saveX
-	*s.y = saveY
-
-	return isLess
+	return s.lessNew(i, j)
 }
 
 func (s *valueSorter) lessNew(i, j int) bool {
@@ -114,9 +74,8 @@ func (s *valueSorter) lessNew(i, j int) bool {
 	xa := getArc(ctx, n, "x")
 	ya := getArc(ctx, n, "y")
 
-	var x, y types.Value
-	s.a[i].Core(&x)
-	s.a[j].Core(&y)
+	x := s.a[i].Core()
+	y := s.a[j].Core()
 
 	xa.InsertConjunctsFrom(x.V)
 	ya.InsertConjunctsFrom(y.V)
@@ -147,12 +106,13 @@ var less = cue.ParsePath("less")
 
 func makeValueSorter(list []cue.Value, cmp cue.Value) (s valueSorter) {
 	if v := cmp.LookupPath(less); !v.Exists() {
-		return valueSorter{err: v.Err()}
+		// The comparator is already concrete here, so a missing "less" field is
+		// fatal rather than incomplete.
+		return valueSorter{err: errors.Newf(token.NoPos, "field not found: less")}
 	}
 
-	var v types.Value
-	cmp.Core(&v)
-	ctx := adt.NewContext(v.R, v.V)
+	v := cmp.Core()
+	ctx := eval.NewContext(v.R, v.V)
 
 	n := &adt.Vertex{
 		Label:     v.V.Label,
@@ -225,7 +185,7 @@ func IsSorted(list []cue.Value, cmp cue.Value) bool {
 	return sort.IsSorted(&s)
 }
 
-// IsSortedStrings tests whether a list is a sorted lists of strings.
+// IsSortedStrings tests whether a list is a sorted list of strings.
 func IsSortedStrings(a []string) bool {
 	return slices.IsSorted(a)
 }

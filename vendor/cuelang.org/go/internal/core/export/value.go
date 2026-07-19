@@ -15,6 +15,7 @@
 package export
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
 	"strings"
@@ -23,7 +24,6 @@ import (
 	"cuelang.org/go/cue/ast/astutil"
 	"cuelang.org/go/cue/literal"
 	"cuelang.org/go/cue/token"
-	"cuelang.org/go/internal"
 	"cuelang.org/go/internal/core/adt"
 )
 
@@ -44,6 +44,14 @@ func (e *exporter) bareValue(v adt.Value) ast.Expr {
 // value with a reference in graph mode.
 
 func (e *exporter) vertex(n *adt.Vertex) (result ast.Expr) {
+	// Guard against infinite recursion when a vertex cycles back to itself
+	// through BuiltinValidator arguments or other value-level cycles.
+	for i := range e.stack {
+		if e.stack[i].node == n {
+			return ast.NewIdent("_")
+		}
+	}
+
 	var attrs []*ast.Attribute
 	if e.cfg.ShowAttributes {
 		attrs = ExtractDeclAttrs(n)
@@ -56,10 +64,9 @@ func (e *exporter) vertex(n *adt.Vertex) (result ast.Expr) {
 		e.popFrame(saved)
 	}()
 
-	n.VisitLeafConjuncts(func(c adt.Conjunct) bool {
+	for c := range n.LeafConjuncts() {
 		e.markLets(c.Expr().Source(), s)
-		return true
-	})
+	}
 
 	switch x := n.BaseValue.(type) {
 	case nil:
@@ -103,18 +110,24 @@ func (e *exporter) vertex(n *adt.Vertex) (result ast.Expr) {
 	}
 	if result == nil {
 		// fall back to expression mode
-		a := []adt.Conjunct{}
-		n.VisitLeafConjuncts(func(c adt.Conjunct) bool {
-			a = append(a, c)
-			return true
-		})
 		// Use stable sort to ensure that tie breaks (for instance if elements
 		// are not associated with a position) are deterministic.
-		slices.SortStableFunc(a, cmpConjuncts)
+		a := slices.SortedStableFunc(n.LeafConjuncts(), cmpConjuncts)
 
+		// Dedup conjuncts that share the same body AST. Pushdown lands a
+		// `for x in xs { … }` over N items as N body conjuncts on the
+		// target, one per yielded env. The envs differ but symbolic
+		// rendering ignores them, so without dedup the fallback produces
+		// `X & X & …`.
+		seen := map[adt.Elem]bool{}
 		exprs := make([]ast.Expr, 0, len(a))
 		for _, c := range a {
-			if x := e.expr(c.Env, c.Elem()); x != dummyTop {
+			elem := c.Elem()
+			if seen[elem] {
+				continue
+			}
+			seen[elem] = true
+			if x := e.expr(c.Env, elem); x != dummyTop {
 				exprs = append(exprs, x)
 			}
 		}
@@ -122,9 +135,7 @@ func (e *exporter) vertex(n *adt.Vertex) (result ast.Expr) {
 		result = ast.NewBinExpr(token.AND, exprs...)
 	}
 
-	if len(s.Elts) > 0 {
-		filterUnusedLets(s)
-	}
+	filterUnusedLets(s)
 	if result != s && len(s.Elts) > 0 {
 		// There are used let expressions within a non-struct.
 		// For now we just fall back to the original expressions.
@@ -192,6 +203,12 @@ func (e *exporter) value(n adt.Value, a ...adt.Conjunct) (result ast.Expr) {
 			return e.bareValue(x.Values[0])
 		}
 
+		if e.cfg.Simplify {
+			if name := adt.MatchBuiltinRange(x); name != "" {
+				return ast.NewIdent(name)
+			}
+		}
+
 		a := []adt.Value{}
 		b := boundSimplifier{e: e}
 		for _, v := range x.Values {
@@ -228,6 +245,9 @@ func (e *exporter) value(n adt.Value, a ...adt.Conjunct) (result ast.Expr) {
 		}
 		result = ast.NewBinExpr(token.OR, a...)
 
+	case *adt.NodeLink:
+		return e.value(x.Node, a...)
+
 	default:
 		panic(fmt.Sprintf("unsupported type %T", x))
 	}
@@ -242,7 +262,7 @@ func (e *exporter) bottom(n *adt.Bottom) *ast.BottomLit {
 	if x := n.Err; x != nil {
 		msg := x.Error()
 		comment := &ast.Comment{Text: "// " + msg}
-		err.AddComment(&ast.CommentGroup{
+		ast.AddComment(err, &ast.CommentGroup{
 			Line:     true,
 			Position: 2,
 			List:     []*ast.Comment{comment},
@@ -259,15 +279,13 @@ func (e *exporter) bool(n *adt.Bool) (b *ast.BasicLit) {
 	return ast.NewBool(n.B)
 }
 
-func extractBasic(a []adt.Conjunct) (lit *ast.BasicLit) {
-	adt.VisitConjuncts(a, func(c adt.Conjunct) bool {
+func extractBasic(a []adt.Conjunct) *ast.BasicLit {
+	for c := range adt.ConjunctsSeq(a) {
 		if b, ok := c.Source().(*ast.BasicLit); ok {
-			lit = &ast.BasicLit{Kind: b.Kind, Value: b.Value}
-			return false
+			return &ast.BasicLit{Kind: b.Kind, Value: b.Value}
 		}
-		return true
-	})
-	return lit
+	}
+	return nil
 }
 
 func (e *exporter) num(n *adt.Num, orig []adt.Conjunct) *ast.BasicLit {
@@ -321,7 +339,7 @@ func (e *exporter) boundValue(n *adt.BoundValue) ast.Expr {
 
 func (e *exporter) builtin(x *adt.Builtin) ast.Expr {
 	if x.Package == 0 {
-		return ast.NewIdent(x.Name)
+		return ast.NewPredeclared(x.Name)
 	}
 	spec := ast.NewImport(nil, x.Package.StringValue(e.index))
 	info, _ := astutil.ParseImportSpec(spec)
@@ -434,7 +452,9 @@ func (e *exporter) structComposite(v *adt.Vertex, attrs []*ast.Attribute) ast.Ex
 		case adt.DefinitionLabel:
 			show = p.ShowDefinitions
 		case adt.HiddenLabel, adt.HiddenDefinitionLabel:
-			show = p.ShowHidden && label.PkgID(e.ctx) == e.pkgID
+			lpkg := label.PkgID(e.ctx)
+			pkgID := cmp.Or(e.pkgID, "_")
+			show = p.ShowHidden && lpkg == pkgID
 		}
 		if !show {
 			continue
@@ -460,7 +480,7 @@ func (e *exporter) structComposite(v *adt.Vertex, attrs []*ast.Attribute) ast.Ex
 		// This package typically does not create errors that did not result
 		// from evaluation already.
 
-		internal.SetConstraint(f, arc.ArcType.Token())
+		f.Constraint = arc.ArcType.Token()
 
 		f.Value = e.vertex(arc.DerefValue())
 

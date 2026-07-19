@@ -27,32 +27,28 @@ import (
 	"cuelang.org/go/internal/core/adt"
 )
 
-type compactPrinter struct {
-	printer
-}
-
-func (w *compactPrinter) string(s string) {
-	w.dst = append(w.dst, s...)
-}
-
-func (w *compactPrinter) node(n adt.Node) {
+func (w *printer) compactNode(n adt.Node) {
 	switch x := n.(type) {
 	case *adt.Vertex:
 		if x.BaseValue == nil || (w.cfg.Raw && !x.IsData()) {
 			i := 0
-			x.VisitLeafConjuncts(func(c adt.Conjunct) bool {
+			for c := range x.LeafConjuncts() {
 				if i > 0 {
 					w.string(" & ")
 				}
 				i++
 				w.node(c.Elem())
-				return true
-			})
+			}
 			return
 		}
 
 		switch v := x.BaseValue.(type) {
 		case *adt.StructMarker:
+			if !w.pushVertex(x) {
+				return
+			}
+			defer w.popVertex()
+
 			w.string("{")
 			for i, a := range x.Arcs {
 				if i > 0 {
@@ -80,16 +76,31 @@ func (w *compactPrinter) node(n adt.Node) {
 			w.string("}")
 
 		case *adt.ListMarker:
+			if !w.pushVertex(x) {
+				return
+			}
+			defer w.popVertex()
+
 			w.string("[")
-			for i, a := range x.Arcs {
-				if i > 0 {
+			// Only the integer-labeled arcs are list elements; a list vertex
+			// may also carry hidden fields and let bindings, which must not be
+			// printed as elements. See [adt.Vertex.Elems].
+			first := true
+			for _, a := range x.Arcs {
+				if !a.Label.IsInt() {
+					continue
+				}
+				if !first {
 					w.string(",")
 				}
+				first = false
 				w.node(a)
 			}
 			w.string("]")
 
 		case *adt.Vertex:
+			// Disjunction, structure shared, etc.
+
 			if v, ok := w.printShared(x); !ok {
 				w.node(v)
 				w.popVertex()
@@ -162,7 +173,7 @@ func (w *compactPrinter) node(n adt.Node) {
 		w.string(`_|_`)
 		if x.Err != nil {
 			w.string("(")
-			w.string(x.Err.Error())
+			w.shortError(x.Err, false)
 			w.string(")")
 		}
 
@@ -207,6 +218,9 @@ func (w *compactPrinter) node(n adt.Node) {
 
 	case *adt.FieldReference:
 		w.label(x.Label)
+		if x.Optional {
+			w.string("?")
+		}
 
 	case *adt.ValueReference:
 		w.label(x.Label)
@@ -231,12 +245,18 @@ func (w *compactPrinter) node(n adt.Node) {
 		w.node(x.X)
 		w.string(".")
 		w.label(x.Sel)
+		if x.Optional {
+			w.string("?")
+		}
 
 	case *adt.IndexExpr:
 		w.node(x.X)
 		w.string("[")
 		w.node(x.Index)
 		w.string("]")
+		if x.Optional {
+			w.string("?")
+		}
 
 	case *adt.SliceExpr:
 		w.node(x.X)
@@ -270,6 +290,10 @@ func (w *compactPrinter) node(n adt.Node) {
 		w.node(x.Y)
 		w.string(")")
 
+	case *adt.OpenExpr:
+		w.node(x.X)
+		w.string("...")
+
 	case *adt.CallExpr:
 		w.node(x.Fun)
 		w.string("(")
@@ -277,7 +301,7 @@ func (w *compactPrinter) node(n adt.Node) {
 			if i > 0 {
 				w.string(", ")
 			}
-			w.node(a)
+			w.arg(a)
 		}
 		w.string(")")
 
@@ -295,7 +319,7 @@ func (w *compactPrinter) node(n adt.Node) {
 			if i > 0 {
 				w.string(", ")
 			}
-			w.node(a)
+			w.arg(a)
 		}
 		w.string(")")
 
@@ -314,6 +338,12 @@ func (w *compactPrinter) node(n adt.Node) {
 		w.string(")")
 
 	case *adt.Conjunction:
+		if w.compactBuiltins {
+			if name := adt.MatchBuiltinRange(x); name != "" {
+				w.string(name)
+				break
+			}
+		}
 		for i, c := range x.Values {
 			if i > 0 {
 				w.string(" & ")
@@ -345,6 +375,10 @@ func (w *compactPrinter) node(n adt.Node) {
 			w.node(c)
 		}
 		w.node(adt.ToExpr(x.Value))
+		if x.Fallback != nil {
+			w.string(" else ")
+			w.node(x.Fallback)
+		}
 
 	case *adt.ForClause:
 		w.string("for ")
@@ -366,6 +400,17 @@ func (w *compactPrinter) node(n adt.Node) {
 		w.string(" = ")
 		w.node(x.Expr)
 		w.string(" ")
+
+	case *adt.TryClause:
+		w.string("try ")
+		if x.Label != adt.InvalidLabel {
+			// Assignment form: try x = expr
+			w.ident(x.Label)
+			w.string(" = ")
+			w.node(x.Expr)
+			w.string(" ")
+		}
+		// Struct form has no Ident/Expr - body is in Comprehension.Value
 
 	case *adt.ValueClause:
 

@@ -32,30 +32,38 @@ package adt
 //
 
 import (
+	"slices"
+
 	"cuelang.org/go/cue/ast"
 	"cuelang.org/go/cue/errors"
 	cueformat "cuelang.org/go/cue/format"
 	"cuelang.org/go/cue/token"
+	"cuelang.org/go/internal/iterutil"
 )
 
 // ErrorCode indicates the type of error. The type of error may influence
 // control flow. No other aspects of an error may influence control flow.
 type ErrorCode int8
 
-//go:generate go run golang.org/x/tools/cmd/stringer -type=ErrorCode -linecomment
+//go:generate go tool stringer -type=ErrorCode -linecomment
 
 const (
 	// An EvalError is a fatal evaluation error.
 	EvalError ErrorCode = iota // eval
 
-	// A UserError is a fatal error originating from the user.
+	// A UserError is a fatal error originating from the user using the error
+	// builtin.
 	UserError // user
+
+	// A LegacyUserError is a fatal error originating from the user using the
+	// _|_ token, which we intend to phase out.
+	LegacyUserError // user
 
 	// StructuralCycleError means a structural cycle was found. Structural
 	// cycles are permanent errors, but they are not passed up recursively,
 	// as a unification of a value with a structural cycle with one that
 	// doesn't may still give a useful result.
-	StructuralCycleError // structural cycle
+	StructuralCycleError // structural_cycle
 
 	// IncompleteError means an evaluation could not complete because of
 	// insufficient information that may still be added later.
@@ -75,15 +83,11 @@ type Bottom struct {
 	Src ast.Node
 	Err errors.Error
 
-	Code ErrorCode
-	// Permanent indicates whether an incomplete error can be
-	// resolved later without making the configuration more specific.
-	// This may happen when an arc isn't fully resolved yet.
-	Permanent    bool
+	Code         ErrorCode
 	HasRecursive bool
 	ChildError   bool // Err is the error of the child
 	NotExists    bool // This error originated from a failed lookup.
-	ForCycle     bool // this is a for cycle
+	CloseCheck   bool // This error resulted from a close check.
 	// Value holds the computed value so far in case
 	Value Value
 
@@ -93,9 +97,8 @@ type Bottom struct {
 	Node *Vertex
 }
 
-func (x *Bottom) Source() ast.Node        { return x.Src }
-func (x *Bottom) Kind() Kind              { return BottomKind }
-func (x *Bottom) Specialize(k Kind) Value { return x } // XXX remove
+func (x *Bottom) Source() ast.Node { return x.Src }
+func (x *Bottom) Kind() Kind       { return BottomKind }
 
 func (b *Bottom) IsIncomplete() bool {
 	if b == nil {
@@ -107,7 +110,7 @@ func (b *Bottom) IsIncomplete() bool {
 // isLiteralBottom reports whether x is an error originating from a user.
 func isLiteralBottom(x Expr) bool {
 	b, ok := x.(*Bottom)
-	return ok && b.Code == UserError
+	return ok && b.Code == LegacyUserError
 }
 
 // isError reports whether v is an error or nil.
@@ -144,12 +147,13 @@ func (n *nodeContext) AddChildError(recursive *Bottom) {
 	}
 	x := v.BaseValue
 	err, _ := x.(*Bottom)
-	if err == nil {
+	if err == nil || err.CloseCheck {
 		n.setBaseValue(&Bottom{
 			Code:         recursive.Code,
 			Value:        v,
 			HasRecursive: true,
 			ChildError:   true,
+			CloseCheck:   recursive.CloseCheck,
 			Err:          recursive.Err,
 			Node:         n.node,
 		})
@@ -198,13 +202,14 @@ func CombineErrors(src ast.Node, x, y Value) *Bottom {
 	}
 
 	return &Bottom{
-		Src:  src,
-		Err:  errors.Append(a.Err, b.Err),
-		Code: a.Code,
+		Src:        src,
+		Err:        errors.Append(a.Err, b.Err),
+		Code:       a.Code,
+		CloseCheck: a.CloseCheck || b.CloseCheck,
 	}
 }
 
-func addPositions(err *ValueError, c Conjunct) {
+func addPositions(ctx *OpContext, err *ValueError, c Conjunct) {
 	switch x := c.x.(type) {
 	case *Field:
 		// if x.ArcType == ArcRequired {
@@ -212,26 +217,24 @@ func addPositions(err *ValueError, c Conjunct) {
 		// }
 	case *ConjunctGroup:
 		for _, c := range *x {
-			addPositions(err, c)
+			addPositions(ctx, err, c)
 		}
 	}
-	if c.CloseInfo.closeInfo != nil {
-		err.AddPosition(c.CloseInfo.location)
-	}
+	err.AddPos(c.CloseInfo.Location(ctx))
 }
 
-func NewRequiredNotPresentError(ctx *OpContext, v *Vertex) *Bottom {
+func NewRequiredNotPresentError(ctx *OpContext, v *Vertex, morePositions ...Node) *Bottom {
 	saved := ctx.PushArc(v)
 	err := ctx.Newf("field is required but not present")
-	v.VisitLeafConjuncts(func(c Conjunct) bool {
+	for _, p := range morePositions {
+		err.AddPosition(p)
+	}
+	for c := range v.LeafConjuncts() {
 		if f, ok := c.x.(*Field); ok && f.ArcType == ArcRequired {
 			err.AddPosition(c.x)
 		}
-		if c.CloseInfo.closeInfo != nil {
-			err.AddPosition(c.CloseInfo.location)
-		}
-		return true
-	})
+		err.AddPos(c.CloseInfo.Location(ctx))
+	}
 
 	b := &Bottom{
 		Code: IncompleteError,
@@ -245,10 +248,9 @@ func NewRequiredNotPresentError(ctx *OpContext, v *Vertex) *Bottom {
 func newRequiredFieldInComprehensionError(ctx *OpContext, x *ForClause, v *Vertex) *Bottom {
 	err := ctx.Newf("missing required field in for comprehension: %v", v.Label)
 	err.AddPosition(x.Src)
-	v.VisitLeafConjuncts(func(c Conjunct) bool {
-		addPositions(err, c)
-		return true
-	})
+	for c := range v.LeafConjuncts() {
+		addPositions(ctx, err, c)
+	}
 	return &Bottom{
 		Code: IncompleteError,
 		Err:  err,
@@ -269,7 +271,17 @@ func (v *Vertex) reportFieldCycleError(c *OpContext, pos token.Pos, f Feature) *
 
 func (v *Vertex) reportFieldError(c *OpContext, pos token.Pos, f Feature, intMsg, stringMsg string) *Bottom {
 	code := IncompleteError
-	if !v.Accept(c, f) {
+	// If v is an error, we need to adopt the worst error.
+	if b := v.Bottom(); b != nil && !isCyclePlaceholder(b) {
+		code = b.Code
+	} else if s := v.state; s != nil && s.errs != nil && s.errs.Code == CycleError {
+		// Also check cycle errors in the state (e.g. from failed
+		// comprehension tasks) that have not yet been promoted to BaseValue.
+		// This ensures that when a comp fails due to a mutual cycle, lookups
+		// of fields on the same vertex report CycleError instead of
+		// IncompleteError, allowing validate to propagate the cycle.
+		code = s.errs.Code
+	} else if !v.Accept(c, f) {
 		code = EvalError
 	}
 
@@ -277,7 +289,7 @@ func (v *Vertex) reportFieldError(c *OpContext, pos token.Pos, f Feature, intMsg
 
 	var err errors.Error
 	if f.IsInt() {
-		err = c.NewPosf(pos, intMsg, f.Index(), len(v.Elems()))
+		err = c.NewPosf(pos, intMsg, f.Index(), iterutil.Count(v.Elems()))
 	} else {
 		err = c.NewPosf(pos, stringMsg, label)
 	}
@@ -291,35 +303,66 @@ func (v *Vertex) reportFieldError(c *OpContext, pos token.Pos, f Feature, intMsg
 	return b
 }
 
-// A ValueError is returned as a result of evaluating a value.
-type ValueError struct {
+// baseError contains common fields and methods for error types.
+type baseError struct {
 	r      Runtime
+	format func(Runtime, Node) string
 	v      *Vertex
 	pos    token.Pos
 	auxpos []token.Pos
+
+	altPath []string
+
+	// auxposBootstrap lets auxpos avoid extra allocations for few positions,
+	// which is a very common scenario.
+	auxposBootstrap [4]token.Pos
+}
+
+func (e *baseError) AddPos(p token.Pos) {
+	if !p.IsValid() {
+		return
+	}
+	if slices.Contains(e.auxpos, p) {
+		return
+	}
+	e.auxpos = append(e.auxpos, p)
+}
+
+func (e *baseError) AddClosedPositions(ctx *OpContext, p posInfo) {
+	for n := range p.AncestorPositions(ctx) {
+		e.AddPos(n)
+	}
+}
+
+func (e *baseError) Position() token.Pos {
+	return e.pos
+}
+
+func (e *baseError) InputPositions() []token.Pos {
+	return e.auxpos
+}
+
+func (e *baseError) Path() (a []string) {
+	if len(e.altPath) > 0 {
+		return e.altPath
+	}
+	if e.v == nil {
+		return nil
+	}
+	for _, f := range appendPath(nil, e.v) {
+		a = append(a, f.SelectorString(e.r))
+	}
+	return a
+}
+
+// A ValueError is returned as a result of evaluating a value.
+type ValueError struct {
+	baseError
 	errors.Message
 }
 
 func (v *ValueError) AddPosition(n Node) {
-	if n == nil {
-		return
-	}
-	if p := pos(n); p != token.NoPos {
-		for _, q := range v.auxpos {
-			if p == q {
-				return
-			}
-		}
-		v.auxpos = append(v.auxpos, p)
-	}
-}
-
-func (v *ValueError) AddClosedPositions(c CloseInfo) {
-	for s := c.closeInfo; s != nil; s = s.parent {
-		if loc := s.location; loc != nil {
-			v.AddPosition(loc)
-		}
-	}
+	v.AddPos(Pos(n))
 }
 
 func (c *OpContext) errNode() *Vertex {
@@ -347,71 +390,118 @@ func (c *OpContext) Newf(format string, args ...interface{}) *ValueError {
 }
 
 func appendNodePositions(a []token.Pos, n Node) []token.Pos {
-	if p := pos(n); p != token.NoPos {
+	if p := Pos(n); p.IsValid() {
 		a = append(a, p)
 	}
 	if v, ok := n.(*Vertex); ok {
-		v.VisitLeafConjuncts(func(c Conjunct) bool {
+		for c := range v.LeafConjuncts() {
 			a = appendNodePositions(a, c.Elem())
-			return true
-		})
+		}
 	}
 	return a
 }
 
 func (c *OpContext) NewPosf(p token.Pos, format string, args ...interface{}) *ValueError {
-	var a []token.Pos
+	err := &ValueError{
+		baseError: baseError{
+			r:       c.Runtime,
+			format:  c.Format,
+			v:       c.errNode(),
+			pos:     p,
+			altPath: c.makeAltPath(),
+		},
+	}
+	err.auxpos = err.auxposBootstrap[:0]
+
 	if len(c.positions) > 0 {
-		a = make([]token.Pos, 0, len(c.positions))
 		for _, n := range c.positions {
-			a = appendNodePositions(a, n)
+			err.auxpos = appendNodePositions(err.auxpos, n)
 		}
 	}
 	for i, arg := range args {
 		switch x := arg.(type) {
 		case Node:
-			a = appendNodePositions(a, x)
-			args[i] = c.Str(x)
+			err.auxpos = appendNodePositions(err.auxpos, x)
+			// A Vertex will set an error as its BaseValue via a Bottom node,
+			// which might be this error we are creating.
+			// Using the Vertex directly could then lead to endless recursion.
+			// Make a shallow copy to avoid that.
+			if v, ok := x.(*Vertex); ok {
+				vcopy := *v
+				x = &vcopy
+			}
+			// Keep the Node in args; ValueError.Msg wraps it in a
+			// Formatter lazily, avoiding an interface-boxing allocation
+			// for the common case where the error is never rendered.
+			args[i] = x
 		case ast.Node:
 			// TODO: ideally the core evaluator should not depend on higher
 			// level packages. This will allow the debug packages to be used
 			// more widely.
 			b, _ := cueformat.Node(x)
-			if p := x.Pos(); p != token.NoPos {
-				a = append(a, p)
+			if p := x.Pos(); p.IsValid() {
+				err.auxpos = append(err.auxpos, p)
 			}
 			args[i] = string(b)
 		case Feature:
 			args[i] = x.SelectorString(c.Runtime)
 		}
 	}
-	return &ValueError{
-		r:       c.Runtime,
-		v:       c.errNode(),
-		pos:     p,
-		auxpos:  a,
-		Message: errors.NewMessagef(format, args...),
+
+	err.Message = errors.NewMessagef(format, args...)
+	return err
+}
+
+func (c *OpContext) makeAltPath() (a []string) {
+	if len(c.altPath) == 0 {
+		return nil
 	}
+
+	for _, f := range appendPath(nil, c.altPath[0]) {
+		a = append(a, f.SelectorString(c))
+	}
+	for _, v := range c.altPath[1:] {
+		if f := v.Label; f != 0 {
+			a = append(a, f.SelectorString(c))
+		}
+	}
+	return a
+}
+
+// Msg wraps any Node args with [Formatter] lazily, so the boxing allocation
+// only happens when the error is actually rendered (the minority case).
+func (e *ValueError) Msg() (format string, args []interface{}) {
+	format, args = e.Message.Msg()
+	for i, a := range args {
+		if x, ok := a.(Node); ok {
+			args[i] = Formatter{X: x, F: e.format, R: e.r}
+		}
+	}
+	return format, args
 }
 
 func (e *ValueError) Error() string {
 	return errors.String(e)
 }
 
-func (e *ValueError) Position() token.Pos {
-	return e.pos
+// ConflictError defers formatting of conflict messages until the error is
+// actually needed, avoiding expensive string conversions and allocations.
+type ConflictError struct {
+	baseError
+	v1, v2 Node
+	k1, k2 Kind
 }
 
-func (e *ValueError) InputPositions() (a []token.Pos) {
-	return e.auxpos
+func (e *ConflictError) Error() string {
+	return errors.String(e)
 }
 
-func (e *ValueError) Path() (a []string) {
-	if e.v == nil {
-		return nil
+func (e *ConflictError) Msg() (format string, args []interface{}) {
+	v1Str := Formatter{X: e.v1, F: e.format, R: e.r}
+	v2Str := Formatter{X: e.v2, F: e.format, R: e.r}
+	if e.k1 == e.k2 {
+		return "conflicting values %s and %s", []interface{}{v1Str, v2Str}
 	}
-	for _, f := range appendPath(nil, e.v) {
-		a = append(a, f.SelectorString(e.r))
-	}
-	return a
+	return "conflicting values %s and %s (mismatched types %s and %s)",
+		[]interface{}{v1Str, v2Str, e.k1, e.k2}
 }

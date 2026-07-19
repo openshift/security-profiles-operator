@@ -147,14 +147,6 @@ func HasSuffix(s, suffix string) bool {
 	return strings.HasSuffix(s, suffix)
 }
 
-// Repeat returns a new string consisting of count copies of the string s.
-//
-// It panics if count is negative or if
-// the result of (len(s) * count) overflows.
-func Repeat(s string, count int) string {
-	return strings.Repeat(s, count)
-}
-
 // ToUpper returns s with all Unicode letters mapped to their upper case.
 func ToUpper(s string) string {
 	return strings.ToUpper(s)
@@ -174,7 +166,7 @@ func Trim(s, cutset string) string {
 // TrimLeft returns a slice of the string s with all leading
 // Unicode code points contained in cutset removed.
 //
-// To remove a prefix, use TrimPrefix instead.
+// To remove a prefix, use [TrimPrefix] instead.
 func TrimLeft(s, cutset string) string {
 	return strings.TrimLeft(s, cutset)
 }
@@ -182,7 +174,7 @@ func TrimLeft(s, cutset string) string {
 // TrimRight returns a slice of the string s, with all trailing
 // Unicode code points contained in cutset removed.
 //
-// To remove a suffix, use TrimSuffix instead.
+// To remove a suffix, use [TrimSuffix] instead.
 func TrimRight(s, cutset string) string {
 	return strings.TrimRight(s, cutset)
 }

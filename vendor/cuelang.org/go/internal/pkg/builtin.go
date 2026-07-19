@@ -20,7 +20,6 @@ import (
 
 	"cuelang.org/go/cue/errors"
 	"cuelang.org/go/cue/parser"
-	"cuelang.org/go/internal"
 	"cuelang.org/go/internal/core/adt"
 	"cuelang.org/go/internal/core/compile"
 	"cuelang.org/go/internal/core/convert"
@@ -70,7 +69,12 @@ func (p *Package) MustCompile(ctx *adt.OpContext, importPath string) *adt.Vertex
 	if len(p.Native) > 0 {
 		obj.AddConjunct(adt.MakeRootConjunct(nil, st))
 	}
-	for _, b := range p.Native {
+	for _, bref := range p.Native {
+		// Make a copy of each Builtin object; otherwise concurrent use by separate
+		// contexts will lead to data races when setting [Builtin.Pkg] below.
+		// TODO(perf): avoid copying the builtins, e.g. by using a sync.Once.
+		b := *bref
+
 		b.Pkg = pkgLabel
 
 		f := ctx.StringLabel(b.Name) // never starts with _
@@ -79,7 +83,7 @@ func (p *Package) MustCompile(ctx *adt.OpContext, importPath string) *adt.Vertex
 		if b.Const != "" {
 			v = mustParseConstBuiltin(ctx, b.Name, b.Const)
 		} else {
-			v = ToBuiltin(b)
+			v = ToBuiltin(&b)
 		}
 		st.Decls = append(st.Decls, &adt.Field{
 			Label: f,
@@ -126,12 +130,14 @@ func ToBuiltin(b *Builtin) *adt.Builtin {
 		Package:     b.Pkg,
 		Name:        b.Name,
 	}
-	x.Func = func(ctx *adt.OpContext, args []adt.Value) (ret adt.Expr) {
+	x.Func = func(call adt.BuiltinCallContext) (ret adt.Expr) {
+		ctx := call.OpContext()
+
 		// call, _ := ctx.Source().(*ast.CallExpr)
 		c := &CallCtxt{
-			ctx:     ctx,
-			args:    args,
-			builtin: b,
+			BuiltinCallContext: call,
+			ctx:                ctx,
+			builtin:            b,
 		}
 		defer func() {
 			var errVal interface{} = c.Err
@@ -165,7 +171,7 @@ func ToBuiltin(b *Builtin) *adt.Builtin {
 				return nil
 			}
 		}
-		return convert.GoValueToValue(ctx, c.Ret, true)
+		return convert.FromGoValue(ctx, c.Ret, true)
 	}
 	return x
 }
@@ -185,15 +191,7 @@ func mustParseConstBuiltin(ctx adt.Runtime, name, val string) adt.Expr {
 
 }
 
-func (x *Builtin) name(ctx *adt.OpContext) string {
-	if x.Pkg == 0 {
-		return x.Name
-	}
-	return fmt.Sprintf("%s.%s", x.Pkg.StringValue(ctx), x.Name)
-}
-
 func processErr(call *CallCtxt, errVal interface{}, ret adt.Expr) adt.Expr {
-	ctx := call.ctx
 	switch err := errVal.(type) {
 	case nil:
 	case ValidationError:
@@ -211,7 +209,7 @@ func processErr(call *CallCtxt, errVal interface{}, ret adt.Expr) adt.Expr {
 			}
 		}
 	case Bottomer:
-		ret = wrapCallErr(call, err.Bottom())
+		ret = err.Bottom()
 
 	case errors.Error:
 		// Convert lists of errors to a combined Bottom error.
@@ -227,21 +225,20 @@ func processErr(call *CallCtxt, errVal interface{}, ret adt.Expr) adt.Expr {
 			}
 		}
 
-		ret = wrapCallErr(call, &adt.Bottom{Err: err})
+		ret = &adt.Bottom{Err: err}
 	case error:
-		if call.Err == internal.ErrIncomplete {
-			err := ctx.NewErrf("incomplete value")
-			err.Code = adt.IncompleteError
-			ret = err
-		} else {
-			// TODO: store the underlying error explicitly
-			ret = wrapCallErr(call, &adt.Bottom{Err: errors.Promote(err, "")})
+		// TODO: store the underlying error explicitly
+		ret = &adt.Bottom{Err: errors.Promote(err, "")}
+	case string, fmt.Stringer:
+		// A string or a stringer likely used as a panic value.
+		ret = &adt.Bottom{
+			Err: errors.Newf(call.ctx.Pos(), "%s", err),
 		}
 	default:
-		// Likely a string passed to panic.
-		ret = wrapCallErr(call, &adt.Bottom{
-			Err: errors.Newf(call.Pos(), "%s", err),
-		})
+		// Some other value used when panicking; likely a bug.
+		ret = &adt.Bottom{
+			Err: errors.Newf(call.ctx.Pos(), "BUG: non-stringifiable %T", err),
+		}
 	}
 	return ret
 }

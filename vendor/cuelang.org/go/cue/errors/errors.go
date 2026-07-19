@@ -29,6 +29,7 @@ import (
 	"strings"
 
 	"cuelang.org/go/cue/token"
+	"cuelang.org/go/internal/core/format"
 )
 
 // New is a convenience wrapper for [errors.New] in the core library.
@@ -86,6 +87,8 @@ func NewMessagef(format string, args ...interface{}) Message {
 // NewMessage creates an error message for human consumption.
 //
 // Deprecated: Use [NewMessagef] instead.
+//
+//go:fix inline
 func NewMessage(format string, args []interface{}) Message {
 	return NewMessagef(format, args...)
 }
@@ -123,8 +126,8 @@ type Error interface {
 	Msg() (format string, args []interface{})
 }
 
-// Positions returns all positions returned by an error, sorted
-// by relevance when possible and with duplicates removed.
+// Positions returns the printable positions returned by an error,
+// sorted by relevance when possible and with duplicates removed.
 func Positions(err error) []token.Pos {
 	e := Error(nil)
 	if !errors.As(err, &e) {
@@ -134,18 +137,21 @@ func Positions(err error) []token.Pos {
 	a := make([]token.Pos, 0, 3)
 
 	pos := e.Position()
-	if pos.IsValid() {
+	if pos.File() != nil {
 		a = append(a, pos)
 	}
 	sortOffset := len(a)
 
 	for _, p := range e.InputPositions() {
-		if p.IsValid() && p != pos {
+		if p.File() != nil && p != pos {
 			a = append(a, p)
 		}
 	}
 
-	slices.SortFunc(a[sortOffset:], comparePosWithNoPosFirst)
+	// TODO if the Error we found wraps another error that itself
+	// has positions, we won't return them here but perhaps we should?
+
+	slices.SortFunc(a[sortOffset:], token.Pos.Compare)
 	return slices.Compact(a)
 }
 
@@ -155,9 +161,9 @@ func Positions(err error) []token.Pos {
 func comparePosWithNoPosFirst(a, b token.Pos) int {
 	if a == b {
 		return 0
-	} else if a == token.NoPos {
+	} else if !a.IsValid() {
 		return -1
-	} else if b == token.NoPos {
+	} else if !b.IsValid() {
 		return +1
 	}
 	return token.Pos.Compare(a, b)
@@ -248,7 +254,7 @@ func (e *wrapped) InputPositions() []token.Pos {
 }
 
 func (e *wrapped) Position() token.Pos {
-	if p := e.main.Position(); p != token.NoPos {
+	if p := e.main.Position(); p.IsValid() {
 		return p
 	}
 	if wrap, ok := e.wrap.(Error); ok {
@@ -273,10 +279,10 @@ func Promote(err error, msg string) Error {
 
 var _ Error = &posError{}
 
-// In an List, an error is represented by an *posError.
-// The position Pos, if valid, points to the beginning of
+// In a list, an error is represented by a *posError.
+// The position pos, if valid, points to the beginning of
 // the offending token, and the error condition is described
-// by Msg.
+// by Message.
 type posError struct {
 	pos token.Pos
 	Message
@@ -286,7 +292,11 @@ func (e *posError) Path() []string              { return nil }
 func (e *posError) InputPositions() []token.Pos { return nil }
 func (e *posError) Position() token.Pos         { return e.pos }
 
-// Append combines two errors, flattening Lists as necessary.
+// Append combines two errors, flattening lists as necessary.
+//
+// Note: this may mutate a if it is already a list, so
+// must not be used if a might have been shared across multiple
+// goroutines.
 func Append(a, b Error) Error {
 	switch x := a.(type) {
 	case nil:
@@ -299,7 +309,7 @@ func Append(a, b Error) Error {
 }
 
 // Errors reports the individual errors associated with an error, which is
-// the error itself if there is only one or, if the underlying type is List,
+// the error itself if there is only one or, if the underlying type is list,
 // its individual elements. If the given error is not an Error, it will be
 // promoted to one.
 func Errors(err error) []Error {
@@ -310,8 +320,11 @@ func Errors(err error) []Error {
 	var errorErr Error
 	switch {
 	case As(err, &listErr):
+		// TODO if err itself wraps a list, then the wrapping
+		// error information will be lost here.
 		return listErr
 	case As(err, &errorErr):
+		// TODO similar error loss here.
 		return []Error{errorErr}
 	default:
 		return []Error{Promote(err, "")}
@@ -331,10 +344,8 @@ func appendToList(a list, err Error) list {
 		}
 		return a
 	default:
-		for _, e := range a {
-			if e == err {
-				return a
-			}
+		if slices.Contains(a, err) {
+			return a
 		}
 		return append(a, err)
 	}
@@ -362,20 +373,6 @@ func (p list) As(target interface{}) bool {
 	return false
 }
 
-// AddNewf adds an Error with given position and error message to an List.
-func (p *list) AddNewf(pos token.Pos, msg string, args ...interface{}) {
-	err := &posError{pos: pos, Message: Message{format: msg, args: args}}
-	*p = append(*p, err)
-}
-
-// Add adds an Error with given position and error message to an List.
-func (p *list) Add(err Error) {
-	*p = appendToList(*p, err)
-}
-
-// Reset resets an List to no errors.
-func (p *list) Reset() { *p = (*p)[:0] }
-
 // Sanitize sorts multiple errors and removes duplicates on a best effort basis.
 // If err represents a single or no error, it returns the error as is.
 func Sanitize(err Error) Error {
@@ -397,55 +394,89 @@ func (p list) sanitize() list {
 		return p
 	}
 	a := slices.Clone(p)
-	a.RemoveMultiples()
+	a.removeMultiples()
 	return a
 }
 
-// Sort sorts an List. *posError entries are sorted by position,
-// other errors are sorted by error message, and before any *posError
-// entry.
-func (p list) Sort() {
-	slices.SortFunc(p, func(a, b Error) int {
-		if c := comparePosWithNoPosFirst(a.Position(), b.Position()); c != 0 {
+// removeMultiples sorts the list and removes duplicate errors, namely those
+// that share a position, path, and message.
+//
+// Messages are rendered only to disambiguate errors that share a position and
+// path, and each such error is rendered exactly once; errors with a unique
+// position and path, the common case, are never rendered. This matters because
+// rendering fully formats the message and can be expensive.
+func (p *list) removeMultiples() {
+	a := *p
+	if len(a) <= 1 {
+		return
+	}
+	// Sort by position and path alone, with no rendering, so that any potential
+	// duplicates end up adjacent.
+	slices.SortFunc(a, func(x, y Error) int {
+		if c := comparePosWithNoPosFirst(x.Position(), y.Position()); c != 0 {
 			return c
 		}
-		if c := slices.Compare(a.Path(), b.Path()); c != 0 {
-			return c
-		}
-		return cmp.Compare(a.Error(), b.Error())
-
+		return slices.Compare(x.Path(), y.Path())
 	})
-}
 
-// RemoveMultiples sorts an List and removes all but the first error per line.
-func (p *list) RemoveMultiples() {
-	p.Sort()
-	var last Error
-	i := 0
-	for _, e := range *p {
-		if last == nil || !approximateEqual(last, e) {
-			last = e
-			(*p)[i] = e
-			i++
+	// rendered pairs an error with its message so that a group can be ordered
+	// and deduplicated by message after rendering each member just once.
+	type rendered struct {
+		err Error
+		msg string
+	}
+	out := make(list, 0, len(a))
+	for i := 0; i < len(a); {
+		// Find the group sharing a position and path with a[i].
+		j := i + 1
+		for j < len(a) && a[i].Position() == a[j].Position() &&
+			slices.Equal(a[i].Path(), a[j].Path()) {
+			j++
 		}
+		if j-i == 1 {
+			// A lone error is kept without rendering it.
+			out = append(out, a[i])
+			i = j
+			continue
+		}
+		// Render each message once, then order and deduplicate by it.
+		group := make([]rendered, j-i)
+		for k, e := range a[i:j] {
+			group[k] = rendered{e, e.Error()}
+		}
+		slices.SortFunc(group, func(x, y rendered) int {
+			return cmp.Compare(x.msg, y.msg)
+		})
+		group = slices.CompactFunc(group, func(x, y rendered) bool {
+			return x.msg == y.msg
+		})
+		for _, r := range group {
+			out = append(out, r.err)
+		}
+		i = j
 	}
-	(*p) = (*p)[0:i]
+	*p = out
 }
 
-func approximateEqual(a, b Error) bool {
-	aPos := a.Position()
-	bPos := b.Position()
-	if aPos == token.NoPos || bPos == token.NoPos {
-		return a.Error() == b.Error()
-	}
-	return comparePosWithNoPosFirst(aPos, bPos) == 0 && slices.Compare(a.Path(), b.Path()) == 0
-}
-
-// An List implements the error interface.
+// A list implements the error interface by returning the
+// string for the first error in the list.
 func (p list) Error() string {
+	// TODO in general Error.Msg does not include the message
+	// from errors that are wrapped (see [wrapped.Msg] which does
+	// not include any text from the wrapped error, so this implementation
+	// of Error means that we might lose information when
+	// just printing an error list with regular %v.
 	format, args := p.Msg()
 	return fmt.Sprintf(format, args...)
 }
+
+// pathlessError wraps an Error to suppress its path, for use as a
+// format argument when the path is already provided by the caller.
+type pathlessError struct{ cueError }
+type cueError = Error // alias to avoid field name conflicting with Error() method
+
+func (e pathlessError) Path() []string { return nil }
+func (e pathlessError) Unwrap() error  { return Unwrap(e.cueError) }
 
 // Msg reports the unformatted error message for the first error, if any.
 func (p list) Msg() (format string, args []interface{}) {
@@ -455,7 +486,10 @@ func (p list) Msg() (format string, args []interface{}) {
 	case 1:
 		return p[0].Msg()
 	}
-	return "%s (and %d more errors)", []interface{}{p[0], len(p) - 1}
+	// Wrap p[0] to suppress its path. The list's own Path() already
+	// returns p[0].Path(), so including the path in the format arg
+	// would cause it to appear twice in the output.
+	return "%s (and %d more errors)", []interface{}{pathlessError{p[0]}, len(p) - 1}
 }
 
 // Position reports the primary position for the first error, if any.
@@ -503,14 +537,22 @@ type Config struct {
 
 	// ToSlash sets whether to use Unix paths. Mostly used for testing.
 	ToSlash bool
+
+	// OmitPath removes the path prefix from error messages.
+	OmitPath bool
+
+	// Printer is used internally to detect printing cycles.
+	Printer format.Printer
 }
 
+var zeroConfig = &Config{}
+
 // Print is a utility function that prints a list of errors to w,
-// one error per line, if the err parameter is an List. Otherwise
+// one error per line, if the err parameter is a list. Otherwise
 // it prints the err string.
 func Print(w io.Writer, err error, cfg *Config) {
 	if cfg == nil {
-		cfg = &Config{}
+		cfg = zeroConfig
 	}
 	for _, e := range list(Errors(err)).sanitize() {
 		printError(w, e, cfg)
@@ -528,20 +570,67 @@ func Details(err error, cfg *Config) string {
 // String generates a short message from a given Error.
 func String(err Error) string {
 	var b strings.Builder
-	writeErr(&b, err)
+	writeErr(&b, err, zeroConfig)
 	return b.String()
 }
 
-func writeErr(w io.Writer, err Error) {
-	if path := strings.Join(err.Path(), "."); path != "" {
-		_, _ = io.WriteString(w, path)
-		_, _ = io.WriteString(w, ": ")
+// StringWithConfig generates a short message from a given Error, using the
+// provided configuration.
+func StringWithConfig(err Error, cfg *Config) string {
+	var b strings.Builder
+	writeErr(&b, err, cfg)
+	return b.String()
+}
+
+func writeErr(w io.Writer, err Error, cfg *Config) {
+	if !cfg.OmitPath {
+		if path := strings.Join(err.Path(), "."); path != "" {
+			_, _ = io.WriteString(w, path)
+			_, _ = io.WriteString(w, ": ")
+		}
 	}
 
 	for {
 		u := errors.Unwrap(err)
 
 		msg, args := err.Msg()
+
+		// Just like [printError] does when printing one position per line,
+		// make sure that any position formatting arguments print as relative paths.
+		//
+		// Note that [Error.Msg] isn't clear about whether we should treat args as read-only,
+		// so we make a copy if we need to replace any arguments.
+		didCopy := false
+		for i, arg := range args {
+			var alt any
+			switch arg := arg.(type) {
+			case token.Pos:
+				pos := arg.Position()
+				pos.Filename = relPath(pos.Filename, cfg)
+				alt = pos
+			case token.Position:
+				pos := arg
+				pos.Filename = relPath(pos.Filename, cfg)
+				alt = pos
+			default:
+				if cfg.Printer == nil {
+					// We should always do something. Consider replacing
+					// vertices with a path if this is not set.
+					continue
+				}
+				var replaced bool
+				alt, replaced = cfg.Printer.ReplaceArg(arg)
+				if !replaced {
+					continue
+				}
+			}
+			if !didCopy {
+				args = slices.Clone(args)
+				didCopy = true
+			}
+			args[i] = alt
+		}
+
 		n, _ := fmt.Fprintf(w, msg, args...)
 
 		if u == nil {
@@ -573,7 +662,7 @@ func printError(w io.Writer, err error, cfg *Config) {
 	}
 
 	if e, ok := err.(Error); ok {
-		writeErr(w, e)
+		writeErr(w, e, cfg)
 	} else {
 		fprintf(w, "%v", err)
 	}
@@ -586,21 +675,7 @@ func printError(w io.Writer, err error, cfg *Config) {
 	fprintf(w, ":\n")
 	for _, p := range positions {
 		pos := p.Position()
-		path := pos.Filename
-		if cfg.Cwd != "" {
-			if p, err := filepath.Rel(cfg.Cwd, path); err == nil {
-				path = p
-				// Some IDEs (e.g. VSCode) only recognize a path if it starts
-				// with a dot. This also helps to distinguish between local
-				// files and builtin packages.
-				if !strings.HasPrefix(path, ".") {
-					path = fmt.Sprintf(".%c%s", filepath.Separator, path)
-				}
-			}
-		}
-		if cfg.ToSlash {
-			path = filepath.ToSlash(path)
-		}
+		path := relPath(pos.Filename, cfg)
 		fprintf(w, "    %s", path)
 		if pos.IsValid() {
 			if path != "" {
@@ -610,4 +685,22 @@ func printError(w io.Writer, err error, cfg *Config) {
 		}
 		fprintf(w, "\n")
 	}
+}
+
+func relPath(path string, cfg *Config) string {
+	if cfg.Cwd != "" {
+		if p, err := filepath.Rel(cfg.Cwd, path); err == nil {
+			path = p
+			// Some IDEs (e.g. VSCode) only recognize a path if it starts
+			// with a dot. This also helps to distinguish between local
+			// files and builtin packages.
+			if !strings.HasPrefix(path, ".") {
+				path = fmt.Sprintf(".%c%s", filepath.Separator, path)
+			}
+		}
+	}
+	if cfg.ToSlash {
+		path = filepath.ToSlash(path)
+	}
+	return path
 }

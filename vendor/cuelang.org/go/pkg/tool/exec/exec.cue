@@ -16,7 +16,8 @@ package exec
 
 // Run executes a program with the given arguments.
 Run: {
-	$id: *"tool/exec.Run" | "exec" // exec for backwards compatibility
+	$id: _id
+	_id: *"tool/exec.Run" | "exec" // exec for backwards compatibility
 
 	// cmd is a non-empty list holding the program name to run
 	// and the arguments to be passed to it.
@@ -33,7 +34,7 @@ Run: {
 	// If the value is a list, the entries mus be of the form key=value,
 	// where the last value takes precendence in the case of multiple
 	// occurrances of the same key.
-	env: {[string]: string} | [...=~"="]
+	env: *{[string]: string} | [...=~"="]
 
 	// stdout captures the output from stdout if it is of type bytes or string.
 	// The default value of null indicates it is redirected to the stdout of the

@@ -15,9 +15,11 @@
 package compile
 
 import (
+	"strings"
+
 	"cuelang.org/go/cue/errors"
-	"cuelang.org/go/internal"
 	"cuelang.org/go/internal/core/adt"
+	"cuelang.org/go/internal/iterutil"
 )
 
 // This file contains predeclared builtins.
@@ -25,26 +27,76 @@ import (
 const supportedByLen = adt.StructKind | adt.BytesKind | adt.StringKind | adt.ListKind
 
 var (
+	stringParam = adt.Param{Value: &adt.BasicType{K: adt.StringKind}}
 	structParam = adt.Param{Value: &adt.BasicType{K: adt.StructKind}}
 	listParam   = adt.Param{Value: &adt.BasicType{K: adt.ListKind}}
 	intParam    = adt.Param{Value: &adt.BasicType{K: adt.IntKind}}
 	topParam    = adt.Param{Value: &adt.BasicType{K: adt.TopKind}}
 )
 
+// error is a special builtin that allows users to create a custom error
+// message. If the argument is an interpolation, it will be evaluated and if it
+// results in an error, the argument will be inserted as an expression.
+var errorBuiltin = &adt.Builtin{
+	Name:  "error",
+	Added: "v0.14.0",
+
+	Params: []adt.Param{stringParam},
+	Result: adt.BottomKind,
+	RawFunc: func(call adt.BuiltinCallContext) adt.Value {
+		ctx := call.OpContext()
+		arg := call.Expr(0)
+
+		var b *adt.Bottom
+
+		switch x := arg.(type) {
+		case *adt.Interpolation:
+			var args []any
+			var w strings.Builder
+			for i := 0; i < len(x.Parts); i++ {
+				v := x.Parts[i]
+				w.WriteString(v.(*adt.String).Str)
+				if i++; i >= len(x.Parts) {
+					break
+				}
+				w.WriteString("%v")
+				y := call.OpContext().EvaluateKeepState(x.Parts[i])
+				if err := ctx.Err(); err != nil {
+					args = append(args, x.Parts[i])
+				} else if y.Concreteness() == adt.Concrete &&
+					y.Kind()&(adt.NumberKind|adt.StringKind|adt.BytesKind|adt.BoolKind) != 0 {
+					args = append(args, ctx.ToString(y))
+				} else {
+					args = append(args, y)
+				}
+			}
+			b = call.Errf(w.String(), args...)
+		default:
+			msg := ctx.ToString(call.Arg(0))
+			b = call.Errf("%s", msg)
+		}
+
+		_ = arg
+		b.Code = adt.UserError
+		return b
+	},
+}
+
 var lenBuiltin = &adt.Builtin{
 	Name:   "len",
 	Params: []adt.Param{{Value: &adt.BasicType{K: supportedByLen}}},
 	Result: adt.IntKind,
-	Func: func(c *adt.OpContext, args []adt.Value) adt.Expr {
-		v := args[0]
+	Func: func(call adt.BuiltinCallContext) adt.Expr {
+		c := call.OpContext()
+
+		v := call.Value(0)
 		if x, ok := v.(*adt.Vertex); ok {
-			x.LockArcs = true
 			switch x.BaseValue.(type) {
 			case nil:
 				// This should not happen, but be defensive.
 				return c.NewErrf("unevaluated vertex")
 			case *adt.ListMarker:
-				return c.NewInt64(int64(len(x.Elems())), v)
+				return c.NewInt64(int64(iterutil.Count(x.Elems())), v)
 
 			case *adt.StructMarker:
 				n := 0
@@ -82,27 +134,91 @@ var closeBuiltin = &adt.Builtin{
 	Name:   "close",
 	Params: []adt.Param{structParam},
 	Result: adt.StructKind,
-	Func: func(c *adt.OpContext, args []adt.Value) adt.Expr {
-		s, ok := args[0].(*adt.Vertex)
+	Func: func(call adt.BuiltinCallContext) adt.Expr {
+		c := call.OpContext()
+		s, ok := call.Value(0).(*adt.Vertex)
 		if !ok {
 			return c.NewErrf("struct argument must be concrete")
 		}
-		var v *adt.Vertex
-		if c.Version == internal.DevVersion {
-			// TODO(evalv3) this is a rather convoluted and inefficient way to
-			// accomplish signaling vertex should be closed. In most cases, it
-			// would suffice to set IsClosed in the CloseInfo. However, that
-			// does not cover all code paths. Consider simplifying this.
-			v = c.Wrap(s, c.CloseInfo())
-			v.ClosedNonRecursive = true
-		} else {
-			if m, ok := s.BaseValue.(*adt.StructMarker); ok && m.NeedClose {
-				return s
-			}
-			v = s.Clone()
-			v.BaseValue = &adt.StructMarker{NeedClose: true}
-		}
+		// TODO(evalv3) this is a rather convoluted and inefficient way to
+		// accomplish signaling vertex should be closed. In most cases, it
+		// would suffice to set IsClosed in the CloseInfo. However, that
+		// does not cover all code paths. Consider simplifying this.
+		v := c.Wrap(s, c.CloseInfo())
+		v.ClosedNonRecursive = true
 		return v
+	},
+}
+
+var closeAllBuiltin = &adt.Builtin{
+	Name:   "__closeAll",
+	Params: []adt.Param{topParam},
+	Result: adt.TopKind,
+	Func: func(call adt.BuiltinCallContext) adt.Expr {
+		c := call.OpContext()
+
+		x := call.Expr(0)
+		switch x.(type) {
+		case *adt.StructLit, *adt.ListLit:
+			if src := x.Source(); src == nil || !src.Pos().Experiment().ExplicitOpen {
+				// Allow usage if explicit open is set
+				return c.NewErrf("__closeAll may only be used when explicitopen is enabled")
+			}
+		default:
+			return c.NewErrf("argument must be a struct or list literal")
+		}
+
+		// argument must be literal struct
+		s, ok := call.Value(0).(*adt.Vertex)
+		if !ok {
+			return c.NewErrf("struct argument must be concrete")
+		}
+
+		s.ClosedRecursive = true
+
+		return s
+	},
+}
+
+var recloseBuiltin = &adt.Builtin{
+	Name:   "__reclose",
+	Params: []adt.Param{topParam},
+	Result: adt.TopKind,
+	Func: func(call adt.BuiltinCallContext) adt.Expr {
+		c := call.OpContext()
+
+		x := call.Expr(0)
+		switch x := x.(type) {
+		case *adt.StructLit, *adt.ListLit:
+			if src := x.Source(); src == nil || !src.Pos().Experiment().ExplicitOpen {
+				// Allow usage if explicit open is set
+				return c.NewErrf("__reclose may only be used when explicitopen is enabled")
+			}
+		case *adt.CallExpr:
+			// Allow __reclose(close(...)) so that __reclose can wrap
+			// a close() call and conditionally add recursive closing.
+			if b, ok := x.Fun.(*adt.Builtin); !ok || b.Name != "close" {
+				return c.NewErrf("argument must be a struct or list literal, or a close() call")
+			}
+			if src := x.Source(); src == nil || !src.Pos().Experiment().ExplicitOpen {
+				return c.NewErrf("__reclose may only be used when explicitopen is enabled")
+			}
+		default:
+			return c.NewErrf("argument must be a struct or list literal")
+		}
+
+		// Note that we could have an embedded scalar here, so having a struct
+		// or list does not guarantee that the result is that as well.
+		//
+		//	#Def: 1
+		//	a: __reclose({ #Def })
+		//
+		arg := call.Value(0)
+		if s, ok := arg.(*adt.Vertex); ok {
+			s.ApplyEmbedClosedness()
+		}
+
+		return arg
 	},
 }
 
@@ -110,16 +226,15 @@ var andBuiltin = &adt.Builtin{
 	Name:   "and",
 	Params: []adt.Param{listParam},
 	Result: adt.IntKind,
-	RawFunc: func(c *adt.OpContext, args []adt.Expr) adt.Value {
-		// Pass through the cycle information from evaluating the first argument.
-		v := c.EvaluateKeepState(args[0])
-		list := c.RawElems(v)
-		if len(list) == 0 {
-			return &adt.Top{}
-		}
+	Func: func(call adt.BuiltinCallContext) adt.Expr {
+		c := call.OpContext()
+		seq := c.RawElems(call.Value(0))
 		a := []adt.Value{}
-		for _, c := range list {
+		for c := range seq {
 			a = append(a, c)
+		}
+		if len(a) == 0 {
+			return &adt.Top{}
 		}
 		return &adt.Conjunction{Values: a}
 	},
@@ -130,9 +245,11 @@ var orBuiltin = &adt.Builtin{
 	Params:      []adt.Param{listParam},
 	Result:      adt.IntKind,
 	NonConcrete: true,
-	Func: func(c *adt.OpContext, args []adt.Value) adt.Expr {
+	Func: func(call adt.BuiltinCallContext) adt.Expr {
+		c := call.OpContext()
+
 		d := []adt.Disjunct{}
-		for _, c := range c.RawElems(args[0]) {
+		for c := range c.RawElems(call.Value(0)) {
 			d = append(d, adt.Disjunct{Val: c, Default: false})
 		}
 		if len(d) == 0 {
@@ -165,10 +282,10 @@ var divBuiltin = &adt.Builtin{
 	Name:   "div",
 	Params: []adt.Param{intParam, intParam},
 	Result: adt.IntKind,
-	Func: func(c *adt.OpContext, args []adt.Value) adt.Expr {
+	Func: func(call adt.BuiltinCallContext) adt.Expr {
+		c := call.OpContext()
 		const name = "argument to div builtin"
-
-		return intDivOp(c, (*adt.OpContext).IntDiv, name, args)
+		return intDivOp(c, (*adt.OpContext).IntDiv, name, call.Value(0), call.Value(1))
 	},
 }
 
@@ -176,10 +293,12 @@ var modBuiltin = &adt.Builtin{
 	Name:   "mod",
 	Params: []adt.Param{intParam, intParam},
 	Result: adt.IntKind,
-	Func: func(c *adt.OpContext, args []adt.Value) adt.Expr {
+	Func: func(call adt.BuiltinCallContext) adt.Expr {
+		c := call.OpContext()
+
 		const name = "argument to mod builtin"
 
-		return intDivOp(c, (*adt.OpContext).IntMod, name, args)
+		return intDivOp(c, (*adt.OpContext).IntMod, name, call.Value(0), call.Value(1))
 	},
 }
 
@@ -187,10 +306,10 @@ var quoBuiltin = &adt.Builtin{
 	Name:   "quo",
 	Params: []adt.Param{intParam, intParam},
 	Result: adt.IntKind,
-	Func: func(c *adt.OpContext, args []adt.Value) adt.Expr {
+	Func: func(call adt.BuiltinCallContext) adt.Expr {
+		c := call.OpContext()
 		const name = "argument to quo builtin"
-
-		return intDivOp(c, (*adt.OpContext).IntQuo, name, args)
+		return intDivOp(c, (*adt.OpContext).IntQuo, name, call.Value(0), call.Value(1))
 	},
 }
 
@@ -198,22 +317,33 @@ var remBuiltin = &adt.Builtin{
 	Name:   "rem",
 	Params: []adt.Param{intParam, intParam},
 	Result: adt.IntKind,
-	Func: func(c *adt.OpContext, args []adt.Value) adt.Expr {
+	Func: func(call adt.BuiltinCallContext) adt.Expr {
+		c := call.OpContext()
 		const name = "argument to rem builtin"
-
-		return intDivOp(c, (*adt.OpContext).IntRem, name, args)
+		return intDivOp(c, (*adt.OpContext).IntRem, name, call.Value(0), call.Value(1))
 	},
 }
 
 type intFunc func(c *adt.OpContext, x, y *adt.Num) adt.Value
 
-func intDivOp(c *adt.OpContext, fn intFunc, name string, args []adt.Value) adt.Value {
-	a := c.Num(args[0], name)
-	b := c.Num(args[1], name)
-
+func intDivOp(c *adt.OpContext, fn intFunc, name string, av, bv adt.Value) adt.Value {
+	a := c.Num(av, name)
+	b := c.Num(bv, name)
 	if c.HasErr() {
 		return nil
 	}
-
 	return fn(c, a, b)
+}
+
+var testExperiment = &adt.Builtin{
+	Name:   "testExperiment",
+	Params: []adt.Param{topParam},
+	Result: adt.TopKind,
+	Func: func(call adt.BuiltinCallContext) adt.Expr {
+		if call.Pos().Experiment().Testing {
+			return call.Value(0)
+		} else {
+			return call.OpContext().NewErrf("testing experiment disabled")
+		}
+	},
 }

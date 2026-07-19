@@ -89,8 +89,7 @@ func FromValue(name string, v cue.Value) (info Info, err error) {
 	switch v.IncompleteKind() {
 	case cue.ListKind:
 		info.CompositeType = List
-		e, _ := v.Elem()
-		if e.Exists() {
+		if e := v.LookupPath(cue.MakePath(cue.AnyIndex)); e.Exists() {
 			v = e
 		} else {
 			for i, _ := v.List(); i.Next(); {
@@ -100,8 +99,8 @@ func FromValue(name string, v cue.Value) (info Info, err error) {
 		}
 
 	case cue.StructKind:
-		if strings.HasPrefix(info.Type, "map[") {
-			a := strings.SplitN(info.Type[len("map["):], "]", 2)
+		if rest, ok := strings.CutPrefix(info.Type, "map["); ok {
+			a := strings.SplitN(rest, "]", 2)
 			info.KeyTypeString = strings.TrimSpace(a[0])
 			switch info.KeyTypeString {
 			case "string":
@@ -116,7 +115,7 @@ func FromValue(name string, v cue.Value) (info Info, err error) {
 				info.KeyType = Int // Assuming
 			}
 			info.CompositeType = Map
-			v, _ = v.Elem()
+			v = v.LookupPath(cue.MakePath(cue.AnyString))
 		}
 	}
 

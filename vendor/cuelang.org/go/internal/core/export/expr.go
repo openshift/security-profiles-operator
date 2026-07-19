@@ -17,11 +17,11 @@ package export
 import (
 	"cmp"
 	"fmt"
+	"maps"
 	"slices"
 
 	"cuelang.org/go/cue/ast"
 	"cuelang.org/go/cue/token"
-	"cuelang.org/go/internal"
 	"cuelang.org/go/internal/core/adt"
 )
 
@@ -80,13 +80,9 @@ func (e *exporter) expr(env *adt.Environment, v adt.Elem) (result ast.Expr) {
 		} // Should this be the arcs label?
 
 		a := []conjunct{}
-		x.VisitLeafConjuncts(func(c adt.Conjunct) bool {
-			if c, ok := c.Elem().(*adt.Comprehension); ok && !c.DidResolve() {
-				return true
-			}
+		for c := range x.LeafConjuncts() {
 			a = append(a, conjunct{c, 0})
-			return true
-		})
+		}
 
 		return e.mergeValues(adt.InvalidLabel, x, a, x.Conjuncts...)
 
@@ -149,9 +145,19 @@ func (x *exporter) mergeValues(label adt.Feature, src *adt.Vertex, a []conjunct,
 
 	hasAlias := len(s.Elts) > 0
 
+	// Dedup conjuncts that share the same body AST. Pushdown lands a
+	// `for x in xs { … }` over N items as N body conjuncts on the target,
+	// one per yielded env. The envs differ but symbolic rendering ignores
+	// them, so without dedup the output is `X & X & …`, one factor per
+	// yield.
+	seen := map[adt.Elem]bool{}
 	for _, c := range a {
 		e.top().upCount = c.up
 		x := c.c.Elem()
+		if seen[x] {
+			continue
+		}
+		seen[x] = true
 		e.addExpr(c.c.Env, src, x, false)
 	}
 
@@ -177,10 +183,7 @@ func (x *exporter) mergeValues(label adt.Feature, src *adt.Vertex, a []conjunct,
 
 	// Collect and order set of fields.
 
-	fields := []adt.Feature{}
-	for f := range e.fields {
-		fields = append(fields, f)
-	}
+	fields := slices.Collect(maps.Keys(e.fields))
 
 	// Sort fields in case features lists are missing to ensure
 	// predictability. Also sort in reverse order, so that bugs
@@ -189,6 +192,7 @@ func (x *exporter) mergeValues(label adt.Feature, src *adt.Vertex, a []conjunct,
 		return -cmp.Compare(f1, f2)
 	})
 
+	// TODO: should this not use the new toposort? it still uses the pre-toposort field sorting.
 	m := sortArcs(extractFeatures(e.structs))
 	slices.SortStableFunc(fields, func(f1, f2 adt.Feature) int {
 		if m[f2] == 0 {
@@ -251,7 +255,7 @@ func (x *exporter) mergeValues(label adt.Feature, src *adt.Vertex, a []conjunct,
 
 		d := &ast.Field{Label: label}
 
-		top := e.frame(0)
+		top := e.frame(0, false)
 		if fr, ok := top.fields[f]; ok && fr.alias != "" {
 			setFieldAlias(d, fr.alias)
 			fr.node = d
@@ -266,7 +270,7 @@ func (x *exporter) mergeValues(label adt.Feature, src *adt.Vertex, a []conjunct,
 			x.inDefinition--
 		}
 
-		internal.SetConstraint(d, field.arcType.Token())
+		d.Constraint = field.arcType.Token()
 		if x.cfg.ShowDocs {
 			v := &adt.Vertex{Conjuncts: a}
 			docs := extractDocs(v)
@@ -296,15 +300,8 @@ func (x *exporter) mergeValues(label adt.Feature, src *adt.Vertex, a []conjunct,
 }
 
 func (e *conjuncts) wrapCloseIfNecessary(s *ast.StructLit, v *adt.Vertex) ast.Expr {
-	if !e.hasEllipsis && v != nil {
-		if v.ClosedNonRecursive {
-			// Eval V3 logic
-			return ast.NewCall(ast.NewIdent("close"), s)
-		}
-		if st, ok := v.BaseValue.(*adt.StructMarker); ok && st.NeedClose {
-			// Eval V2 logic
-			return ast.NewCall(ast.NewIdent("close"), s)
-		}
+	if !e.hasEllipsis && v != nil && v.ClosedNonRecursive {
+		return ast.NewCall(ast.NewIdent("close"), s)
 	}
 	return s
 }
@@ -316,7 +313,7 @@ type conjuncts struct {
 	values      *adt.Vertex
 	embed       []ast.Expr
 	conjuncts   []ast.Expr
-	structs     []*adt.StructInfo
+	structs     []adt.StructInfo
 	fields      map[adt.Feature]field
 	attrs       []*ast.Attribute
 	hasEllipsis bool
@@ -387,7 +384,7 @@ func (e *conjuncts) addExpr(env *adt.Environment, src *adt.Vertex, x adt.Elem, i
 			return
 		}
 		// Used for sorting.
-		e.structs = append(e.structs, &adt.StructInfo{StructLit: x, Env: env})
+		e.structs = append(e.structs, adt.StructInfo{StructLit: x})
 
 		env = &adt.Environment{Up: env, Vertex: e.node()}
 
@@ -432,10 +429,9 @@ func (e *conjuncts) addExpr(env *adt.Environment, src *adt.Vertex, x adt.Elem, i
 
 			switch {
 			default:
-				v.VisitLeafConjuncts(func(c adt.Conjunct) bool {
+				for c := range v.LeafConjuncts() {
 					e.addExpr(c.Env, v, c.Elem(), false)
-					return true
-				})
+				}
 
 			case v.IsData():
 				e.structs = append(e.structs, v.Structs...)
