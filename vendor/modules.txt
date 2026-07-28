@@ -1093,8 +1093,8 @@ github.com/opencontainers/runc/libcontainer/utils
 # github.com/opencontainers/runtime-spec v1.2.1
 ## explicit
 github.com/opencontainers/runtime-spec/specs-go
-# github.com/openshift/api v0.0.0-20241204141306-c1fdeb0788c1
-## explicit; go 1.22.0
+# github.com/openshift/api v0.0.1
+## explicit; go 1.20
 github.com/openshift/api/config/v1
 # github.com/opentracing/opentracing-go v1.2.0
 ## explicit; go 1.14
