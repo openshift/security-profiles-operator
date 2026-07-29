@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/rand"
@@ -15,7 +16,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
-	mrand "math/rand"
+	mrand "math/rand/v2"
 	"os"
 	"path"
 	"reflect"
@@ -26,8 +27,14 @@ import (
 	"unicode"
 
 	"github.com/go-jose/go-jose/v4"
+	"golang.org/x/net/idna"
+	"golang.org/x/text/unicode/norm"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
+
+	"github.com/letsencrypt/boulder/identifier"
 )
 
 const Unspecified = "Unspecified"
@@ -208,7 +215,7 @@ func GetBuildHost() (retID string) {
 // IsAnyNilOrZero returns whether any of the supplied values are nil, or (if not)
 // if any of them is its type's zero-value. This is useful for validating that
 // all required fields on a proto message are present.
-func IsAnyNilOrZero(vals ...interface{}) bool {
+func IsAnyNilOrZero(vals ...any) bool {
 	for _, val := range vals {
 		switch v := val.(type) {
 		case nil:
@@ -316,11 +323,15 @@ func UniqueLowerNames(names []string) (unique []string) {
 	return
 }
 
-// HashNames returns a hash of the names requested. This is intended for use
-// when interacting with the orderFqdnSets table and rate limiting.
-func HashNames(names []string) []byte {
-	names = UniqueLowerNames(names)
-	hash := sha256.Sum256([]byte(strings.Join(names, ",")))
+// HashIdentifiers returns a hash of the identifiers requested. This is intended
+// for use when interacting with the orderFqdnSets table and rate limiting.
+func HashIdentifiers(idents identifier.ACMEIdentifiers) []byte {
+	var values []string
+	for _, ident := range identifier.Normalize(idents) {
+		values = append(values, ident.Value)
+	}
+
+	hash := sha256.Sum256([]byte(strings.Join(values, ",")))
 	return hash[:]
 }
 
@@ -378,6 +389,33 @@ func IsASCII(str string) bool {
 	return true
 }
 
+// IsCanceled returns true if err is non-nil and is either context.Canceled, or
+// has a grpc code of Canceled. This is useful because cancellations propagate
+// through gRPC boundaries, and if we choose to treat in-process cancellations a
+// certain way, we usually want to treat cross-process cancellations the same way.
+func IsCanceled(err error) bool {
+	return errors.Is(err, context.Canceled) || status.Code(err) == codes.Canceled
+}
+
 func Command() string {
 	return path.Base(os.Args[0])
+}
+
+// NormalizeIssuerDomainName normalizes an RFC 8659 issuer-domain-name per the
+// recommended algorithm in draft-ietf-acme-dns-persist-01, Section 9.2:
+// case-fold to lowercase, apply Unicode NFC normalization, convert to A-label
+// (Punycode), remove any trailing dot, and ensure the result is no more than
+// 253 octets in length. If normalization fails, an error is returned.
+func NormalizeIssuerDomainName(name string) (string, error) {
+	name = strings.ToLower(name)
+	name = norm.NFC.String(name)
+	name, err := idna.Lookup.ToASCII(name)
+	if err != nil {
+		return "", fmt.Errorf("converting issuer domain name %q to ASCII: %w", name, err)
+	}
+	name = strings.TrimSuffix(name, ".")
+	if len(name) > 253 {
+		return "", fmt.Errorf("issuer domain name %q exceeds 253 octets (%d)", name, len(name))
+	}
+	return name, nil
 }
