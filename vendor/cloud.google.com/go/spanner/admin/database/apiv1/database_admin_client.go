@@ -1,4 +1,4 @@
-// Copyright 2025 Google LLC
+// Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -32,6 +32,8 @@ import (
 	longrunningpb "cloud.google.com/go/longrunning/autogen/longrunningpb"
 	databasepb "cloud.google.com/go/spanner/admin/database/apiv1/databasepb"
 	gax "github.com/googleapis/gax-go/v2"
+	"github.com/googleapis/gax-go/v2/callctx"
+	trace "go.opentelemetry.io/otel/trace"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 	"google.golang.org/api/option/internaloption"
@@ -47,36 +49,37 @@ var newDatabaseAdminClientHook clientHook
 
 // DatabaseAdminCallOptions contains the retry settings for each method of DatabaseAdminClient.
 type DatabaseAdminCallOptions struct {
-	ListDatabases          []gax.CallOption
-	CreateDatabase         []gax.CallOption
-	GetDatabase            []gax.CallOption
-	UpdateDatabase         []gax.CallOption
-	UpdateDatabaseDdl      []gax.CallOption
-	DropDatabase           []gax.CallOption
-	GetDatabaseDdl         []gax.CallOption
-	SetIamPolicy           []gax.CallOption
-	GetIamPolicy           []gax.CallOption
-	TestIamPermissions     []gax.CallOption
-	CreateBackup           []gax.CallOption
-	CopyBackup             []gax.CallOption
-	GetBackup              []gax.CallOption
-	UpdateBackup           []gax.CallOption
-	DeleteBackup           []gax.CallOption
-	ListBackups            []gax.CallOption
-	RestoreDatabase        []gax.CallOption
-	ListDatabaseOperations []gax.CallOption
-	ListBackupOperations   []gax.CallOption
-	ListDatabaseRoles      []gax.CallOption
-	AddSplitPoints         []gax.CallOption
-	CreateBackupSchedule   []gax.CallOption
-	GetBackupSchedule      []gax.CallOption
-	UpdateBackupSchedule   []gax.CallOption
-	DeleteBackupSchedule   []gax.CallOption
-	ListBackupSchedules    []gax.CallOption
-	CancelOperation        []gax.CallOption
-	DeleteOperation        []gax.CallOption
-	GetOperation           []gax.CallOption
-	ListOperations         []gax.CallOption
+	ListDatabases                []gax.CallOption
+	CreateDatabase               []gax.CallOption
+	GetDatabase                  []gax.CallOption
+	UpdateDatabase               []gax.CallOption
+	UpdateDatabaseDdl            []gax.CallOption
+	DropDatabase                 []gax.CallOption
+	GetDatabaseDdl               []gax.CallOption
+	SetIamPolicy                 []gax.CallOption
+	GetIamPolicy                 []gax.CallOption
+	TestIamPermissions           []gax.CallOption
+	CreateBackup                 []gax.CallOption
+	CopyBackup                   []gax.CallOption
+	GetBackup                    []gax.CallOption
+	UpdateBackup                 []gax.CallOption
+	DeleteBackup                 []gax.CallOption
+	ListBackups                  []gax.CallOption
+	RestoreDatabase              []gax.CallOption
+	ListDatabaseOperations       []gax.CallOption
+	ListBackupOperations         []gax.CallOption
+	ListDatabaseRoles            []gax.CallOption
+	AddSplitPoints               []gax.CallOption
+	CreateBackupSchedule         []gax.CallOption
+	GetBackupSchedule            []gax.CallOption
+	UpdateBackupSchedule         []gax.CallOption
+	DeleteBackupSchedule         []gax.CallOption
+	ListBackupSchedules          []gax.CallOption
+	InternalUpdateGraphOperation []gax.CallOption
+	CancelOperation              []gax.CallOption
+	DeleteOperation              []gax.CallOption
+	GetOperation                 []gax.CallOption
+	ListOperations               []gax.CallOption
 }
 
 func defaultDatabaseAdminGRPCClientOptions() []option.ClientOption {
@@ -374,10 +377,11 @@ func defaultDatabaseAdminCallOptions() *DatabaseAdminCallOptions {
 				})
 			}),
 		},
-		CancelOperation: []gax.CallOption{},
-		DeleteOperation: []gax.CallOption{},
-		GetOperation:    []gax.CallOption{},
-		ListOperations:  []gax.CallOption{},
+		InternalUpdateGraphOperation: []gax.CallOption{},
+		CancelOperation:              []gax.CallOption{},
+		DeleteOperation:              []gax.CallOption{},
+		GetOperation:                 []gax.CallOption{},
+		ListOperations:               []gax.CallOption{},
 	}
 }
 
@@ -641,10 +645,11 @@ func defaultDatabaseAdminRESTCallOptions() *DatabaseAdminCallOptions {
 					http.StatusGatewayTimeout)
 			}),
 		},
-		CancelOperation: []gax.CallOption{},
-		DeleteOperation: []gax.CallOption{},
-		GetOperation:    []gax.CallOption{},
-		ListOperations:  []gax.CallOption{},
+		InternalUpdateGraphOperation: []gax.CallOption{},
+		CancelOperation:              []gax.CallOption{},
+		DeleteOperation:              []gax.CallOption{},
+		GetOperation:                 []gax.CallOption{},
+		ListOperations:               []gax.CallOption{},
 	}
 }
 
@@ -685,6 +690,7 @@ type internalDatabaseAdminClient interface {
 	UpdateBackupSchedule(context.Context, *databasepb.UpdateBackupScheduleRequest, ...gax.CallOption) (*databasepb.BackupSchedule, error)
 	DeleteBackupSchedule(context.Context, *databasepb.DeleteBackupScheduleRequest, ...gax.CallOption) error
 	ListBackupSchedules(context.Context, *databasepb.ListBackupSchedulesRequest, ...gax.CallOption) *BackupScheduleIterator
+	InternalUpdateGraphOperation(context.Context, *databasepb.InternalUpdateGraphOperationRequest, ...gax.CallOption) (*databasepb.InternalUpdateGraphOperationResponse, error)
 	CancelOperation(context.Context, *longrunningpb.CancelOperationRequest, ...gax.CallOption) error
 	DeleteOperation(context.Context, *longrunningpb.DeleteOperationRequest, ...gax.CallOption) error
 	GetOperation(context.Context, *longrunningpb.GetOperationRequest, ...gax.CallOption) (*longrunningpb.Operation, error)
@@ -720,7 +726,7 @@ type DatabaseAdminClient struct {
 
 // Wrapper methods routed to the internal client.
 
-// Close closes the connection to the API service. The user should invoke this when
+// Close closes the connection to the API service. **Always** call Close() when
 // the client is no longer required.
 func (c *DatabaseAdminClient) Close() error {
 	return c.internalClient.Close()
@@ -1048,6 +1054,12 @@ func (c *DatabaseAdminClient) ListBackupSchedules(ctx context.Context, req *data
 	return c.internalClient.ListBackupSchedules(ctx, req, opts...)
 }
 
+// InternalUpdateGraphOperation this is an internal API called by Spanner Graph jobs. You should never need
+// to call this API directly.
+func (c *DatabaseAdminClient) InternalUpdateGraphOperation(ctx context.Context, req *databasepb.InternalUpdateGraphOperationRequest, opts ...gax.CallOption) (*databasepb.InternalUpdateGraphOperationResponse, error) {
+	return c.internalClient.InternalUpdateGraphOperation(ctx, req, opts...)
+}
+
 // CancelOperation is a utility method from google.longrunning.Operations.
 func (c *DatabaseAdminClient) CancelOperation(ctx context.Context, req *longrunningpb.CancelOperationRequest, opts ...gax.CallOption) error {
 	return c.internalClient.CancelOperation(ctx, req, opts...)
@@ -1110,6 +1122,16 @@ type databaseAdminGRPCClient struct {
 //	restore a database from an existing backup
 func NewDatabaseAdminClient(ctx context.Context, opts ...option.ClientOption) (*DatabaseAdminClient, error) {
 	clientOpts := defaultDatabaseAdminGRPCClientOptions()
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		clientOpts = append(clientOpts, internaloption.WithTelemetryAttributes(map[string]string{
+			"gcp.client.service":  "spanner",
+			"gcp.client.version":  getVersionClient(),
+			"gcp.client.repo":     "googleapis/google-cloud-go",
+			"gcp.client.artifact": "cloud.google.com/go/spanner/admin/database/apiv1",
+			"gcp.client.language": "go",
+			"url.domain":          "spanner.googleapis.com",
+		}))
+	}
 	if newDatabaseAdminClientHook != nil {
 		hookOpts, err := newDatabaseAdminClientHook(ctx, clientHookParams{})
 		if err != nil {
@@ -1132,6 +1154,50 @@ func NewDatabaseAdminClient(ctx context.Context, opts ...option.ClientOption) (*
 		operationsClient:    longrunningpb.NewOperationsClient(connPool),
 	}
 	c.setGoogleClientInfo()
+	if gax.IsFeatureEnabled("METRICS") {
+		metrics := gax.NewClientMetrics(
+			gax.WithTelemetryLogger(c.logger),
+			gax.WithTelemetryAttributes(map[string]string{
+				gax.ClientService:  "spanner",
+				gax.ClientVersion:  getVersionClient(),
+				gax.ClientArtifact: "cloud.google.com/go/spanner/admin/database/apiv1",
+				gax.RPCSystem:      "grpc",
+				gax.URLDomain:      "spanner.googleapis.com",
+			}),
+		)
+
+		client.CallOptions.ListDatabases = append(client.CallOptions.ListDatabases, gax.WithClientMetrics(metrics))
+		client.CallOptions.CreateDatabase = append(client.CallOptions.CreateDatabase, gax.WithClientMetrics(metrics))
+		client.CallOptions.GetDatabase = append(client.CallOptions.GetDatabase, gax.WithClientMetrics(metrics))
+		client.CallOptions.UpdateDatabase = append(client.CallOptions.UpdateDatabase, gax.WithClientMetrics(metrics))
+		client.CallOptions.UpdateDatabaseDdl = append(client.CallOptions.UpdateDatabaseDdl, gax.WithClientMetrics(metrics))
+		client.CallOptions.DropDatabase = append(client.CallOptions.DropDatabase, gax.WithClientMetrics(metrics))
+		client.CallOptions.GetDatabaseDdl = append(client.CallOptions.GetDatabaseDdl, gax.WithClientMetrics(metrics))
+		client.CallOptions.SetIamPolicy = append(client.CallOptions.SetIamPolicy, gax.WithClientMetrics(metrics))
+		client.CallOptions.GetIamPolicy = append(client.CallOptions.GetIamPolicy, gax.WithClientMetrics(metrics))
+		client.CallOptions.TestIamPermissions = append(client.CallOptions.TestIamPermissions, gax.WithClientMetrics(metrics))
+		client.CallOptions.CreateBackup = append(client.CallOptions.CreateBackup, gax.WithClientMetrics(metrics))
+		client.CallOptions.CopyBackup = append(client.CallOptions.CopyBackup, gax.WithClientMetrics(metrics))
+		client.CallOptions.GetBackup = append(client.CallOptions.GetBackup, gax.WithClientMetrics(metrics))
+		client.CallOptions.UpdateBackup = append(client.CallOptions.UpdateBackup, gax.WithClientMetrics(metrics))
+		client.CallOptions.DeleteBackup = append(client.CallOptions.DeleteBackup, gax.WithClientMetrics(metrics))
+		client.CallOptions.ListBackups = append(client.CallOptions.ListBackups, gax.WithClientMetrics(metrics))
+		client.CallOptions.RestoreDatabase = append(client.CallOptions.RestoreDatabase, gax.WithClientMetrics(metrics))
+		client.CallOptions.ListDatabaseOperations = append(client.CallOptions.ListDatabaseOperations, gax.WithClientMetrics(metrics))
+		client.CallOptions.ListBackupOperations = append(client.CallOptions.ListBackupOperations, gax.WithClientMetrics(metrics))
+		client.CallOptions.ListDatabaseRoles = append(client.CallOptions.ListDatabaseRoles, gax.WithClientMetrics(metrics))
+		client.CallOptions.AddSplitPoints = append(client.CallOptions.AddSplitPoints, gax.WithClientMetrics(metrics))
+		client.CallOptions.CreateBackupSchedule = append(client.CallOptions.CreateBackupSchedule, gax.WithClientMetrics(metrics))
+		client.CallOptions.GetBackupSchedule = append(client.CallOptions.GetBackupSchedule, gax.WithClientMetrics(metrics))
+		client.CallOptions.UpdateBackupSchedule = append(client.CallOptions.UpdateBackupSchedule, gax.WithClientMetrics(metrics))
+		client.CallOptions.DeleteBackupSchedule = append(client.CallOptions.DeleteBackupSchedule, gax.WithClientMetrics(metrics))
+		client.CallOptions.ListBackupSchedules = append(client.CallOptions.ListBackupSchedules, gax.WithClientMetrics(metrics))
+		client.CallOptions.InternalUpdateGraphOperation = append(client.CallOptions.InternalUpdateGraphOperation, gax.WithClientMetrics(metrics))
+		client.CallOptions.CancelOperation = append(client.CallOptions.CancelOperation, gax.WithClientMetrics(metrics))
+		client.CallOptions.DeleteOperation = append(client.CallOptions.DeleteOperation, gax.WithClientMetrics(metrics))
+		client.CallOptions.GetOperation = append(client.CallOptions.GetOperation, gax.WithClientMetrics(metrics))
+		client.CallOptions.ListOperations = append(client.CallOptions.ListOperations, gax.WithClientMetrics(metrics))
+	}
 
 	client.internalClient = c
 
@@ -1162,13 +1228,13 @@ func (c *databaseAdminGRPCClient) Connection() *grpc.ClientConn {
 // use by Google-written clients.
 func (c *databaseAdminGRPCClient) setGoogleClientInfo(keyval ...string) {
 	kv := append([]string{"gl-go", gax.GoVersion}, keyval...)
-	kv = append(kv, "gapic", getVersionClient(), "gax", gax.Version, "grpc", grpc.Version)
+	kv = append(kv, "gapic", getVersionClient(), "gax", gax.Version, "grpc", grpc.Version, "pb", protoVersion)
 	c.xGoogHeaders = []string{
 		"x-goog-api-client", gax.XGoogHeader(kv...),
 	}
 }
 
-// Close closes the connection to the API service. The user should invoke this when
+// Close closes the connection to the API service. **Always** call Close() when
 // the client is no longer required.
 func (c *databaseAdminGRPCClient) Close() error {
 	return c.connPool.Close()
@@ -1211,6 +1277,16 @@ type databaseAdminRESTClient struct {
 //	restore a database from an existing backup
 func NewDatabaseAdminRESTClient(ctx context.Context, opts ...option.ClientOption) (*DatabaseAdminClient, error) {
 	clientOpts := append(defaultDatabaseAdminRESTClientOptions(), opts...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		clientOpts = append(clientOpts, internaloption.WithTelemetryAttributes(map[string]string{
+			"gcp.client.service":  "spanner",
+			"gcp.client.version":  getVersionClient(),
+			"gcp.client.repo":     "googleapis/google-cloud-go",
+			"gcp.client.artifact": "cloud.google.com/go/spanner/admin/database/apiv1",
+			"gcp.client.language": "go",
+			"url.domain":          "spanner.googleapis.com",
+		}))
+	}
 	httpClient, endpoint, err := httptransport.NewClient(ctx, clientOpts...)
 	if err != nil {
 		return nil, err
@@ -1224,6 +1300,51 @@ func NewDatabaseAdminRESTClient(ctx context.Context, opts ...option.ClientOption
 		logger:      internaloption.GetLogger(opts),
 	}
 	c.setGoogleClientInfo()
+
+	if gax.IsFeatureEnabled("METRICS") {
+		metrics := gax.NewClientMetrics(
+			gax.WithTelemetryLogger(c.logger),
+			gax.WithTelemetryAttributes(map[string]string{
+				gax.ClientService:  "spanner",
+				gax.ClientVersion:  getVersionClient(),
+				gax.ClientArtifact: "cloud.google.com/go/spanner/admin/database/apiv1",
+				gax.RPCSystem:      "http",
+				gax.URLDomain:      "spanner.googleapis.com",
+			}),
+		)
+
+		callOpts.ListDatabases = append(callOpts.ListDatabases, gax.WithClientMetrics(metrics))
+		callOpts.CreateDatabase = append(callOpts.CreateDatabase, gax.WithClientMetrics(metrics))
+		callOpts.GetDatabase = append(callOpts.GetDatabase, gax.WithClientMetrics(metrics))
+		callOpts.UpdateDatabase = append(callOpts.UpdateDatabase, gax.WithClientMetrics(metrics))
+		callOpts.UpdateDatabaseDdl = append(callOpts.UpdateDatabaseDdl, gax.WithClientMetrics(metrics))
+		callOpts.DropDatabase = append(callOpts.DropDatabase, gax.WithClientMetrics(metrics))
+		callOpts.GetDatabaseDdl = append(callOpts.GetDatabaseDdl, gax.WithClientMetrics(metrics))
+		callOpts.SetIamPolicy = append(callOpts.SetIamPolicy, gax.WithClientMetrics(metrics))
+		callOpts.GetIamPolicy = append(callOpts.GetIamPolicy, gax.WithClientMetrics(metrics))
+		callOpts.TestIamPermissions = append(callOpts.TestIamPermissions, gax.WithClientMetrics(metrics))
+		callOpts.CreateBackup = append(callOpts.CreateBackup, gax.WithClientMetrics(metrics))
+		callOpts.CopyBackup = append(callOpts.CopyBackup, gax.WithClientMetrics(metrics))
+		callOpts.GetBackup = append(callOpts.GetBackup, gax.WithClientMetrics(metrics))
+		callOpts.UpdateBackup = append(callOpts.UpdateBackup, gax.WithClientMetrics(metrics))
+		callOpts.DeleteBackup = append(callOpts.DeleteBackup, gax.WithClientMetrics(metrics))
+		callOpts.ListBackups = append(callOpts.ListBackups, gax.WithClientMetrics(metrics))
+		callOpts.RestoreDatabase = append(callOpts.RestoreDatabase, gax.WithClientMetrics(metrics))
+		callOpts.ListDatabaseOperations = append(callOpts.ListDatabaseOperations, gax.WithClientMetrics(metrics))
+		callOpts.ListBackupOperations = append(callOpts.ListBackupOperations, gax.WithClientMetrics(metrics))
+		callOpts.ListDatabaseRoles = append(callOpts.ListDatabaseRoles, gax.WithClientMetrics(metrics))
+		callOpts.AddSplitPoints = append(callOpts.AddSplitPoints, gax.WithClientMetrics(metrics))
+		callOpts.CreateBackupSchedule = append(callOpts.CreateBackupSchedule, gax.WithClientMetrics(metrics))
+		callOpts.GetBackupSchedule = append(callOpts.GetBackupSchedule, gax.WithClientMetrics(metrics))
+		callOpts.UpdateBackupSchedule = append(callOpts.UpdateBackupSchedule, gax.WithClientMetrics(metrics))
+		callOpts.DeleteBackupSchedule = append(callOpts.DeleteBackupSchedule, gax.WithClientMetrics(metrics))
+		callOpts.ListBackupSchedules = append(callOpts.ListBackupSchedules, gax.WithClientMetrics(metrics))
+		callOpts.InternalUpdateGraphOperation = append(callOpts.InternalUpdateGraphOperation, gax.WithClientMetrics(metrics))
+		callOpts.CancelOperation = append(callOpts.CancelOperation, gax.WithClientMetrics(metrics))
+		callOpts.DeleteOperation = append(callOpts.DeleteOperation, gax.WithClientMetrics(metrics))
+		callOpts.GetOperation = append(callOpts.GetOperation, gax.WithClientMetrics(metrics))
+		callOpts.ListOperations = append(callOpts.ListOperations, gax.WithClientMetrics(metrics))
+	}
 
 	lroOpts := []option.ClientOption{
 		option.WithHTTPClient(httpClient),
@@ -1255,13 +1376,13 @@ func defaultDatabaseAdminRESTClientOptions() []option.ClientOption {
 // use by Google-written clients.
 func (c *databaseAdminRESTClient) setGoogleClientInfo(keyval ...string) {
 	kv := append([]string{"gl-go", gax.GoVersion}, keyval...)
-	kv = append(kv, "gapic", getVersionClient(), "gax", gax.Version, "rest", "UNKNOWN")
+	kv = append(kv, "gapic", getVersionClient(), "gax", gax.Version, "rest", "UNKNOWN", "pb", protoVersion)
 	c.xGoogHeaders = []string{
 		"x-goog-api-client", gax.XGoogHeader(kv...),
 	}
 }
 
-// Close closes the connection to the API service. The user should invoke this when
+// Close closes the connection to the API service. **Always** call Close() when
 // the client is no longer required.
 func (c *databaseAdminRESTClient) Close() error {
 	// Replace httpClient with nil to force cleanup.
@@ -1280,9 +1401,15 @@ func (c *databaseAdminGRPCClient) ListDatabases(ctx context.Context, req *databa
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetParent()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/ListDatabases")
+	}
 	opts = append((*c.CallOptions).ListDatabases[0:len((*c.CallOptions).ListDatabases):len((*c.CallOptions).ListDatabases)], opts...)
 	it := &DatabaseIterator{}
-	req = proto.Clone(req).(*databasepb.ListDatabasesRequest)
+	req = proto.CloneOf(req)
 	it.InternalFetch = func(pageSize int, pageToken string) ([]*databasepb.Database, string, error) {
 		resp := &databasepb.ListDatabasesResponse{}
 		if pageToken != "" {
@@ -1326,6 +1453,12 @@ func (c *databaseAdminGRPCClient) CreateDatabase(ctx context.Context, req *datab
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetParent()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/CreateDatabase")
+	}
 	opts = append((*c.CallOptions).CreateDatabase[0:len((*c.CallOptions).CreateDatabase):len((*c.CallOptions).CreateDatabase)], opts...)
 	var resp *longrunningpb.Operation
 	err := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
@@ -1336,8 +1469,12 @@ func (c *databaseAdminGRPCClient) CreateDatabase(ctx context.Context, req *datab
 	if err != nil {
 		return nil, err
 	}
+	lro := longrunning.InternalNewOperationWithMetadata(*c.LROClient, resp, "*database.CreateDatabaseOperation")
+	if gax.IsFeatureEnabled("TRACING") {
+		lro.SetParentSpanContext(trace.SpanContextFromContext(ctx))
+	}
 	return &CreateDatabaseOperation{
-		lro: longrunning.InternalNewOperation(*c.LROClient, resp),
+		lro: lro,
 	}, nil
 }
 
@@ -1346,6 +1483,12 @@ func (c *databaseAdminGRPCClient) GetDatabase(ctx context.Context, req *database
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetName()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/GetDatabase")
+	}
 	opts = append((*c.CallOptions).GetDatabase[0:len((*c.CallOptions).GetDatabase):len((*c.CallOptions).GetDatabase)], opts...)
 	var resp *databasepb.Database
 	err := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
@@ -1364,6 +1507,9 @@ func (c *databaseAdminGRPCClient) UpdateDatabase(ctx context.Context, req *datab
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/UpdateDatabase")
+	}
 	opts = append((*c.CallOptions).UpdateDatabase[0:len((*c.CallOptions).UpdateDatabase):len((*c.CallOptions).UpdateDatabase)], opts...)
 	var resp *longrunningpb.Operation
 	err := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
@@ -1374,8 +1520,12 @@ func (c *databaseAdminGRPCClient) UpdateDatabase(ctx context.Context, req *datab
 	if err != nil {
 		return nil, err
 	}
+	lro := longrunning.InternalNewOperationWithMetadata(*c.LROClient, resp, "*database.UpdateDatabaseOperation")
+	if gax.IsFeatureEnabled("TRACING") {
+		lro.SetParentSpanContext(trace.SpanContextFromContext(ctx))
+	}
 	return &UpdateDatabaseOperation{
-		lro: longrunning.InternalNewOperation(*c.LROClient, resp),
+		lro: lro,
 	}, nil
 }
 
@@ -1384,6 +1534,12 @@ func (c *databaseAdminGRPCClient) UpdateDatabaseDdl(ctx context.Context, req *da
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetDatabase()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/UpdateDatabaseDdl")
+	}
 	opts = append((*c.CallOptions).UpdateDatabaseDdl[0:len((*c.CallOptions).UpdateDatabaseDdl):len((*c.CallOptions).UpdateDatabaseDdl)], opts...)
 	var resp *longrunningpb.Operation
 	err := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
@@ -1394,8 +1550,12 @@ func (c *databaseAdminGRPCClient) UpdateDatabaseDdl(ctx context.Context, req *da
 	if err != nil {
 		return nil, err
 	}
+	lro := longrunning.InternalNewOperationWithMetadata(*c.LROClient, resp, "*database.UpdateDatabaseDdlOperation")
+	if gax.IsFeatureEnabled("TRACING") {
+		lro.SetParentSpanContext(trace.SpanContextFromContext(ctx))
+	}
 	return &UpdateDatabaseDdlOperation{
-		lro: longrunning.InternalNewOperation(*c.LROClient, resp),
+		lro: lro,
 	}, nil
 }
 
@@ -1404,6 +1564,12 @@ func (c *databaseAdminGRPCClient) DropDatabase(ctx context.Context, req *databas
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetDatabase()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/DropDatabase")
+	}
 	opts = append((*c.CallOptions).DropDatabase[0:len((*c.CallOptions).DropDatabase):len((*c.CallOptions).DropDatabase)], opts...)
 	err := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
 		var err error
@@ -1418,6 +1584,12 @@ func (c *databaseAdminGRPCClient) GetDatabaseDdl(ctx context.Context, req *datab
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetDatabase()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/GetDatabaseDdl")
+	}
 	opts = append((*c.CallOptions).GetDatabaseDdl[0:len((*c.CallOptions).GetDatabaseDdl):len((*c.CallOptions).GetDatabaseDdl)], opts...)
 	var resp *databasepb.GetDatabaseDdlResponse
 	err := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
@@ -1436,6 +1608,12 @@ func (c *databaseAdminGRPCClient) SetIamPolicy(ctx context.Context, req *iampb.S
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetResource()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/SetIamPolicy")
+	}
 	opts = append((*c.CallOptions).SetIamPolicy[0:len((*c.CallOptions).SetIamPolicy):len((*c.CallOptions).SetIamPolicy)], opts...)
 	var resp *iampb.Policy
 	err := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
@@ -1454,6 +1632,12 @@ func (c *databaseAdminGRPCClient) GetIamPolicy(ctx context.Context, req *iampb.G
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetResource()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/GetIamPolicy")
+	}
 	opts = append((*c.CallOptions).GetIamPolicy[0:len((*c.CallOptions).GetIamPolicy):len((*c.CallOptions).GetIamPolicy)], opts...)
 	var resp *iampb.Policy
 	err := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
@@ -1472,6 +1656,12 @@ func (c *databaseAdminGRPCClient) TestIamPermissions(ctx context.Context, req *i
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetResource()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/TestIamPermissions")
+	}
 	opts = append((*c.CallOptions).TestIamPermissions[0:len((*c.CallOptions).TestIamPermissions):len((*c.CallOptions).TestIamPermissions)], opts...)
 	var resp *iampb.TestIamPermissionsResponse
 	err := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
@@ -1490,6 +1680,12 @@ func (c *databaseAdminGRPCClient) CreateBackup(ctx context.Context, req *databas
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetParent()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/CreateBackup")
+	}
 	opts = append((*c.CallOptions).CreateBackup[0:len((*c.CallOptions).CreateBackup):len((*c.CallOptions).CreateBackup)], opts...)
 	var resp *longrunningpb.Operation
 	err := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
@@ -1500,8 +1696,12 @@ func (c *databaseAdminGRPCClient) CreateBackup(ctx context.Context, req *databas
 	if err != nil {
 		return nil, err
 	}
+	lro := longrunning.InternalNewOperationWithMetadata(*c.LROClient, resp, "*database.CreateBackupOperation")
+	if gax.IsFeatureEnabled("TRACING") {
+		lro.SetParentSpanContext(trace.SpanContextFromContext(ctx))
+	}
 	return &CreateBackupOperation{
-		lro: longrunning.InternalNewOperation(*c.LROClient, resp),
+		lro: lro,
 	}, nil
 }
 
@@ -1510,6 +1710,12 @@ func (c *databaseAdminGRPCClient) CopyBackup(ctx context.Context, req *databasep
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetParent()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/CopyBackup")
+	}
 	opts = append((*c.CallOptions).CopyBackup[0:len((*c.CallOptions).CopyBackup):len((*c.CallOptions).CopyBackup)], opts...)
 	var resp *longrunningpb.Operation
 	err := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
@@ -1520,8 +1726,12 @@ func (c *databaseAdminGRPCClient) CopyBackup(ctx context.Context, req *databasep
 	if err != nil {
 		return nil, err
 	}
+	lro := longrunning.InternalNewOperationWithMetadata(*c.LROClient, resp, "*database.CopyBackupOperation")
+	if gax.IsFeatureEnabled("TRACING") {
+		lro.SetParentSpanContext(trace.SpanContextFromContext(ctx))
+	}
 	return &CopyBackupOperation{
-		lro: longrunning.InternalNewOperation(*c.LROClient, resp),
+		lro: lro,
 	}, nil
 }
 
@@ -1530,6 +1740,12 @@ func (c *databaseAdminGRPCClient) GetBackup(ctx context.Context, req *databasepb
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetName()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/GetBackup")
+	}
 	opts = append((*c.CallOptions).GetBackup[0:len((*c.CallOptions).GetBackup):len((*c.CallOptions).GetBackup)], opts...)
 	var resp *databasepb.Backup
 	err := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
@@ -1548,6 +1764,9 @@ func (c *databaseAdminGRPCClient) UpdateBackup(ctx context.Context, req *databas
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/UpdateBackup")
+	}
 	opts = append((*c.CallOptions).UpdateBackup[0:len((*c.CallOptions).UpdateBackup):len((*c.CallOptions).UpdateBackup)], opts...)
 	var resp *databasepb.Backup
 	err := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
@@ -1566,6 +1785,12 @@ func (c *databaseAdminGRPCClient) DeleteBackup(ctx context.Context, req *databas
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetName()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/DeleteBackup")
+	}
 	opts = append((*c.CallOptions).DeleteBackup[0:len((*c.CallOptions).DeleteBackup):len((*c.CallOptions).DeleteBackup)], opts...)
 	err := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
 		var err error
@@ -1580,9 +1805,15 @@ func (c *databaseAdminGRPCClient) ListBackups(ctx context.Context, req *database
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetParent()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/ListBackups")
+	}
 	opts = append((*c.CallOptions).ListBackups[0:len((*c.CallOptions).ListBackups):len((*c.CallOptions).ListBackups)], opts...)
 	it := &BackupIterator{}
-	req = proto.Clone(req).(*databasepb.ListBackupsRequest)
+	req = proto.CloneOf(req)
 	it.InternalFetch = func(pageSize int, pageToken string) ([]*databasepb.Backup, string, error) {
 		resp := &databasepb.ListBackupsResponse{}
 		if pageToken != "" {
@@ -1626,6 +1857,12 @@ func (c *databaseAdminGRPCClient) RestoreDatabase(ctx context.Context, req *data
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetParent()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/RestoreDatabase")
+	}
 	opts = append((*c.CallOptions).RestoreDatabase[0:len((*c.CallOptions).RestoreDatabase):len((*c.CallOptions).RestoreDatabase)], opts...)
 	var resp *longrunningpb.Operation
 	err := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
@@ -1636,8 +1873,12 @@ func (c *databaseAdminGRPCClient) RestoreDatabase(ctx context.Context, req *data
 	if err != nil {
 		return nil, err
 	}
+	lro := longrunning.InternalNewOperationWithMetadata(*c.LROClient, resp, "*database.RestoreDatabaseOperation")
+	if gax.IsFeatureEnabled("TRACING") {
+		lro.SetParentSpanContext(trace.SpanContextFromContext(ctx))
+	}
 	return &RestoreDatabaseOperation{
-		lro: longrunning.InternalNewOperation(*c.LROClient, resp),
+		lro: lro,
 	}, nil
 }
 
@@ -1646,9 +1887,15 @@ func (c *databaseAdminGRPCClient) ListDatabaseOperations(ctx context.Context, re
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetParent()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/ListDatabaseOperations")
+	}
 	opts = append((*c.CallOptions).ListDatabaseOperations[0:len((*c.CallOptions).ListDatabaseOperations):len((*c.CallOptions).ListDatabaseOperations)], opts...)
 	it := &OperationIterator{}
-	req = proto.Clone(req).(*databasepb.ListDatabaseOperationsRequest)
+	req = proto.CloneOf(req)
 	it.InternalFetch = func(pageSize int, pageToken string) ([]*longrunningpb.Operation, string, error) {
 		resp := &databasepb.ListDatabaseOperationsResponse{}
 		if pageToken != "" {
@@ -1692,9 +1939,15 @@ func (c *databaseAdminGRPCClient) ListBackupOperations(ctx context.Context, req 
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetParent()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/ListBackupOperations")
+	}
 	opts = append((*c.CallOptions).ListBackupOperations[0:len((*c.CallOptions).ListBackupOperations):len((*c.CallOptions).ListBackupOperations)], opts...)
 	it := &OperationIterator{}
-	req = proto.Clone(req).(*databasepb.ListBackupOperationsRequest)
+	req = proto.CloneOf(req)
 	it.InternalFetch = func(pageSize int, pageToken string) ([]*longrunningpb.Operation, string, error) {
 		resp := &databasepb.ListBackupOperationsResponse{}
 		if pageToken != "" {
@@ -1738,9 +1991,15 @@ func (c *databaseAdminGRPCClient) ListDatabaseRoles(ctx context.Context, req *da
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetParent()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/ListDatabaseRoles")
+	}
 	opts = append((*c.CallOptions).ListDatabaseRoles[0:len((*c.CallOptions).ListDatabaseRoles):len((*c.CallOptions).ListDatabaseRoles)], opts...)
 	it := &DatabaseRoleIterator{}
-	req = proto.Clone(req).(*databasepb.ListDatabaseRolesRequest)
+	req = proto.CloneOf(req)
 	it.InternalFetch = func(pageSize int, pageToken string) ([]*databasepb.DatabaseRole, string, error) {
 		resp := &databasepb.ListDatabaseRolesResponse{}
 		if pageToken != "" {
@@ -1784,6 +2043,12 @@ func (c *databaseAdminGRPCClient) AddSplitPoints(ctx context.Context, req *datab
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetDatabase()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/AddSplitPoints")
+	}
 	opts = append((*c.CallOptions).AddSplitPoints[0:len((*c.CallOptions).AddSplitPoints):len((*c.CallOptions).AddSplitPoints)], opts...)
 	var resp *databasepb.AddSplitPointsResponse
 	err := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
@@ -1802,6 +2067,12 @@ func (c *databaseAdminGRPCClient) CreateBackupSchedule(ctx context.Context, req 
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetParent()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/CreateBackupSchedule")
+	}
 	opts = append((*c.CallOptions).CreateBackupSchedule[0:len((*c.CallOptions).CreateBackupSchedule):len((*c.CallOptions).CreateBackupSchedule)], opts...)
 	var resp *databasepb.BackupSchedule
 	err := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
@@ -1820,6 +2091,12 @@ func (c *databaseAdminGRPCClient) GetBackupSchedule(ctx context.Context, req *da
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetName()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/GetBackupSchedule")
+	}
 	opts = append((*c.CallOptions).GetBackupSchedule[0:len((*c.CallOptions).GetBackupSchedule):len((*c.CallOptions).GetBackupSchedule)], opts...)
 	var resp *databasepb.BackupSchedule
 	err := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
@@ -1838,6 +2115,9 @@ func (c *databaseAdminGRPCClient) UpdateBackupSchedule(ctx context.Context, req 
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/UpdateBackupSchedule")
+	}
 	opts = append((*c.CallOptions).UpdateBackupSchedule[0:len((*c.CallOptions).UpdateBackupSchedule):len((*c.CallOptions).UpdateBackupSchedule)], opts...)
 	var resp *databasepb.BackupSchedule
 	err := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
@@ -1856,6 +2136,12 @@ func (c *databaseAdminGRPCClient) DeleteBackupSchedule(ctx context.Context, req 
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetName()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/DeleteBackupSchedule")
+	}
 	opts = append((*c.CallOptions).DeleteBackupSchedule[0:len((*c.CallOptions).DeleteBackupSchedule):len((*c.CallOptions).DeleteBackupSchedule)], opts...)
 	err := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
 		var err error
@@ -1870,9 +2156,15 @@ func (c *databaseAdminGRPCClient) ListBackupSchedules(ctx context.Context, req *
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetParent()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/ListBackupSchedules")
+	}
 	opts = append((*c.CallOptions).ListBackupSchedules[0:len((*c.CallOptions).ListBackupSchedules):len((*c.CallOptions).ListBackupSchedules)], opts...)
 	it := &BackupScheduleIterator{}
-	req = proto.Clone(req).(*databasepb.ListBackupSchedulesRequest)
+	req = proto.CloneOf(req)
 	it.InternalFetch = func(pageSize int, pageToken string) ([]*databasepb.BackupSchedule, string, error) {
 		resp := &databasepb.ListBackupSchedulesResponse{}
 		if pageToken != "" {
@@ -1911,11 +2203,32 @@ func (c *databaseAdminGRPCClient) ListBackupSchedules(ctx context.Context, req *
 	return it
 }
 
+func (c *databaseAdminGRPCClient) InternalUpdateGraphOperation(ctx context.Context, req *databasepb.InternalUpdateGraphOperationRequest, opts ...gax.CallOption) (*databasepb.InternalUpdateGraphOperationResponse, error) {
+	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, c.xGoogHeaders...)
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/InternalUpdateGraphOperation")
+	}
+	opts = append((*c.CallOptions).InternalUpdateGraphOperation[0:len((*c.CallOptions).InternalUpdateGraphOperation):len((*c.CallOptions).InternalUpdateGraphOperation)], opts...)
+	var resp *databasepb.InternalUpdateGraphOperationResponse
+	err := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
+		var err error
+		resp, err = executeRPC(ctx, c.databaseAdminClient.InternalUpdateGraphOperation, req, settings.GRPC, c.logger, "InternalUpdateGraphOperation")
+		return err
+	}, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
 func (c *databaseAdminGRPCClient) CancelOperation(ctx context.Context, req *longrunningpb.CancelOperationRequest, opts ...gax.CallOption) error {
 	hds := []string{"x-goog-request-params", fmt.Sprintf("%s=%v", "name", url.QueryEscape(req.GetName()))}
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.longrunning.Operations/CancelOperation")
+	}
 	opts = append((*c.CallOptions).CancelOperation[0:len((*c.CallOptions).CancelOperation):len((*c.CallOptions).CancelOperation)], opts...)
 	err := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
 		var err error
@@ -1930,6 +2243,9 @@ func (c *databaseAdminGRPCClient) DeleteOperation(ctx context.Context, req *long
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.longrunning.Operations/DeleteOperation")
+	}
 	opts = append((*c.CallOptions).DeleteOperation[0:len((*c.CallOptions).DeleteOperation):len((*c.CallOptions).DeleteOperation)], opts...)
 	err := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
 		var err error
@@ -1944,6 +2260,9 @@ func (c *databaseAdminGRPCClient) GetOperation(ctx context.Context, req *longrun
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.longrunning.Operations/GetOperation")
+	}
 	opts = append((*c.CallOptions).GetOperation[0:len((*c.CallOptions).GetOperation):len((*c.CallOptions).GetOperation)], opts...)
 	var resp *longrunningpb.Operation
 	err := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
@@ -1962,9 +2281,12 @@ func (c *databaseAdminGRPCClient) ListOperations(ctx context.Context, req *longr
 
 	hds = append(c.xGoogHeaders, hds...)
 	ctx = gax.InsertMetadataIntoOutgoingContext(ctx, hds...)
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.longrunning.Operations/ListOperations")
+	}
 	opts = append((*c.CallOptions).ListOperations[0:len((*c.CallOptions).ListOperations):len((*c.CallOptions).ListOperations)], opts...)
 	it := &OperationIterator{}
-	req = proto.Clone(req).(*longrunningpb.ListOperationsRequest)
+	req = proto.CloneOf(req)
 	it.InternalFetch = func(pageSize int, pageToken string) ([]*longrunningpb.Operation, string, error) {
 		resp := &longrunningpb.ListOperationsResponse{}
 		if pageToken != "" {
@@ -2006,7 +2328,7 @@ func (c *databaseAdminGRPCClient) ListOperations(ctx context.Context, req *longr
 // ListDatabases lists Cloud Spanner databases.
 func (c *databaseAdminRESTClient) ListDatabases(ctx context.Context, req *databasepb.ListDatabasesRequest, opts ...gax.CallOption) *DatabaseIterator {
 	it := &DatabaseIterator{}
-	req = proto.Clone(req).(*databasepb.ListDatabasesRequest)
+	req = proto.CloneOf(req)
 	unm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
 	it.InternalFetch = func(pageSize int, pageToken string) ([]*databasepb.Database, string, error) {
 		resp := &databasepb.ListDatabasesResponse{}
@@ -2113,6 +2435,13 @@ func (c *databaseAdminRESTClient) CreateDatabase(ctx context.Context, req *datab
 	hds = append(c.xGoogHeaders, hds...)
 	hds = append(hds, "Content-Type", "application/json")
 	headers := gax.BuildHeaders(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetParent()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/CreateDatabase")
+		ctx = callctx.WithTelemetryContext(ctx, "url_template", "/v1/{parent=projects/*/instances/*}/databases")
+	}
 	unm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
 	resp := &longrunningpb.Operation{}
 	e := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
@@ -2141,8 +2470,12 @@ func (c *databaseAdminRESTClient) CreateDatabase(ctx context.Context, req *datab
 	}
 
 	override := fmt.Sprintf("/v1/%s", resp.GetName())
+	lro := longrunning.InternalNewOperationWithMetadata(*c.LROClient, resp, "*database.CreateDatabaseOperation")
+	if gax.IsFeatureEnabled("TRACING") {
+		lro.SetParentSpanContext(trace.SpanContextFromContext(ctx))
+	}
 	return &CreateDatabaseOperation{
-		lro:      longrunning.InternalNewOperation(*c.LROClient, resp),
+		lro:      lro,
 		pollPath: override,
 	}, nil
 }
@@ -2166,6 +2499,13 @@ func (c *databaseAdminRESTClient) GetDatabase(ctx context.Context, req *database
 	hds = append(c.xGoogHeaders, hds...)
 	hds = append(hds, "Content-Type", "application/json")
 	headers := gax.BuildHeaders(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetName()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/GetDatabase")
+		ctx = callctx.WithTelemetryContext(ctx, "url_template", "/v1/{name=projects/*/instances/*/databases/*}")
+	}
 	opts = append((*c.CallOptions).GetDatabase[0:len((*c.CallOptions).GetDatabase):len((*c.CallOptions).GetDatabase)], opts...)
 	unm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
 	resp := &databasepb.Database{}
@@ -2269,6 +2609,10 @@ func (c *databaseAdminRESTClient) UpdateDatabase(ctx context.Context, req *datab
 	hds = append(c.xGoogHeaders, hds...)
 	hds = append(hds, "Content-Type", "application/json")
 	headers := gax.BuildHeaders(ctx, hds...)
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/UpdateDatabase")
+		ctx = callctx.WithTelemetryContext(ctx, "url_template", "/v1/{database.name=projects/*/instances/*/databases/*}")
+	}
 	unm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
 	resp := &longrunningpb.Operation{}
 	e := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
@@ -2297,8 +2641,12 @@ func (c *databaseAdminRESTClient) UpdateDatabase(ctx context.Context, req *datab
 	}
 
 	override := fmt.Sprintf("/v1/%s", resp.GetName())
+	lro := longrunning.InternalNewOperationWithMetadata(*c.LROClient, resp, "*database.UpdateDatabaseOperation")
+	if gax.IsFeatureEnabled("TRACING") {
+		lro.SetParentSpanContext(trace.SpanContextFromContext(ctx))
+	}
 	return &UpdateDatabaseOperation{
-		lro:      longrunning.InternalNewOperation(*c.LROClient, resp),
+		lro:      lro,
 		pollPath: override,
 	}, nil
 }
@@ -2335,6 +2683,13 @@ func (c *databaseAdminRESTClient) UpdateDatabaseDdl(ctx context.Context, req *da
 	hds = append(c.xGoogHeaders, hds...)
 	hds = append(hds, "Content-Type", "application/json")
 	headers := gax.BuildHeaders(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetDatabase()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/UpdateDatabaseDdl")
+		ctx = callctx.WithTelemetryContext(ctx, "url_template", "/v1/{database=projects/*/instances/*/databases/*}/ddl")
+	}
 	unm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
 	resp := &longrunningpb.Operation{}
 	e := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
@@ -2363,8 +2718,12 @@ func (c *databaseAdminRESTClient) UpdateDatabaseDdl(ctx context.Context, req *da
 	}
 
 	override := fmt.Sprintf("/v1/%s", resp.GetName())
+	lro := longrunning.InternalNewOperationWithMetadata(*c.LROClient, resp, "*database.UpdateDatabaseDdlOperation")
+	if gax.IsFeatureEnabled("TRACING") {
+		lro.SetParentSpanContext(trace.SpanContextFromContext(ctx))
+	}
 	return &UpdateDatabaseDdlOperation{
-		lro:      longrunning.InternalNewOperation(*c.LROClient, resp),
+		lro:      lro,
 		pollPath: override,
 	}, nil
 }
@@ -2392,6 +2751,13 @@ func (c *databaseAdminRESTClient) DropDatabase(ctx context.Context, req *databas
 	hds = append(c.xGoogHeaders, hds...)
 	hds = append(hds, "Content-Type", "application/json")
 	headers := gax.BuildHeaders(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetDatabase()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/DropDatabase")
+		ctx = callctx.WithTelemetryContext(ctx, "url_template", "/v1/{database=projects/*/instances/*/databases/*}")
+	}
 	return gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
 		if settings.Path != "" {
 			baseUrl.Path = settings.Path
@@ -2429,6 +2795,13 @@ func (c *databaseAdminRESTClient) GetDatabaseDdl(ctx context.Context, req *datab
 	hds = append(c.xGoogHeaders, hds...)
 	hds = append(hds, "Content-Type", "application/json")
 	headers := gax.BuildHeaders(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetDatabase()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/GetDatabaseDdl")
+		ctx = callctx.WithTelemetryContext(ctx, "url_template", "/v1/{database=projects/*/instances/*/databases/*}/ddl")
+	}
 	opts = append((*c.CallOptions).GetDatabaseDdl[0:len((*c.CallOptions).GetDatabaseDdl):len((*c.CallOptions).GetDatabaseDdl)], opts...)
 	unm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
 	resp := &databasepb.GetDatabaseDdlResponse{}
@@ -2491,6 +2864,13 @@ func (c *databaseAdminRESTClient) SetIamPolicy(ctx context.Context, req *iampb.S
 	hds = append(c.xGoogHeaders, hds...)
 	hds = append(hds, "Content-Type", "application/json")
 	headers := gax.BuildHeaders(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetResource()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/SetIamPolicy")
+		ctx = callctx.WithTelemetryContext(ctx, "url_template", "/v1/{resource=projects/*/instances/*/databases/*}:setIamPolicy")
+	}
 	opts = append((*c.CallOptions).SetIamPolicy[0:len((*c.CallOptions).SetIamPolicy):len((*c.CallOptions).SetIamPolicy)], opts...)
 	unm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
 	resp := &iampb.Policy{}
@@ -2554,6 +2934,13 @@ func (c *databaseAdminRESTClient) GetIamPolicy(ctx context.Context, req *iampb.G
 	hds = append(c.xGoogHeaders, hds...)
 	hds = append(hds, "Content-Type", "application/json")
 	headers := gax.BuildHeaders(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetResource()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/GetIamPolicy")
+		ctx = callctx.WithTelemetryContext(ctx, "url_template", "/v1/{resource=projects/*/instances/*/databases/*}:getIamPolicy")
+	}
 	opts = append((*c.CallOptions).GetIamPolicy[0:len((*c.CallOptions).GetIamPolicy):len((*c.CallOptions).GetIamPolicy)], opts...)
 	unm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
 	resp := &iampb.Policy{}
@@ -2619,6 +3006,13 @@ func (c *databaseAdminRESTClient) TestIamPermissions(ctx context.Context, req *i
 	hds = append(c.xGoogHeaders, hds...)
 	hds = append(hds, "Content-Type", "application/json")
 	headers := gax.BuildHeaders(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetResource()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/TestIamPermissions")
+		ctx = callctx.WithTelemetryContext(ctx, "url_template", "/v1/{resource=projects/*/instances/*/databases/*}:testIamPermissions")
+	}
 	opts = append((*c.CallOptions).TestIamPermissions[0:len((*c.CallOptions).TestIamPermissions):len((*c.CallOptions).TestIamPermissions)], opts...)
 	unm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
 	resp := &iampb.TestIamPermissionsResponse{}
@@ -2697,6 +3091,13 @@ func (c *databaseAdminRESTClient) CreateBackup(ctx context.Context, req *databas
 	hds = append(c.xGoogHeaders, hds...)
 	hds = append(hds, "Content-Type", "application/json")
 	headers := gax.BuildHeaders(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetParent()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/CreateBackup")
+		ctx = callctx.WithTelemetryContext(ctx, "url_template", "/v1/{parent=projects/*/instances/*}/backups")
+	}
 	unm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
 	resp := &longrunningpb.Operation{}
 	e := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
@@ -2725,8 +3126,12 @@ func (c *databaseAdminRESTClient) CreateBackup(ctx context.Context, req *databas
 	}
 
 	override := fmt.Sprintf("/v1/%s", resp.GetName())
+	lro := longrunning.InternalNewOperationWithMetadata(*c.LROClient, resp, "*database.CreateBackupOperation")
+	if gax.IsFeatureEnabled("TRACING") {
+		lro.SetParentSpanContext(trace.SpanContextFromContext(ctx))
+	}
 	return &CreateBackupOperation{
-		lro:      longrunning.InternalNewOperation(*c.LROClient, resp),
+		lro:      lro,
 		pollPath: override,
 	}, nil
 }
@@ -2768,6 +3173,13 @@ func (c *databaseAdminRESTClient) CopyBackup(ctx context.Context, req *databasep
 	hds = append(c.xGoogHeaders, hds...)
 	hds = append(hds, "Content-Type", "application/json")
 	headers := gax.BuildHeaders(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetParent()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/CopyBackup")
+		ctx = callctx.WithTelemetryContext(ctx, "url_template", "/v1/{parent=projects/*/instances/*}/backups:copy")
+	}
 	unm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
 	resp := &longrunningpb.Operation{}
 	e := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
@@ -2796,8 +3208,12 @@ func (c *databaseAdminRESTClient) CopyBackup(ctx context.Context, req *databasep
 	}
 
 	override := fmt.Sprintf("/v1/%s", resp.GetName())
+	lro := longrunning.InternalNewOperationWithMetadata(*c.LROClient, resp, "*database.CopyBackupOperation")
+	if gax.IsFeatureEnabled("TRACING") {
+		lro.SetParentSpanContext(trace.SpanContextFromContext(ctx))
+	}
 	return &CopyBackupOperation{
-		lro:      longrunning.InternalNewOperation(*c.LROClient, resp),
+		lro:      lro,
 		pollPath: override,
 	}, nil
 }
@@ -2822,6 +3238,13 @@ func (c *databaseAdminRESTClient) GetBackup(ctx context.Context, req *databasepb
 	hds = append(c.xGoogHeaders, hds...)
 	hds = append(hds, "Content-Type", "application/json")
 	headers := gax.BuildHeaders(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetName()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/GetBackup")
+		ctx = callctx.WithTelemetryContext(ctx, "url_template", "/v1/{name=projects/*/instances/*/backups/*}")
+	}
 	opts = append((*c.CallOptions).GetBackup[0:len((*c.CallOptions).GetBackup):len((*c.CallOptions).GetBackup)], opts...)
 	unm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
 	resp := &databasepb.Backup{}
@@ -2887,6 +3310,10 @@ func (c *databaseAdminRESTClient) UpdateBackup(ctx context.Context, req *databas
 	hds = append(c.xGoogHeaders, hds...)
 	hds = append(hds, "Content-Type", "application/json")
 	headers := gax.BuildHeaders(ctx, hds...)
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/UpdateBackup")
+		ctx = callctx.WithTelemetryContext(ctx, "url_template", "/v1/{backup.name=projects/*/instances/*/backups/*}")
+	}
 	opts = append((*c.CallOptions).UpdateBackup[0:len((*c.CallOptions).UpdateBackup):len((*c.CallOptions).UpdateBackup)], opts...)
 	unm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
 	resp := &databasepb.Backup{}
@@ -2938,6 +3365,13 @@ func (c *databaseAdminRESTClient) DeleteBackup(ctx context.Context, req *databas
 	hds = append(c.xGoogHeaders, hds...)
 	hds = append(hds, "Content-Type", "application/json")
 	headers := gax.BuildHeaders(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetName()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/DeleteBackup")
+		ctx = callctx.WithTelemetryContext(ctx, "url_template", "/v1/{name=projects/*/instances/*/backups/*}")
+	}
 	return gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
 		if settings.Path != "" {
 			baseUrl.Path = settings.Path
@@ -2959,7 +3393,7 @@ func (c *databaseAdminRESTClient) DeleteBackup(ctx context.Context, req *databas
 // starting from the most recent create_time.
 func (c *databaseAdminRESTClient) ListBackups(ctx context.Context, req *databasepb.ListBackupsRequest, opts ...gax.CallOption) *BackupIterator {
 	it := &BackupIterator{}
-	req = proto.Clone(req).(*databasepb.ListBackupsRequest)
+	req = proto.CloneOf(req)
 	unm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
 	it.InternalFetch = func(pageSize int, pageToken string) ([]*databasepb.Backup, string, error) {
 		resp := &databasepb.ListBackupsResponse{}
@@ -3078,6 +3512,13 @@ func (c *databaseAdminRESTClient) RestoreDatabase(ctx context.Context, req *data
 	hds = append(c.xGoogHeaders, hds...)
 	hds = append(hds, "Content-Type", "application/json")
 	headers := gax.BuildHeaders(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetParent()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/RestoreDatabase")
+		ctx = callctx.WithTelemetryContext(ctx, "url_template", "/v1/{parent=projects/*/instances/*}/databases:restore")
+	}
 	unm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
 	resp := &longrunningpb.Operation{}
 	e := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
@@ -3106,8 +3547,12 @@ func (c *databaseAdminRESTClient) RestoreDatabase(ctx context.Context, req *data
 	}
 
 	override := fmt.Sprintf("/v1/%s", resp.GetName())
+	lro := longrunning.InternalNewOperationWithMetadata(*c.LROClient, resp, "*database.RestoreDatabaseOperation")
+	if gax.IsFeatureEnabled("TRACING") {
+		lro.SetParentSpanContext(trace.SpanContextFromContext(ctx))
+	}
 	return &RestoreDatabaseOperation{
-		lro:      longrunning.InternalNewOperation(*c.LROClient, resp),
+		lro:      lro,
 		pollPath: override,
 	}, nil
 }
@@ -3122,7 +3567,7 @@ func (c *databaseAdminRESTClient) RestoreDatabase(ctx context.Context, req *data
 // and pending operations.
 func (c *databaseAdminRESTClient) ListDatabaseOperations(ctx context.Context, req *databasepb.ListDatabaseOperationsRequest, opts ...gax.CallOption) *OperationIterator {
 	it := &OperationIterator{}
-	req = proto.Clone(req).(*databasepb.ListDatabaseOperationsRequest)
+	req = proto.CloneOf(req)
 	unm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
 	it.InternalFetch = func(pageSize int, pageToken string) ([]*longrunningpb.Operation, string, error) {
 		resp := &databasepb.ListDatabaseOperationsResponse{}
@@ -3212,7 +3657,7 @@ func (c *databaseAdminRESTClient) ListDatabaseOperations(ctx context.Context, re
 // from the most recently started operation.
 func (c *databaseAdminRESTClient) ListBackupOperations(ctx context.Context, req *databasepb.ListBackupOperationsRequest, opts ...gax.CallOption) *OperationIterator {
 	it := &OperationIterator{}
-	req = proto.Clone(req).(*databasepb.ListBackupOperationsRequest)
+	req = proto.CloneOf(req)
 	unm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
 	it.InternalFetch = func(pageSize int, pageToken string) ([]*longrunningpb.Operation, string, error) {
 		resp := &databasepb.ListBackupOperationsResponse{}
@@ -3293,7 +3738,7 @@ func (c *databaseAdminRESTClient) ListBackupOperations(ctx context.Context, req 
 // ListDatabaseRoles lists Cloud Spanner database roles.
 func (c *databaseAdminRESTClient) ListDatabaseRoles(ctx context.Context, req *databasepb.ListDatabaseRolesRequest, opts ...gax.CallOption) *DatabaseRoleIterator {
 	it := &DatabaseRoleIterator{}
-	req = proto.Clone(req).(*databasepb.ListDatabaseRolesRequest)
+	req = proto.CloneOf(req)
 	unm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
 	it.InternalFetch = func(pageSize int, pageToken string) ([]*databasepb.DatabaseRole, string, error) {
 		resp := &databasepb.ListDatabaseRolesResponse{}
@@ -3393,6 +3838,13 @@ func (c *databaseAdminRESTClient) AddSplitPoints(ctx context.Context, req *datab
 	hds = append(c.xGoogHeaders, hds...)
 	hds = append(hds, "Content-Type", "application/json")
 	headers := gax.BuildHeaders(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetDatabase()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/AddSplitPoints")
+		ctx = callctx.WithTelemetryContext(ctx, "url_template", "/v1/{database=projects/*/instances/*/databases/*}:addSplitPoints")
+	}
 	opts = append((*c.CallOptions).AddSplitPoints[0:len((*c.CallOptions).AddSplitPoints):len((*c.CallOptions).AddSplitPoints)], opts...)
 	unm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
 	resp := &databasepb.AddSplitPointsResponse{}
@@ -3451,6 +3903,13 @@ func (c *databaseAdminRESTClient) CreateBackupSchedule(ctx context.Context, req 
 	hds = append(c.xGoogHeaders, hds...)
 	hds = append(hds, "Content-Type", "application/json")
 	headers := gax.BuildHeaders(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetParent()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/CreateBackupSchedule")
+		ctx = callctx.WithTelemetryContext(ctx, "url_template", "/v1/{parent=projects/*/instances/*/databases/*}/backupSchedules")
+	}
 	opts = append((*c.CallOptions).CreateBackupSchedule[0:len((*c.CallOptions).CreateBackupSchedule):len((*c.CallOptions).CreateBackupSchedule)], opts...)
 	unm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
 	resp := &databasepb.BackupSchedule{}
@@ -3501,6 +3960,13 @@ func (c *databaseAdminRESTClient) GetBackupSchedule(ctx context.Context, req *da
 	hds = append(c.xGoogHeaders, hds...)
 	hds = append(hds, "Content-Type", "application/json")
 	headers := gax.BuildHeaders(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetName()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/GetBackupSchedule")
+		ctx = callctx.WithTelemetryContext(ctx, "url_template", "/v1/{name=projects/*/instances/*/databases/*/backupSchedules/*}")
+	}
 	opts = append((*c.CallOptions).GetBackupSchedule[0:len((*c.CallOptions).GetBackupSchedule):len((*c.CallOptions).GetBackupSchedule)], opts...)
 	unm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
 	resp := &databasepb.BackupSchedule{}
@@ -3565,6 +4031,10 @@ func (c *databaseAdminRESTClient) UpdateBackupSchedule(ctx context.Context, req 
 	hds = append(c.xGoogHeaders, hds...)
 	hds = append(hds, "Content-Type", "application/json")
 	headers := gax.BuildHeaders(ctx, hds...)
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/UpdateBackupSchedule")
+		ctx = callctx.WithTelemetryContext(ctx, "url_template", "/v1/{backup_schedule.name=projects/*/instances/*/databases/*/backupSchedules/*}")
+	}
 	opts = append((*c.CallOptions).UpdateBackupSchedule[0:len((*c.CallOptions).UpdateBackupSchedule):len((*c.CallOptions).UpdateBackupSchedule)], opts...)
 	unm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
 	resp := &databasepb.BackupSchedule{}
@@ -3615,6 +4085,13 @@ func (c *databaseAdminRESTClient) DeleteBackupSchedule(ctx context.Context, req 
 	hds = append(c.xGoogHeaders, hds...)
 	hds = append(hds, "Content-Type", "application/json")
 	headers := gax.BuildHeaders(ctx, hds...)
+	if gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "resource_name", fmt.Sprintf("//spanner.googleapis.com/%v", req.GetName()))
+	}
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/DeleteBackupSchedule")
+		ctx = callctx.WithTelemetryContext(ctx, "url_template", "/v1/{name=projects/*/instances/*/databases/*/backupSchedules/*}")
+	}
 	return gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
 		if settings.Path != "" {
 			baseUrl.Path = settings.Path
@@ -3634,7 +4111,7 @@ func (c *databaseAdminRESTClient) DeleteBackupSchedule(ctx context.Context, req 
 // ListBackupSchedules lists all the backup schedules for the database.
 func (c *databaseAdminRESTClient) ListBackupSchedules(ctx context.Context, req *databasepb.ListBackupSchedulesRequest, opts ...gax.CallOption) *BackupScheduleIterator {
 	it := &BackupScheduleIterator{}
-	req = proto.Clone(req).(*databasepb.ListBackupSchedulesRequest)
+	req = proto.CloneOf(req)
 	unm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
 	it.InternalFetch = func(pageSize int, pageToken string) ([]*databasepb.BackupSchedule, string, error) {
 		resp := &databasepb.ListBackupSchedulesResponse{}
@@ -3709,6 +4186,69 @@ func (c *databaseAdminRESTClient) ListBackupSchedules(ctx context.Context, req *
 	return it
 }
 
+// InternalUpdateGraphOperation this is an internal API called by Spanner Graph jobs. You should never need
+// to call this API directly.
+func (c *databaseAdminRESTClient) InternalUpdateGraphOperation(ctx context.Context, req *databasepb.InternalUpdateGraphOperationRequest, opts ...gax.CallOption) (*databasepb.InternalUpdateGraphOperationResponse, error) {
+	baseUrl, err := url.Parse(c.endpoint)
+	if err != nil {
+		return nil, err
+	}
+	baseUrl.Path += fmt.Sprintf("")
+
+	params := url.Values{}
+	params.Add("$alt", "json;enum-encoding=int")
+	params.Add("database", fmt.Sprintf("%v", req.GetDatabase()))
+	params.Add("operationId", fmt.Sprintf("%v", req.GetOperationId()))
+	if req.GetProgress() != 0 {
+		params.Add("progress", fmt.Sprintf("%v", req.GetProgress()))
+	}
+	if req.GetStatus().GetCode() != 0 {
+		params.Add("status.code", fmt.Sprintf("%v", req.GetStatus().GetCode()))
+	}
+	if req.GetStatus().GetMessage() != "" {
+		params.Add("status.message", fmt.Sprintf("%v", req.GetStatus().GetMessage()))
+	}
+	params.Add("vmIdentityToken", fmt.Sprintf("%v", req.GetVmIdentityToken()))
+
+	baseUrl.RawQuery = params.Encode()
+
+	// Build HTTP headers from client and context metadata.
+	hds := append(c.xGoogHeaders, "Content-Type", "application/json")
+	headers := gax.BuildHeaders(ctx, hds...)
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.spanner.admin.database.v1.DatabaseAdmin/InternalUpdateGraphOperation")
+	}
+	opts = append((*c.CallOptions).InternalUpdateGraphOperation[0:len((*c.CallOptions).InternalUpdateGraphOperation):len((*c.CallOptions).InternalUpdateGraphOperation)], opts...)
+	unm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
+	resp := &databasepb.InternalUpdateGraphOperationResponse{}
+	e := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
+		if settings.Path != "" {
+			baseUrl.Path = settings.Path
+		}
+		httpReq, err := http.NewRequest("", baseUrl.String(), nil)
+		if err != nil {
+			return err
+		}
+		httpReq = httpReq.WithContext(ctx)
+		httpReq.Header = headers
+
+		buf, err := executeHTTPRequest(ctx, c.httpClient, httpReq, c.logger, nil, "InternalUpdateGraphOperation")
+		if err != nil {
+			return err
+		}
+
+		if err := unm.Unmarshal(buf, resp); err != nil {
+			return err
+		}
+
+		return nil
+	}, opts...)
+	if e != nil {
+		return nil, e
+	}
+	return resp, nil
+}
+
 // CancelOperation is a utility method from google.longrunning.Operations.
 func (c *databaseAdminRESTClient) CancelOperation(ctx context.Context, req *longrunningpb.CancelOperationRequest, opts ...gax.CallOption) error {
 	baseUrl, err := url.Parse(c.endpoint)
@@ -3728,6 +4268,10 @@ func (c *databaseAdminRESTClient) CancelOperation(ctx context.Context, req *long
 	hds = append(c.xGoogHeaders, hds...)
 	hds = append(hds, "Content-Type", "application/json")
 	headers := gax.BuildHeaders(ctx, hds...)
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.longrunning.Operations/CancelOperation")
+		ctx = callctx.WithTelemetryContext(ctx, "url_template", "/v1/{name=projects/*/instances/*/databases/*/operations/*}:cancel")
+	}
 	return gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
 		if settings.Path != "" {
 			baseUrl.Path = settings.Path
@@ -3763,6 +4307,10 @@ func (c *databaseAdminRESTClient) DeleteOperation(ctx context.Context, req *long
 	hds = append(c.xGoogHeaders, hds...)
 	hds = append(hds, "Content-Type", "application/json")
 	headers := gax.BuildHeaders(ctx, hds...)
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.longrunning.Operations/DeleteOperation")
+		ctx = callctx.WithTelemetryContext(ctx, "url_template", "/v1/{name=projects/*/instances/*/databases/*/operations/*}")
+	}
 	return gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {
 		if settings.Path != "" {
 			baseUrl.Path = settings.Path
@@ -3798,6 +4346,10 @@ func (c *databaseAdminRESTClient) GetOperation(ctx context.Context, req *longrun
 	hds = append(c.xGoogHeaders, hds...)
 	hds = append(hds, "Content-Type", "application/json")
 	headers := gax.BuildHeaders(ctx, hds...)
+	if gax.IsFeatureEnabled("METRICS") || gax.IsFeatureEnabled("TRACING") || gax.IsFeatureEnabled("LOGGING") {
+		ctx = callctx.WithTelemetryContext(ctx, "rpc_method", "google.longrunning.Operations/GetOperation")
+		ctx = callctx.WithTelemetryContext(ctx, "url_template", "/v1/{name=projects/*/instances/*/databases/*/operations/*}")
+	}
 	opts = append((*c.CallOptions).GetOperation[0:len((*c.CallOptions).GetOperation):len((*c.CallOptions).GetOperation)], opts...)
 	unm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
 	resp := &longrunningpb.Operation{}
@@ -3832,7 +4384,7 @@ func (c *databaseAdminRESTClient) GetOperation(ctx context.Context, req *longrun
 // ListOperations is a utility method from google.longrunning.Operations.
 func (c *databaseAdminRESTClient) ListOperations(ctx context.Context, req *longrunningpb.ListOperationsRequest, opts ...gax.CallOption) *OperationIterator {
 	it := &OperationIterator{}
-	req = proto.Clone(req).(*longrunningpb.ListOperationsRequest)
+	req = proto.CloneOf(req)
 	unm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}
 	it.InternalFetch = func(pageSize int, pageToken string) ([]*longrunningpb.Operation, string, error) {
 		resp := &longrunningpb.ListOperationsResponse{}
@@ -3860,6 +4412,9 @@ func (c *databaseAdminRESTClient) ListOperations(ctx context.Context, req *longr
 		}
 		if req.GetPageToken() != "" {
 			params.Add("pageToken", fmt.Sprintf("%v", req.GetPageToken()))
+		}
+		if req.GetReturnPartialSuccess() {
+			params.Add("returnPartialSuccess", fmt.Sprintf("%v", req.GetReturnPartialSuccess()))
 		}
 
 		baseUrl.RawQuery = params.Encode()
@@ -3914,7 +4469,7 @@ func (c *databaseAdminRESTClient) ListOperations(ctx context.Context, req *longr
 // The name must be that of a previously created CopyBackupOperation, possibly from a different process.
 func (c *databaseAdminGRPCClient) CopyBackupOperation(name string) *CopyBackupOperation {
 	return &CopyBackupOperation{
-		lro: longrunning.InternalNewOperation(*c.LROClient, &longrunningpb.Operation{Name: name}),
+		lro: longrunning.InternalNewOperationWithMetadata(*c.LROClient, &longrunningpb.Operation{Name: name}, "*database.CopyBackupOperation"),
 	}
 }
 
@@ -3923,7 +4478,7 @@ func (c *databaseAdminGRPCClient) CopyBackupOperation(name string) *CopyBackupOp
 func (c *databaseAdminRESTClient) CopyBackupOperation(name string) *CopyBackupOperation {
 	override := fmt.Sprintf("/v1/%s", name)
 	return &CopyBackupOperation{
-		lro:      longrunning.InternalNewOperation(*c.LROClient, &longrunningpb.Operation{Name: name}),
+		lro:      longrunning.InternalNewOperationWithMetadata(*c.LROClient, &longrunningpb.Operation{Name: name}, "*database.CopyBackupOperation"),
 		pollPath: override,
 	}
 }
@@ -3932,7 +4487,7 @@ func (c *databaseAdminRESTClient) CopyBackupOperation(name string) *CopyBackupOp
 // The name must be that of a previously created CreateBackupOperation, possibly from a different process.
 func (c *databaseAdminGRPCClient) CreateBackupOperation(name string) *CreateBackupOperation {
 	return &CreateBackupOperation{
-		lro: longrunning.InternalNewOperation(*c.LROClient, &longrunningpb.Operation{Name: name}),
+		lro: longrunning.InternalNewOperationWithMetadata(*c.LROClient, &longrunningpb.Operation{Name: name}, "*database.CreateBackupOperation"),
 	}
 }
 
@@ -3941,7 +4496,7 @@ func (c *databaseAdminGRPCClient) CreateBackupOperation(name string) *CreateBack
 func (c *databaseAdminRESTClient) CreateBackupOperation(name string) *CreateBackupOperation {
 	override := fmt.Sprintf("/v1/%s", name)
 	return &CreateBackupOperation{
-		lro:      longrunning.InternalNewOperation(*c.LROClient, &longrunningpb.Operation{Name: name}),
+		lro:      longrunning.InternalNewOperationWithMetadata(*c.LROClient, &longrunningpb.Operation{Name: name}, "*database.CreateBackupOperation"),
 		pollPath: override,
 	}
 }
@@ -3950,7 +4505,7 @@ func (c *databaseAdminRESTClient) CreateBackupOperation(name string) *CreateBack
 // The name must be that of a previously created CreateDatabaseOperation, possibly from a different process.
 func (c *databaseAdminGRPCClient) CreateDatabaseOperation(name string) *CreateDatabaseOperation {
 	return &CreateDatabaseOperation{
-		lro: longrunning.InternalNewOperation(*c.LROClient, &longrunningpb.Operation{Name: name}),
+		lro: longrunning.InternalNewOperationWithMetadata(*c.LROClient, &longrunningpb.Operation{Name: name}, "*database.CreateDatabaseOperation"),
 	}
 }
 
@@ -3959,7 +4514,7 @@ func (c *databaseAdminGRPCClient) CreateDatabaseOperation(name string) *CreateDa
 func (c *databaseAdminRESTClient) CreateDatabaseOperation(name string) *CreateDatabaseOperation {
 	override := fmt.Sprintf("/v1/%s", name)
 	return &CreateDatabaseOperation{
-		lro:      longrunning.InternalNewOperation(*c.LROClient, &longrunningpb.Operation{Name: name}),
+		lro:      longrunning.InternalNewOperationWithMetadata(*c.LROClient, &longrunningpb.Operation{Name: name}, "*database.CreateDatabaseOperation"),
 		pollPath: override,
 	}
 }
@@ -3968,7 +4523,7 @@ func (c *databaseAdminRESTClient) CreateDatabaseOperation(name string) *CreateDa
 // The name must be that of a previously created RestoreDatabaseOperation, possibly from a different process.
 func (c *databaseAdminGRPCClient) RestoreDatabaseOperation(name string) *RestoreDatabaseOperation {
 	return &RestoreDatabaseOperation{
-		lro: longrunning.InternalNewOperation(*c.LROClient, &longrunningpb.Operation{Name: name}),
+		lro: longrunning.InternalNewOperationWithMetadata(*c.LROClient, &longrunningpb.Operation{Name: name}, "*database.RestoreDatabaseOperation"),
 	}
 }
 
@@ -3977,7 +4532,7 @@ func (c *databaseAdminGRPCClient) RestoreDatabaseOperation(name string) *Restore
 func (c *databaseAdminRESTClient) RestoreDatabaseOperation(name string) *RestoreDatabaseOperation {
 	override := fmt.Sprintf("/v1/%s", name)
 	return &RestoreDatabaseOperation{
-		lro:      longrunning.InternalNewOperation(*c.LROClient, &longrunningpb.Operation{Name: name}),
+		lro:      longrunning.InternalNewOperationWithMetadata(*c.LROClient, &longrunningpb.Operation{Name: name}, "*database.RestoreDatabaseOperation"),
 		pollPath: override,
 	}
 }
@@ -3986,7 +4541,7 @@ func (c *databaseAdminRESTClient) RestoreDatabaseOperation(name string) *Restore
 // The name must be that of a previously created UpdateDatabaseOperation, possibly from a different process.
 func (c *databaseAdminGRPCClient) UpdateDatabaseOperation(name string) *UpdateDatabaseOperation {
 	return &UpdateDatabaseOperation{
-		lro: longrunning.InternalNewOperation(*c.LROClient, &longrunningpb.Operation{Name: name}),
+		lro: longrunning.InternalNewOperationWithMetadata(*c.LROClient, &longrunningpb.Operation{Name: name}, "*database.UpdateDatabaseOperation"),
 	}
 }
 
@@ -3995,7 +4550,7 @@ func (c *databaseAdminGRPCClient) UpdateDatabaseOperation(name string) *UpdateDa
 func (c *databaseAdminRESTClient) UpdateDatabaseOperation(name string) *UpdateDatabaseOperation {
 	override := fmt.Sprintf("/v1/%s", name)
 	return &UpdateDatabaseOperation{
-		lro:      longrunning.InternalNewOperation(*c.LROClient, &longrunningpb.Operation{Name: name}),
+		lro:      longrunning.InternalNewOperationWithMetadata(*c.LROClient, &longrunningpb.Operation{Name: name}, "*database.UpdateDatabaseOperation"),
 		pollPath: override,
 	}
 }
@@ -4004,7 +4559,7 @@ func (c *databaseAdminRESTClient) UpdateDatabaseOperation(name string) *UpdateDa
 // The name must be that of a previously created UpdateDatabaseDdlOperation, possibly from a different process.
 func (c *databaseAdminGRPCClient) UpdateDatabaseDdlOperation(name string) *UpdateDatabaseDdlOperation {
 	return &UpdateDatabaseDdlOperation{
-		lro: longrunning.InternalNewOperation(*c.LROClient, &longrunningpb.Operation{Name: name}),
+		lro: longrunning.InternalNewOperationWithMetadata(*c.LROClient, &longrunningpb.Operation{Name: name}, "*database.UpdateDatabaseDdlOperation"),
 	}
 }
 
@@ -4013,7 +4568,7 @@ func (c *databaseAdminGRPCClient) UpdateDatabaseDdlOperation(name string) *Updat
 func (c *databaseAdminRESTClient) UpdateDatabaseDdlOperation(name string) *UpdateDatabaseDdlOperation {
 	override := fmt.Sprintf("/v1/%s", name)
 	return &UpdateDatabaseDdlOperation{
-		lro:      longrunning.InternalNewOperation(*c.LROClient, &longrunningpb.Operation{Name: name}),
+		lro:      longrunning.InternalNewOperationWithMetadata(*c.LROClient, &longrunningpb.Operation{Name: name}, "*database.UpdateDatabaseDdlOperation"),
 		pollPath: override,
 	}
 }
