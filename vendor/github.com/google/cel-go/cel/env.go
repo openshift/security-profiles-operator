@@ -16,6 +16,11 @@ package cel
 
 import (
 	"errors"
+	"fmt"
+	"maps"
+	"math"
+	"slices"
+	"strings"
 	"sync"
 
 	"github.com/google/cel-go/checker"
@@ -24,12 +29,16 @@ import (
 	celast "github.com/google/cel-go/common/ast"
 	"github.com/google/cel-go/common/containers"
 	"github.com/google/cel-go/common/decls"
+	"github.com/google/cel-go/common/env"
+	"github.com/google/cel-go/common/functions"
+	"github.com/google/cel-go/common/stdlib"
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
 	"github.com/google/cel-go/interpreter"
 	"github.com/google/cel-go/parser"
 
 	exprpb "google.golang.org/genproto/googleapis/api/expr/v1alpha1"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // Source interface representing a user-provided expression.
@@ -40,6 +49,10 @@ type Source = common.Source
 type Ast struct {
 	source Source
 	impl   *celast.AST
+	// loadErr captures an error detected while loading the AST (e.g. an over-deep AST ingested via
+	// ParsedExprToAst / CheckedExprToAst) so it can be surfaced when the Ast is checked or planned
+	// instead of recursing into the checker or planner on adversarially deep input.
+	loadErr error
 }
 
 // NativeRep converts the AST to a Go-native representation.
@@ -127,14 +140,35 @@ type Env struct {
 	Container       *containers.Container
 	variables       []*decls.VariableDecl
 	functions       map[string]*decls.FunctionDecl
-	macros          []parser.Macro
+	macros          []Macro
+	contextProto    protoreflect.MessageDescriptor
 	adapter         types.Adapter
 	provider        types.Provider
 	features        map[int]bool
 	appliedFeatures map[int]bool
-	libraries       map[string]bool
+	limits          map[limitID]int
+	libraries       map[string]SingletonLibrary
 	validators      []ASTValidator
 	costOptions     []checker.CostOption
+
+	// Flags for copy-on-write behavior with env.Extend.
+	funcsShared           bool
+	featuresShared        bool
+	appliedFeaturesShared bool
+	limitsShared          bool
+	libsShared            bool
+
+	parent *Env
+
+	// sharedDispatcher caches a dispatcher populated with the env's function
+	// bindings, built once and reused across every Program() constructed from
+	// this env. It is read-only after construction; each Program layers a thin
+	// child over it for per-program Functions(). Extended envs reuse the parent's
+	// dispatcher if functions are unchanged.
+	sharedDispatcher interpreter.Dispatcher
+	dispOnce         sync.Once
+	hasAsync         bool
+	dispErr          error
 
 	// Internal parser representation
 	prsr     *parser.Parser
@@ -149,6 +183,173 @@ type Env struct {
 
 	// Program options tied to the environment
 	progOpts []ProgramOption
+}
+
+// ToConfig produces a YAML-serializable env.Config object from the given environment.
+//
+// The serialized configuration value is intended to represent a baseline set of config
+// options which could be used as input to an EnvOption to configure the majority of the
+// environment from a file.
+//
+// Note: validators, features, flags, and safe-guard settings are not yet supported by
+// the serialize method. Since optimizers are a separate construct from the environment
+// and the standard expression components (parse, check, evalute), they are also not
+// supported by the serialize method.
+func (e *Env) ToConfig(name string) (*env.Config, error) {
+	conf := env.NewConfig(name)
+	// Container settings
+	if e.Container != containers.DefaultContainer {
+		conf.SetContainer(e.Container.Name())
+	}
+	for _, typeName := range e.Container.AliasSet() {
+		conf.AddImports(env.NewImport(typeName))
+	}
+
+	// Serialize features
+	for featID, enabled := range e.features {
+		featName, found := featureNameByID(featID)
+		if !found {
+			// If the feature isn't named, it isn't intended to be publicly exposed
+			continue
+		}
+		conf.AddFeatures(env.NewFeature(featName, enabled))
+	}
+
+	libOverloads := map[string][]string{}
+	for libName, lib := range e.libraries {
+		// Track the options which have been configured by a library and
+		// then diff the library version against the configured function
+		// to detect incremental overloads or rewrites.
+		libEnv, _ := NewCustomEnv()
+		libEnv, _ = Lib(lib)(libEnv)
+		for fnName, fnDecl := range libEnv.Functions() {
+			if len(fnDecl.OverloadDecls()) == 0 {
+				continue
+			}
+			overloads, exist := libOverloads[fnName]
+			if !exist {
+				overloads = make([]string, 0, len(fnDecl.OverloadDecls()))
+			}
+			for _, o := range fnDecl.OverloadDecls() {
+				overloads = append(overloads, o.ID())
+			}
+			libOverloads[fnName] = overloads
+		}
+		subsetLib, canSubset := lib.(LibrarySubsetter)
+		alias := ""
+		if aliasLib, canAlias := lib.(LibraryAliaser); canAlias {
+			alias = aliasLib.LibraryAlias()
+			libName = alias
+		}
+		if libName == "stdlib" && canSubset {
+			conf.SetStdLib(subsetLib.LibrarySubset())
+			continue
+		}
+		version := uint32(math.MaxUint32)
+		if versionLib, isVersioned := lib.(LibraryVersioner); isVersioned {
+			version = versionLib.LibraryVersion()
+		}
+		conf.AddExtensions(env.NewExtension(libName, version))
+	}
+
+	// If this is a custom environment without the standard env, mark the stdlib as disabled.
+	if conf.StdLib == nil && !e.HasLibrary("cel.lib.std") {
+		conf.SetStdLib(env.NewLibrarySubset().SetDisabled(true))
+	}
+
+	// Serialize the variables
+	vars := make([]*decls.VariableDecl, 0, len(e.Variables()))
+	stdTypeVars := map[string]*decls.VariableDecl{}
+	for _, v := range stdlib.Types() {
+		stdTypeVars[v.Name()] = v
+	}
+	for _, v := range e.Variables() {
+		if _, isStdType := stdTypeVars[v.Name()]; isStdType {
+			continue
+		}
+		vars = append(vars, v)
+	}
+	if e.contextProto != nil {
+		conf.SetContextVariable(env.NewContextVariable(string(e.contextProto.FullName())))
+		skipVariables := map[string]bool{}
+		fields := e.contextProto.Fields()
+		for i := 0; i < fields.Len(); i++ {
+			field := fields.Get(i)
+			variable, err := fieldToVariable(field, e.HasFeature(featureJSONFieldNames))
+			if err != nil {
+				return nil, fmt.Errorf("could not serialize context field variable %q, reason: %w", field.FullName(), err)
+			}
+			skipVariables[variable.Name()] = true
+		}
+		for _, v := range vars {
+			if _, found := skipVariables[v.Name()]; !found {
+				conf.AddVariableDecls(v)
+			}
+		}
+	} else {
+		conf.AddVariableDecls(vars...)
+	}
+
+	// Serialize functions which are distinct from the ones configured by libraries.
+	for fnName, fnDecl := range e.Functions() {
+		if excludedOverloads, found := libOverloads[fnName]; found {
+			if newDecl := fnDecl.Subset(decls.ExcludeOverloads(excludedOverloads...)); newDecl != nil {
+				conf.AddFunctionDecls(newDecl)
+			}
+		} else {
+			conf.AddFunctionDecls(fnDecl)
+		}
+	}
+
+	// Serialize validators
+	for _, val := range e.Validators() {
+		// Only add configurable validators to the env.Config as all others are
+		// expected to be implicitly enabled via extension libraries.
+		if confVal, ok := val.(ConfigurableASTValidator); ok {
+			conf.AddValidators(confVal.ToConfig())
+		}
+	}
+
+	for id, val := range e.limits {
+		limitName, found := limitNameByID(id)
+		if !found || val == 0 {
+			// skip if explicitly defaulted or not supported in config
+			continue
+		}
+		conf.AddLimits(env.NewLimit(limitName, val))
+	}
+
+	// Sort repeated fields in config where reasonable to make the export
+	// stable.
+	slices.SortFunc(conf.Imports, func(a *env.Import, b *env.Import) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	slices.SortFunc(conf.Extensions, func(a *env.Extension, b *env.Extension) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	slices.SortFunc(conf.Variables, func(a *env.Variable, b *env.Variable) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	slices.SortFunc(conf.Functions, func(a *env.Function, b *env.Function) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	slices.SortFunc(conf.Validators, func(a *env.Validator, b *env.Validator) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	slices.SortFunc(conf.Features, func(a *env.Feature, b *env.Feature) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	slices.SortFunc(conf.Limits, func(a *env.Limit, b *env.Limit) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	return conf, nil
 }
 
 // NewEnv creates a program environment configured with the standard library of CEL functions and
@@ -194,7 +395,8 @@ func NewCustomEnv(opts ...EnvOption) (*Env, error) {
 		provider:        registry,
 		features:        map[int]bool{},
 		appliedFeatures: map[int]bool{},
-		libraries:       map[string]bool{},
+		limits:          map[limitID]int{},
+		libraries:       map[string]SingletonLibrary{},
 		validators:      []ASTValidator{},
 		progOpts:        []ProgramOption{},
 		costOptions:     []checker.CostOption{},
@@ -213,6 +415,20 @@ func NewCustomEnv(opts ...EnvOption) (*Env, error) {
 // It is possible to have both non-nil Ast and Issues values returned from this call: however,
 // the mere presence of an Ast does not imply that it is valid for use.
 func (e *Env) Check(ast *Ast) (*Ast, *Issues) {
+	// Surface any error recorded while the Ast was loaded (e.g. an over-deep AST rejected by
+	// ParsedExprToAst / CheckedExprToAst) before recursing into the type checker on it.
+	if ast != nil && ast.loadErr != nil {
+		errs := common.NewErrors(ast.Source())
+		errs.ReportErrorString(common.NoLocation, ast.loadErr.Error())
+		return nil, NewIssuesWithSourceInfo(errs, ast.NativeRep().SourceInfo())
+	}
+	if nodeLimit := e.configuredExpressionNodeLimit(); nodeLimit > 0 && ast != nil && ast.NativeRep() != nil {
+		if count := celast.NodeCount(ast.NativeRep()); count > nodeLimit {
+			errs := common.NewErrors(ast.Source())
+			errs.ReportErrorString(common.NoLocation, fmt.Sprintf("expression node count exceeds limit: count %d, limit %d", count, nodeLimit))
+			return nil, NewIssuesWithSourceInfo(errs, ast.NativeRep().SourceInfo())
+		}
+	}
 	// Construct the internal checker env, erroring if there is an issue adding the declarations.
 	chk, err := e.initChecker()
 	if err != nil {
@@ -254,6 +470,24 @@ func (e *Env) Check(ast *Ast) (*Ast, *Issues) {
 	return ast, nil
 }
 
+// configuredExpressionSizeLimit returns the effective expression size code point limit.
+// A zero value means "use the parser default".
+func (e *Env) configuredExpressionSizeLimit() int {
+	if l := e.limits[limitCodePointSize]; l != 0 {
+		return l
+	}
+	return 100_000
+}
+
+// configuredExpressionNodeLimit returns the effective expression node limit.
+// A zero value means "use default".
+func (e *Env) configuredExpressionNodeLimit() int {
+	if l := e.limits[limitExpressionNodeCount]; l != 0 {
+		return l
+	}
+	return 100_000
+}
+
 // Compile combines the Parse and Check phases CEL program compilation to produce an Ast and
 // associated issues.
 //
@@ -263,7 +497,11 @@ func (e *Env) Check(ast *Ast) (*Ast, *Issues) {
 //
 // Note, for parse-only uses of CEL use Parse.
 func (e *Env) Compile(txt string) (*Ast, *Issues) {
-	return e.CompileSource(common.NewTextSource(txt))
+	src, err := common.NewTextSourceWithLimit(txt, e.configuredExpressionSizeLimit())
+	if err != nil {
+		return nil, ErrorAsIssues(err)
+	}
+	return e.CompileSource(src)
 }
 
 // CompileSource combines the Parse and Check phases CEL program compilation to produce an Ast and
@@ -294,34 +532,17 @@ func (e *Env) CompileSource(src Source) (*Ast, *Issues) {
 // TypeProvider are immutable, or that their underlying implementations are based on the
 // ref.TypeRegistry which provides a Copy method which will be invoked by this method.
 func (e *Env) Extend(opts ...EnvOption) (*Env, error) {
-	chk, chkErr := e.getCheckerOrError()
-	if chkErr != nil {
+	if _, chkErr := e.getCheckerOrError(); chkErr != nil {
 		return nil, chkErr
 	}
 
-	prsrOptsCopy := make([]parser.Option, len(e.prsrOpts))
-	copy(prsrOptsCopy, e.prsrOpts)
-
-	// The type-checker is configured with Declarations. The declarations may either be provided
-	// as options which have not yet been validated, or may come from a previous checker instance
-	// whose types have already been validated.
-	chkOptsCopy := make([]checker.Option, len(e.chkOpts))
-	copy(chkOptsCopy, e.chkOpts)
-
-	// Copy the declarations if needed.
-	if chk != nil {
-		// If the type-checker has already been instantiated, then the e.declarations have been
-		// validated within the chk instance.
-		chkOptsCopy = append(chkOptsCopy, checker.ValidatedDeclarations(chk))
-	}
-	varsCopy := make([]*decls.VariableDecl, len(e.variables))
-	copy(varsCopy, e.variables)
-
-	// Copy macros and program options
-	macsCopy := make([]parser.Macro, len(e.macros))
-	progOptsCopy := make([]ProgramOption, len(e.progOpts))
-	copy(macsCopy, e.macros)
-	copy(progOptsCopy, e.progOpts)
+	prsrOptsCopy := slices.Clone(e.prsrOpts)
+	chkOptsCopy := slices.Clone(e.chkOpts)
+	varsCopy := slices.Clone(e.variables)
+	macsCopy := slices.Clone(e.macros)
+	progOptsCopy := slices.Clone(e.progOpts)
+	validatorsCopy := slices.Clone(e.validators)
+	costOptsCopy := slices.Clone(e.costOptions)
 
 	// Copy the adapter / provider if they appear to be mutable.
 	adapter := e.adapter
@@ -350,44 +571,67 @@ func (e *Env) Extend(opts ...EnvOption) (*Env, error) {
 		adapter = adapterReg.Copy()
 	}
 
-	featuresCopy := make(map[int]bool, len(e.features))
-	for k, v := range e.features {
-		featuresCopy[k] = v
-	}
-	appliedFeaturesCopy := make(map[int]bool, len(e.appliedFeatures))
-	for k, v := range e.appliedFeatures {
-		appliedFeaturesCopy[k] = v
-	}
-	funcsCopy := make(map[string]*decls.FunctionDecl, len(e.functions))
-	for k, v := range e.functions {
-		funcsCopy[k] = v
-	}
-	libsCopy := make(map[string]bool, len(e.libraries))
-	for k, v := range e.libraries {
-		libsCopy[k] = v
-	}
-	validatorsCopy := make([]ASTValidator, len(e.validators))
-	copy(validatorsCopy, e.validators)
-	costOptsCopy := make([]checker.CostOption, len(e.costOptions))
-	copy(costOptsCopy, e.costOptions)
-
 	ext := &Env{
+		parent:          e,
 		Container:       e.Container,
 		variables:       varsCopy,
-		functions:       funcsCopy,
+		functions:       e.functions,
 		macros:          macsCopy,
+		contextProto:    e.contextProto,
 		progOpts:        progOptsCopy,
 		adapter:         adapter,
-		features:        featuresCopy,
-		appliedFeatures: appliedFeaturesCopy,
-		libraries:       libsCopy,
+		features:        e.features,
+		limits:          e.limits,
+		appliedFeatures: e.appliedFeatures,
+		libraries:       e.libraries,
 		validators:      validatorsCopy,
 		provider:        provider,
 		chkOpts:         chkOptsCopy,
 		prsrOpts:        prsrOptsCopy,
 		costOptions:     costOptsCopy,
+		// Copy-on-write flags.
+		funcsShared:           true,
+		featuresShared:        true,
+		limitsShared:          true,
+		appliedFeaturesShared: true,
+		libsShared:            true,
 	}
 	return ext.configure(opts)
+}
+
+func (e *Env) ensureMutableFunctions() {
+	if e.funcsShared {
+		e.functions = maps.Clone(e.functions)
+		e.funcsShared = false
+	}
+}
+
+func (e *Env) ensureMutableLibraries() {
+	if e.libsShared {
+		e.libraries = maps.Clone(e.libraries)
+		e.libsShared = false
+	}
+}
+
+func (e *Env) ensureMutableFeatures() {
+	if e.featuresShared {
+		e.features = maps.Clone(e.features)
+		e.featuresShared = false
+	}
+}
+
+func (e *Env) ensureMutableAppliedFeatures() {
+	if e.appliedFeaturesShared {
+		e.appliedFeatures = maps.Clone(e.appliedFeatures)
+		e.appliedFeaturesShared = false
+	}
+}
+
+func (e *Env) ensureMutableLimits() {
+	if e.limitsShared {
+		e.limits = maps.Clone(e.limits)
+		e.limitsShared = false
+	}
 }
 
 // HasFeature checks whether the environment enables the given feature
@@ -399,8 +643,8 @@ func (e *Env) HasFeature(flag int) bool {
 
 // HasLibrary returns whether a specific SingletonLibrary has been configured in the environment.
 func (e *Env) HasLibrary(libName string) bool {
-	configured, exists := e.libraries[libName]
-	return exists && configured
+	_, exists := e.libraries[libName]
+	return exists
 }
 
 // Libraries returns a list of SingletonLibrary that have been configured in the environment.
@@ -418,9 +662,19 @@ func (e *Env) HasFunction(functionName string) bool {
 	return ok
 }
 
-// Functions returns map of Functions, keyed by function name, that have been configured in the environment.
+// Functions returns a shallow copy of the Functions, keyed by function name, that have been configured in the environment.
 func (e *Env) Functions() map[string]*decls.FunctionDecl {
-	return e.functions
+	return maps.Clone(e.functions)
+}
+
+// Variables returns a shallow copy of the variables associated with the environment.
+func (e *Env) Variables() []*decls.VariableDecl {
+	return slices.Clone(e.variables)
+}
+
+// Macros returns a shallow copy of macros associated with the environment.
+func (e *Env) Macros() []Macro {
+	return slices.Clone(e.macros)
 }
 
 // HasValidator returns whether a specific ASTValidator has been configured in the environment.
@@ -433,12 +687,20 @@ func (e *Env) HasValidator(name string) bool {
 	return false
 }
 
+// Validators returns a shallow copy of the set of ASTValidators configured on the environment.
+func (e *Env) Validators() []ASTValidator {
+	return slices.Clone(e.validators)
+}
+
 // Parse parses the input expression value `txt` to a Ast and/or a set of Issues.
 //
 // This form of Parse creates a Source value for the input `txt` and forwards to the
 // ParseSource method.
 func (e *Env) Parse(txt string) (*Ast, *Issues) {
-	src := common.NewTextSource(txt)
+	src, err := common.NewTextSourceWithLimit(txt, e.configuredExpressionSizeLimit())
+	if err != nil {
+		return nil, ErrorAsIssues(err)
+	}
 	return e.ParseSource(src)
 }
 
@@ -459,6 +721,12 @@ func (e *Env) ParseSource(src Source) (*Ast, *Issues) {
 
 // Program generates an evaluable instance of the Ast within the environment (Env).
 func (e *Env) Program(ast *Ast, opts ...ProgramOption) (Program, error) {
+	// Surface any error recorded while the Ast was loaded (e.g. an over-deep AST rejected by
+	// ParsedExprToAst / CheckedExprToAst) rather than recursing into the planner on it. This is a
+	// cheap field read; the depth traversal itself runs once at conversion time, not here.
+	if ast != nil && ast.loadErr != nil {
+		return nil, ast.loadErr
+	}
 	return e.PlanProgram(ast.NativeRep(), opts...)
 }
 
@@ -473,6 +741,41 @@ func (e *Env) PlanProgram(a *celast.AST, opts ...ProgramOption) (Program, error)
 		optSet = mergedOpts
 	}
 	return newProgram(e, a, optSet)
+}
+
+func (e *Env) initDispatcher() (interpreter.Dispatcher, bool, error) {
+	e.dispOnce.Do(func() {
+		if e.parent != nil && e.funcsShared {
+			// The dispatcher setup is skipped when the child has mutated the function set.
+			// As the child function set contains a copy of all parent function declarations
+			// by virtue of copy on write semantics.
+			d, hasAsync, err := e.parent.initDispatcher()
+			e.sharedDispatcher = d
+			e.hasAsync = hasAsync
+			e.dispErr = err
+			return
+		}
+		hasAsync := false
+		var bindings []*functions.Overload
+		for _, fn := range e.functions {
+			bs, err := fn.Bindings()
+			if err != nil {
+				e.dispErr = err
+				return
+			}
+			for _, b := range bs {
+				if b.Async != nil {
+					hasAsync = true
+				}
+			}
+			bindings = append(bindings, bs...)
+		}
+		d := interpreter.NewDispatcher()
+		e.dispErr = d.Add(bindings...)
+		e.sharedDispatcher = d
+		e.hasAsync = hasAsync
+	})
+	return e.sharedDispatcher, e.hasAsync, e.dispErr
 }
 
 // CELTypeAdapter returns the `types.Adapter` configured for the environment.
@@ -502,31 +805,30 @@ func (e *Env) TypeProvider() ref.TypeProvider {
 	return &interopLegacyTypeProvider{Provider: e.provider}
 }
 
-// UnknownVars returns an interpreter.PartialActivation which marks all variables declared in the
-// Env as unknown AttributePattern values.
+// UnknownVars returns a PartialActivation which marks all variables declared in the Env as
+// unknown AttributePattern values.
 //
-// Note, the UnknownVars will behave the same as an interpreter.EmptyActivation unless the
-// PartialAttributes option is provided as a ProgramOption.
-func (e *Env) UnknownVars() interpreter.PartialActivation {
+// Note, the UnknownVars will behave the same as an cel.NoVars() unless the PartialAttributes
+// option is provided as a ProgramOption.
+func (e *Env) UnknownVars() PartialActivation {
 	act := interpreter.EmptyActivation()
 	part, _ := PartialVars(act, e.computeUnknownVars(act)...)
 	return part
 }
 
-// PartialVars returns an interpreter.PartialActivation where all variables not in the input variable
+// PartialVars returns a PartialActivation where all variables not in the input variable
 // set, but which have been configured in the environment, are marked as unknown.
 //
-// The `vars` value may either be an interpreter.Activation or any valid input to the
-// interpreter.NewActivation call.
+// The `vars` value may either be an Activation or any valid input to the cel.NewActivation call.
 //
 // Note, this is equivalent to calling cel.PartialVars and manually configuring the set of unknown
 // variables. For more advanced use cases of partial state where portions of an object graph, rather
 // than top-level variables, are missing the PartialVars() method may be a more suitable choice.
 //
-// Note, the PartialVars will behave the same as an interpreter.EmptyActivation unless the
-// PartialAttributes option is provided as a ProgramOption.
-func (e *Env) PartialVars(vars any) (interpreter.PartialActivation, error) {
-	act, err := interpreter.NewActivation(vars)
+// Note, the PartialVars will behave the same as cel.NoVars() unless the PartialAttributes
+// option is provided as a ProgramOption.
+func (e *Env) PartialVars(vars any) (PartialActivation, error) {
+	act, err := NewActivation(vars)
 	if err != nil {
 		return nil, err
 	}
@@ -598,10 +900,16 @@ func (e *Env) configure(opts []EnvOption) (*Env, error) {
 		}
 	}
 
-	// If the default UTC timezone fix has been enabled, make sure the library is configured
-	e, err = e.maybeApplyFeature(featureDefaultUTCTimeZone, Lib(timeUTCLibrary{}))
-	if err != nil {
-		return nil, err
+	// If the default UTC timezone has been disabled, configure the legacy overloads
+	if utcTime, isSet := e.features[featureDefaultUTCTimeZone]; isSet && !utcTime {
+		if !e.appliedFeatures[featureDefaultUTCTimeZone] {
+			e.ensureMutableAppliedFeatures()
+			e.appliedFeatures[featureDefaultUTCTimeZone] = true
+			e, err = Lib(timeLegacyLibrary{})(e)
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	// Configure the parser.
@@ -618,9 +926,33 @@ func (e *Env) configure(opts []EnvOption) (*Env, error) {
 	if e.HasFeature(featureIdentEscapeSyntax) {
 		prsrOpts = append(prsrOpts, parser.EnableIdentEscapeSyntax(true))
 	}
+	if l := e.limits[limitParseErrorRecovery]; l != 0 {
+		prsrOpts = append(prsrOpts, parser.ErrorRecoveryLimit(l))
+	}
+	if l := e.limits[limitCodePointSize]; l != 0 {
+		prsrOpts = append(prsrOpts, parser.ExpressionSizeCodePointLimit(l))
+	}
+	if l := e.limits[limitParseRecursionDepth]; l != 0 {
+		prsrOpts = append(prsrOpts, parser.MaxRecursionDepth(l))
+	}
+	if l := e.limits[limitExpressionNodeCount]; l != 0 {
+		prsrOpts = append(prsrOpts, parser.MaxExpressionNodeCount(l))
+	}
 	e.prsr, err = parser.NewParser(prsrOpts...)
 	if err != nil {
 		return nil, err
+	}
+
+	// Enable JSON field names is using a proto-based *types.Registry
+	if e.HasFeature(featureJSONFieldNames) {
+		reg, isReg := e.provider.(*types.Registry)
+		if !isReg {
+			return nil, fmt.Errorf("JSONFieldNames() option is only compatible with *types.Registry providers")
+		}
+		err := reg.WithJSONFieldNames(true)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Ensure that the checker init happens eagerly rather than lazily.
@@ -641,6 +973,17 @@ func (e *Env) initChecker() (*checker.Env, error) {
 		chkOpts = append(chkOpts,
 			checker.CrossTypeNumericComparisons(
 				e.HasFeature(featureCrossTypeNumericComparisons)))
+		chkOpts = append(chkOpts,
+			checker.JSONFieldNames(e.HasFeature(featureJSONFieldNames)))
+
+		if e.parent != nil && e.funcsShared {
+			parentChk, err := e.parent.initChecker()
+			if err != nil {
+				e.setCheckerOrError(nil, err)
+				return
+			}
+			chkOpts = append(chkOpts, checker.ValidatedDeclarations(parentChk))
+		}
 
 		ce, err := checker.NewEnv(e.Container, e.provider, chkOpts...)
 		if err != nil {
@@ -654,14 +997,16 @@ func (e *Env) initChecker() (*checker.Env, error) {
 			return
 		}
 		// Add the function declarations which are derived from the FunctionDecl instances.
-		for _, fn := range e.functions {
-			if fn.IsDeclarationDisabled() {
-				continue
-			}
-			err = ce.AddFunctions(fn)
-			if err != nil {
-				e.setCheckerOrError(nil, err)
-				return
+		if e.parent == nil || !e.funcsShared {
+			for _, fn := range e.functions {
+				if fn.IsDeclarationDisabled() {
+					continue
+				}
+				err = ce.AddFunctions(fn)
+				if err != nil {
+					e.setCheckerOrError(nil, err)
+					return
+				}
 			}
 		}
 		// Add function declarations here separately.
@@ -685,30 +1030,9 @@ func (e *Env) getCheckerOrError() (*checker.Env, error) {
 	return e.chk, e.chkErr
 }
 
-// maybeApplyFeature determines whether the feature-guarded option is enabled, and if so applies
-// the feature if it has not already been enabled.
-func (e *Env) maybeApplyFeature(feature int, option EnvOption) (*Env, error) {
-	if !e.HasFeature(feature) {
-		return e, nil
-	}
-	_, applied := e.appliedFeatures[feature]
-	if applied {
-		return e, nil
-	}
-	e, err := option(e)
-	if err != nil {
-		return nil, err
-	}
-	// record that the feature has been applied since it will generate declarations
-	// and functions which will be propagated on Extend() calls and which should only
-	// be registered once.
-	e.appliedFeatures[feature] = true
-	return e, nil
-}
-
 // computeUnknownVars determines a set of missing variables based on the input activation and the
 // environment's configured declaration set.
-func (e *Env) computeUnknownVars(vars interpreter.Activation) []*interpreter.AttributePattern {
+func (e *Env) computeUnknownVars(vars Activation) []*interpreter.AttributePattern {
 	var unknownPatterns []*interpreter.AttributePattern
 	for _, v := range e.variables {
 		varName := v.Name()
@@ -729,6 +1053,16 @@ type Error = common.Error
 type Issues struct {
 	errs *common.Errors
 	info *celast.SourceInfo
+}
+
+// ErrorAsIssues wraps a Golang error into a CEL common error and issue set.
+//
+// This is a convenience method for early returning from an expression validation call path due to
+// internal state or configuration which is unrelated to the source being validated.
+func ErrorAsIssues(err error) *Issues {
+	errs := common.NewErrors(common.NewTextSource(""))
+	errs.ReportErrorString(common.NoLocation, err.Error())
+	return NewIssues(errs)
 }
 
 // NewIssues returns an Issues struct from a common.Errors object.
@@ -839,9 +1173,10 @@ func (p *interopCELTypeProvider) FindStructFieldType(structType, fieldName strin
 			return nil, false
 		}
 		return &types.FieldType{
-			Type:    t,
-			IsSet:   ft.IsSet,
-			GetFrom: ft.GetFrom,
+			Type:        t,
+			IsSet:       ft.IsSet,
+			GetFrom:     ft.GetFrom,
+			IsJSONField: ft.IsJSONField,
 		}, true
 	}
 	return nil, false
