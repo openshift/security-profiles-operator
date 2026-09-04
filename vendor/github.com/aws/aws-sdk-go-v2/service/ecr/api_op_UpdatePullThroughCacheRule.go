@@ -4,10 +4,7 @@ package ecr
 
 import (
 	"context"
-	"fmt"
-	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/smithy-go/middleware"
-	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"time"
 )
 
@@ -29,16 +26,19 @@ func (c *Client) UpdatePullThroughCacheRule(ctx context.Context, params *UpdateP
 
 type UpdatePullThroughCacheRuleInput struct {
 
-	// The Amazon Resource Name (ARN) of the Amazon Web Services Secrets Manager
-	// secret that identifies the credentials to authenticate to the upstream registry.
-	//
-	// This member is required.
-	CredentialArn *string
-
 	// The repository name prefix to use when caching images from the source registry.
 	//
 	// This member is required.
 	EcrRepositoryPrefix *string
+
+	// The Amazon Resource Name (ARN) of the Amazon Web Services Secrets Manager
+	// secret that identifies the credentials to authenticate to the upstream registry.
+	CredentialArn *string
+
+	// Amazon Resource Name (ARN) of the IAM role to be assumed by Amazon ECR to
+	// authenticate to the ECR upstream registry. This role must be in the same account
+	// as the registry that you are configuring.
+	CustomRoleArn *string
 
 	// The Amazon Web Services account ID associated with the registry associated with
 	// the pull through cache rule. If you do not specify a registry, the default
@@ -54,6 +54,9 @@ type UpdatePullThroughCacheRuleOutput struct {
 	// secret associated with the pull through cache rule.
 	CredentialArn *string
 
+	// The ARN of the IAM role associated with the pull through cache rule.
+	CustomRoleArn *string
+
 	// The Amazon ECR repository prefix associated with the pull through cache rule.
 	EcrRepositoryPrefix *string
 
@@ -64,6 +67,9 @@ type UpdatePullThroughCacheRuleOutput struct {
 	// was updated.
 	UpdatedAt *time.Time
 
+	// The upstream repository prefix associated with the pull through cache rule.
+	UpstreamRepositoryPrefix *string
+
 	// Metadata pertaining to the operation's result.
 	ResultMetadata middleware.Metadata
 
@@ -71,9 +77,6 @@ type UpdatePullThroughCacheRuleOutput struct {
 }
 
 func (c *Client) addOperationUpdatePullThroughCacheRuleMiddlewares(stack *middleware.Stack, options Options) (err error) {
-	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
-		return err
-	}
 	err = stack.Serialize.Add(&awsAwsjson11_serializeOpUpdatePullThroughCacheRule{}, middleware.After)
 	if err != nil {
 		return err
@@ -82,65 +85,20 @@ func (c *Client) addOperationUpdatePullThroughCacheRuleMiddlewares(stack *middle
 	if err != nil {
 		return err
 	}
-	if err := addProtocolFinalizerMiddlewares(stack, options, "UpdatePullThroughCacheRule"); err != nil {
-		return fmt.Errorf("add protocol finalizers: %v", err)
-	}
 
-	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
-		return err
-	}
-	if err = addSetLoggerMiddleware(stack, options); err != nil {
-		return err
-	}
-	if err = addClientRequestID(stack); err != nil {
-		return err
-	}
-	if err = addComputeContentLength(stack); err != nil {
-		return err
-	}
 	if err = addResolveEndpointMiddleware(stack, options); err != nil {
 		return err
 	}
 	if err = addComputePayloadSHA256(stack); err != nil {
 		return err
 	}
-	if err = addRetry(stack, options); err != nil {
+	if err = addRecordResponseTiming(stack, options); err != nil {
 		return err
 	}
-	if err = addRawResponseToMetadata(stack); err != nil {
-		return err
-	}
-	if err = addRecordResponseTiming(stack); err != nil {
-		return err
-	}
-	if err = addSpanRetryLoop(stack, options); err != nil {
-		return err
-	}
-	if err = addClientUserAgent(stack, options); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
-		return err
-	}
-	if err = addTimeOffsetBuild(stack, c); err != nil {
-		return err
-	}
-	if err = addUserAgentRetryMode(stack, options); err != nil {
+	if err = addCredentialSource(stack, options); err != nil {
 		return err
 	}
 	if err = addOpUpdatePullThroughCacheRuleValidationMiddleware(stack); err != nil {
-		return err
-	}
-	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opUpdatePullThroughCacheRule(options.Region), middleware.Before); err != nil {
-		return err
-	}
-	if err = addRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -155,25 +113,8 @@ func (c *Client) addOperationUpdatePullThroughCacheRuleMiddlewares(stack *middle
 	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
-	if err = addSpanInitializeStart(stack); err != nil {
-		return err
-	}
-	if err = addSpanInitializeEnd(stack); err != nil {
-		return err
-	}
-	if err = addSpanBuildRequestStart(stack); err != nil {
-		return err
-	}
-	if err = addSpanBuildRequestEnd(stack); err != nil {
+	if err = addInterceptors(stack, options); err != nil {
 		return err
 	}
 	return nil
-}
-
-func newServiceMetadataMiddleware_opUpdatePullThroughCacheRule(region string) *awsmiddleware.RegisterServiceMetadata {
-	return &awsmiddleware.RegisterServiceMetadata{
-		Region:        region,
-		ServiceID:     ServiceID,
-		OperationName: "UpdatePullThroughCacheRule",
-	}
 }

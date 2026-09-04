@@ -5,11 +5,9 @@ package ecr
 import (
 	"context"
 	"fmt"
-	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/service/ecr/types"
 	"github.com/aws/smithy-go/middleware"
 	smithytime "github.com/aws/smithy-go/time"
-	smithyhttp "github.com/aws/smithy-go/transport/http"
 	smithywaiter "github.com/aws/smithy-go/waiter"
 	"time"
 )
@@ -51,8 +49,8 @@ type GetLifecyclePolicyPreviewInput struct {
 	// single page along with a nextToken   response element. The remaining results of
 	// the initial request can be seen by sending  another
 	// GetLifecyclePolicyPreviewRequest request with the returned nextToken   value.
-	// This value can be between 1 and 1000. If this  parameter is not used, then
-	// GetLifecyclePolicyPreviewRequest returns up to  100 results and a nextToken
+	// This value can be between 1 and 100. If this  parameter is not used, then
+	// GetLifecyclePolicyPreviewRequest returns up to 100 results and a nextToken
 	// value, if  applicable. This option cannot be used when you specify images with
 	// imageIds .
 	MaxResults *int32
@@ -106,9 +104,6 @@ type GetLifecyclePolicyPreviewOutput struct {
 }
 
 func (c *Client) addOperationGetLifecyclePolicyPreviewMiddlewares(stack *middleware.Stack, options Options) (err error) {
-	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
-		return err
-	}
 	err = stack.Serialize.Add(&awsAwsjson11_serializeOpGetLifecyclePolicyPreview{}, middleware.After)
 	if err != nil {
 		return err
@@ -117,65 +112,20 @@ func (c *Client) addOperationGetLifecyclePolicyPreviewMiddlewares(stack *middlew
 	if err != nil {
 		return err
 	}
-	if err := addProtocolFinalizerMiddlewares(stack, options, "GetLifecyclePolicyPreview"); err != nil {
-		return fmt.Errorf("add protocol finalizers: %v", err)
-	}
 
-	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
-		return err
-	}
-	if err = addSetLoggerMiddleware(stack, options); err != nil {
-		return err
-	}
-	if err = addClientRequestID(stack); err != nil {
-		return err
-	}
-	if err = addComputeContentLength(stack); err != nil {
-		return err
-	}
 	if err = addResolveEndpointMiddleware(stack, options); err != nil {
 		return err
 	}
 	if err = addComputePayloadSHA256(stack); err != nil {
 		return err
 	}
-	if err = addRetry(stack, options); err != nil {
+	if err = addRecordResponseTiming(stack, options); err != nil {
 		return err
 	}
-	if err = addRawResponseToMetadata(stack); err != nil {
-		return err
-	}
-	if err = addRecordResponseTiming(stack); err != nil {
-		return err
-	}
-	if err = addSpanRetryLoop(stack, options); err != nil {
-		return err
-	}
-	if err = addClientUserAgent(stack, options); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
-		return err
-	}
-	if err = addTimeOffsetBuild(stack, c); err != nil {
-		return err
-	}
-	if err = addUserAgentRetryMode(stack, options); err != nil {
+	if err = addCredentialSource(stack, options); err != nil {
 		return err
 	}
 	if err = addOpGetLifecyclePolicyPreviewValidationMiddleware(stack); err != nil {
-		return err
-	}
-	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opGetLifecyclePolicyPreview(options.Region), middleware.Before); err != nil {
-		return err
-	}
-	if err = addRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -190,16 +140,7 @@ func (c *Client) addOperationGetLifecyclePolicyPreviewMiddlewares(stack *middlew
 	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
-	if err = addSpanInitializeStart(stack); err != nil {
-		return err
-	}
-	if err = addSpanInitializeEnd(stack); err != nil {
-		return err
-	}
-	if err = addSpanBuildRequestStart(stack); err != nil {
-		return err
-	}
-	if err = addSpanBuildRequestEnd(stack); err != nil {
+	if err = addInterceptors(stack, options); err != nil {
 		return err
 	}
 	return nil
@@ -404,8 +345,8 @@ type GetLifecyclePolicyPreviewPaginatorOptions struct {
 	// single page along with a nextToken   response element. The remaining results of
 	// the initial request can be seen by sending  another
 	// GetLifecyclePolicyPreviewRequest request with the returned nextToken   value.
-	// This value can be between 1 and 1000. If this  parameter is not used, then
-	// GetLifecyclePolicyPreviewRequest returns up to  100 results and a nextToken
+	// This value can be between 1 and 100. If this  parameter is not used, then
+	// GetLifecyclePolicyPreviewRequest returns up to 100 results and a nextToken
 	// value, if  applicable. This option cannot be used when you specify images with
 	// imageIds .
 	Limit int32
@@ -498,11 +439,3 @@ type GetLifecyclePolicyPreviewAPIClient interface {
 }
 
 var _ GetLifecyclePolicyPreviewAPIClient = (*Client)(nil)
-
-func newServiceMetadataMiddleware_opGetLifecyclePolicyPreview(region string) *awsmiddleware.RegisterServiceMetadata {
-	return &awsmiddleware.RegisterServiceMetadata{
-		Region:        region,
-		ServiceID:     ServiceID,
-		OperationName: "GetLifecyclePolicyPreview",
-	}
-}

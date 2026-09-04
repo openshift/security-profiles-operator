@@ -4,11 +4,8 @@ package ecr
 
 import (
 	"context"
-	"fmt"
-	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/service/ecr/types"
 	"github.com/aws/smithy-go/middleware"
-	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // Creates a repository. For more information, see [Amazon ECR repositories] in the Amazon Elastic
@@ -46,6 +43,10 @@ type CreateRepositoryInput struct {
 	// contents of your repository are encrypted at rest.
 	EncryptionConfiguration *types.EncryptionConfiguration
 
+	// The imageScanningConfiguration parameter is being deprecated, in favor of
+	// specifying the image scanning configuration at the registry level. For more
+	// information, see PutRegistryScanningConfiguration .
+	//
 	// The image scanning configuration for the repository. This determines whether
 	// images are scanned for known vulnerabilities after being pushed to the
 	// repository.
@@ -56,6 +57,10 @@ type CreateRepositoryInput struct {
 	// overwritten. If IMMUTABLE is specified, all image tags within the repository
 	// will be immutable which will prevent them from being overwritten.
 	ImageTagMutability types.ImageTagMutability
+
+	// A list of filters that specify which image tags should be excluded from the
+	// repository's image tag mutability setting.
+	ImageTagMutabilityExclusionFilters []types.ImageTagMutabilityExclusionFilter
 
 	// The Amazon Web Services account ID associated with the registry to create the
 	// repository. If you do not specify a registry, the default registry is assumed.
@@ -82,9 +87,6 @@ type CreateRepositoryOutput struct {
 }
 
 func (c *Client) addOperationCreateRepositoryMiddlewares(stack *middleware.Stack, options Options) (err error) {
-	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
-		return err
-	}
 	err = stack.Serialize.Add(&awsAwsjson11_serializeOpCreateRepository{}, middleware.After)
 	if err != nil {
 		return err
@@ -93,65 +95,20 @@ func (c *Client) addOperationCreateRepositoryMiddlewares(stack *middleware.Stack
 	if err != nil {
 		return err
 	}
-	if err := addProtocolFinalizerMiddlewares(stack, options, "CreateRepository"); err != nil {
-		return fmt.Errorf("add protocol finalizers: %v", err)
-	}
 
-	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
-		return err
-	}
-	if err = addSetLoggerMiddleware(stack, options); err != nil {
-		return err
-	}
-	if err = addClientRequestID(stack); err != nil {
-		return err
-	}
-	if err = addComputeContentLength(stack); err != nil {
-		return err
-	}
 	if err = addResolveEndpointMiddleware(stack, options); err != nil {
 		return err
 	}
 	if err = addComputePayloadSHA256(stack); err != nil {
 		return err
 	}
-	if err = addRetry(stack, options); err != nil {
+	if err = addRecordResponseTiming(stack, options); err != nil {
 		return err
 	}
-	if err = addRawResponseToMetadata(stack); err != nil {
-		return err
-	}
-	if err = addRecordResponseTiming(stack); err != nil {
-		return err
-	}
-	if err = addSpanRetryLoop(stack, options); err != nil {
-		return err
-	}
-	if err = addClientUserAgent(stack, options); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
-		return err
-	}
-	if err = addTimeOffsetBuild(stack, c); err != nil {
-		return err
-	}
-	if err = addUserAgentRetryMode(stack, options); err != nil {
+	if err = addCredentialSource(stack, options); err != nil {
 		return err
 	}
 	if err = addOpCreateRepositoryValidationMiddleware(stack); err != nil {
-		return err
-	}
-	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opCreateRepository(options.Region), middleware.Before); err != nil {
-		return err
-	}
-	if err = addRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -166,25 +123,8 @@ func (c *Client) addOperationCreateRepositoryMiddlewares(stack *middleware.Stack
 	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
-	if err = addSpanInitializeStart(stack); err != nil {
-		return err
-	}
-	if err = addSpanInitializeEnd(stack); err != nil {
-		return err
-	}
-	if err = addSpanBuildRequestStart(stack); err != nil {
-		return err
-	}
-	if err = addSpanBuildRequestEnd(stack); err != nil {
+	if err = addInterceptors(stack, options); err != nil {
 		return err
 	}
 	return nil
-}
-
-func newServiceMetadataMiddleware_opCreateRepository(region string) *awsmiddleware.RegisterServiceMetadata {
-	return &awsmiddleware.RegisterServiceMetadata{
-		Region:        region,
-		ServiceID:     ServiceID,
-		OperationName: "CreateRepository",
-	}
 }
