@@ -28,6 +28,8 @@ import (
 	"cloud.google.com/go/internal/trace"
 	sppb "cloud.google.com/go/spanner/apiv1/spannerpb"
 	"github.com/googleapis/gax-go/v2"
+	otcodes "go.opentelemetry.io/otel/codes"
+	otrace "go.opentelemetry.io/otel/trace"
 	"google.golang.org/api/iterator"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -39,6 +41,20 @@ import (
 // stream.
 type streamingReceiver interface {
 	Recv() (*sppb.PartialResultSet, error)
+	Context() context.Context
+}
+
+type streamingFinalizer interface {
+	finish()
+}
+
+func shouldRetryResourceExhaustedInStreaming(_ spannerClient) bool {
+	return true
+}
+
+func shouldAllowRetryResourceExhaustedWithoutDelayInStreaming(client spannerClient) bool {
+	_, ok := client.(*locationAwareSpannerClient)
+	return ok
 }
 
 // errEarlyReadEnd returns error for read finishes when gRPC stream is still
@@ -58,12 +74,11 @@ func stream(
 	release func(error),
 	gsc *grpcSpannerClient,
 ) *RowIterator {
-	return streamWithReplaceSessionFunc(
+	return streamWithTransactionCallbacks(
 		ctx,
 		logger,
 		meterTracerFactory,
 		rpc,
-		nil,
 		nil,
 		func(err error) error {
 			return err
@@ -72,30 +87,32 @@ func stream(
 		setTimestamp,
 		release,
 		gsc,
+		true,
+		false,
 	)
 }
 
-// this stream method will automatically retry the stream on a new session if
-// the replaceSessionFunc function has been defined. This function should only be
-// used for single-use transactions.
-func streamWithReplaceSessionFunc(
+// streamWithTransactionCallbacks creates a RowIterator for streaming results with
+// transaction-specific callbacks for setting transaction ID, updating state, and precommit tokens.
+func streamWithTransactionCallbacks(
 	ctx context.Context,
 	logger *log.Logger,
 	meterTracerFactory *builtinMetricsTracerFactory,
 	rpc func(ct context.Context, resumeToken []byte, opts ...gax.CallOption) (streamingReceiver, error),
-	replaceSession func(ctx context.Context) error,
 	setTransactionID func(transactionID),
 	updateTxState func(err error) error,
 	updatePrecommitToken func(token *sppb.MultiplexedSessionPrecommitToken),
 	setTimestamp func(time.Time),
 	release func(error),
 	gsc *grpcSpannerClient,
+	retryResourceExhausted bool,
+	allowRetryResourceExhaustedWithoutDelay bool,
 ) *RowIterator {
 	ctx, cancel := context.WithCancel(ctx)
-	ctx = trace.StartSpan(ctx, "cloud.google.com/go/spanner.RowIterator")
+	ctx, _ = startSpan(ctx, "RowIterator")
 	return &RowIterator{
 		meterTracerFactory:   meterTracerFactory,
-		streamd:              newResumableStreamDecoder(ctx, cancel, logger, rpc, replaceSession, gsc),
+		streamd:              newResumableStreamDecoder(ctx, cancel, logger, rpc, gsc, retryResourceExhausted, allowRetryResourceExhaustedWithoutDelay),
 		rowd:                 &partialResultSetDecoder{},
 		setTransactionID:     setTransactionID,
 		updatePrecommitToken: updatePrecommitToken,
@@ -191,7 +208,7 @@ func (r *RowIterator) Next() (*Row, error) {
 				// if request contains TransactionSelector::Begin option, this is here as fallback to retry with
 				// explicit transactionID after a retry.
 				r.setTransactionID(nil)
-				r.err = errInlineBeginTransactionFailed()
+				r.err = r.updateTxState(errInlineBeginTransactionFailed(nil))
 				return nil, r.err
 			}
 			r.setTransactionID = nil
@@ -291,6 +308,11 @@ func (r *RowIterator) Stop() {
 	}
 	if r.cancel != nil {
 		r.cancel()
+	}
+	if r.streamd != nil && r.streamd.stream != nil {
+		if finalizer, ok := r.streamd.stream.(streamingFinalizer); ok {
+			finalizer.finish()
+		}
 	}
 	if r.release != nil {
 		r.release(r.err)
@@ -411,13 +433,6 @@ type resumableStreamDecoder struct {
 	// resumable.
 	rpc func(ctx context.Context, restartToken []byte, opts ...gax.CallOption) (streamingReceiver, error)
 
-	// replaceSessionFunc is a function that can be used to replace the session
-	// that is being used to execute the read operation. This function should
-	// only be defined for single-use transactions that can safely retry the
-	// read operation on a new session. If this function is nil, the stream
-	// does not support retrying the query on a new session.
-	replaceSessionFunc func(ctx context.Context) error
-
 	// logger is the logger to use.
 	logger *log.Logger
 
@@ -454,6 +469,9 @@ type resumableStreamDecoder struct {
 
 	gsc *grpcSpannerClient
 
+	retryResourceExhausted                  bool
+	allowRetryResourceExhaustedWithoutDelay bool
+
 	// reqIDInjector is generated once per stream, unless the stream
 	// gets broken and in that case a fresh one is generated.
 	reqIDInjector *requestIDWrap
@@ -465,16 +483,17 @@ type resumableStreamDecoder struct {
 // newResumableStreamDecoder creates a new resumeableStreamDecoder instance.
 // Parameter rpc should be a function that creates a new stream beginning at the
 // restartToken if non-nil.
-func newResumableStreamDecoder(ctx context.Context, cancel func(), logger *log.Logger, rpc func(ct context.Context, restartToken []byte, opts ...gax.CallOption) (streamingReceiver, error), replaceSession func(ctx context.Context) error, gsc *grpcSpannerClient) *resumableStreamDecoder {
+func newResumableStreamDecoder(ctx context.Context, cancel func(), logger *log.Logger, rpc func(ct context.Context, restartToken []byte, opts ...gax.CallOption) (streamingReceiver, error), gsc *grpcSpannerClient, retryResourceExhausted bool, allowRetryResourceExhaustedWithoutDelay bool) *resumableStreamDecoder {
 	return &resumableStreamDecoder{
-		ctx:                         ctx,
-		cancel:                      cancel,
-		logger:                      logger,
-		rpc:                         rpc,
-		replaceSessionFunc:          replaceSession,
-		maxBytesBetweenResumeTokens: atomic.LoadInt32(&maxBytesBetweenResumeTokens),
-		backoff:                     DefaultRetryBackoff,
-		gsc:                         gsc,
+		ctx:                                     ctx,
+		cancel:                                  cancel,
+		logger:                                  logger,
+		rpc:                                     rpc,
+		maxBytesBetweenResumeTokens:             atomic.LoadInt32(&maxBytesBetweenResumeTokens),
+		backoff:                                 DefaultRetryBackoff,
+		gsc:                                     gsc,
+		retryResourceExhausted:                  retryResourceExhausted,
+		allowRetryResourceExhaustedWithoutDelay: allowRetryResourceExhaustedWithoutDelay,
 	}
 }
 
@@ -565,7 +584,11 @@ var (
 )
 
 func (d *resumableStreamDecoder) next(mt *builtinMetricsTracer) bool {
-	retryer := onCodes(d.backoff, codes.Unavailable, codes.ResourceExhausted, codes.Internal)
+	retryCodes := []codes.Code{codes.Unavailable, codes.Internal}
+	if d.retryResourceExhausted {
+		retryCodes = append(retryCodes, codes.ResourceExhausted)
+	}
+	retryer := onCodesWithResourceExhaustedRetryOption(d.backoff, d.allowRetryResourceExhaustedWithoutDelay, retryCodes...)
 
 	// Setup and track x-goog-request-id in the manual retries for ExecuteStreamingSql.
 	riw := d.reqIDInjectorOrNew()
@@ -677,13 +700,19 @@ func (d *resumableStreamDecoder) tryRecv(mt *builtinMetricsTracer, retryer gax.R
 	if d.err == nil {
 		d.q.push(res)
 		if res.GetLast() {
-			go func(s streamingReceiver) {
-				_, _ = s.Recv()
-				// Cancel the context after receiving trailers
-				if d.cancel != nil {
-					d.cancel()
-				}
-			}(d.stream)
+			if span := otrace.SpanFromContext(d.stream.Context()); span != nil && span.IsRecording() {
+				span.SetStatus(otcodes.Ok, "Stream finished successfully")
+				span.End()
+			}
+			if d.cancel != nil {
+				// Remove the cancel function to prevent iter.Stop from also calling it.
+				cancel := d.cancel
+				d.cancel = nil
+				go func() {
+					_, _ = d.stream.Recv()
+					cancel()
+				}()
+			}
 			d.changeState(finished)
 			return
 		}
@@ -704,38 +733,21 @@ func (d *resumableStreamDecoder) tryRecv(mt *builtinMetricsTracer, retryer gax.R
 		return
 	}
 
-	if d.replaceSessionFunc != nil && isSessionNotFoundError(d.err) && d.resumeToken == nil {
-		mt.currOp.currAttempt.setStatus(status.Code(d.err).String())
-		recordAttemptCompletion(mt)
-		// A 'Session not found' error occurred before we received a resume
-		// token and a replaceSessionFunc function is defined. Try to restart
-		// the stream on a new session.
-		if err := d.replaceSessionFunc(d.ctx); err != nil {
-			d.err = err
-			d.changeState(aborted)
-			return
-		}
-		mt.currOp.incrementAttemptCount()
-		mt.currOp.currAttempt = &attemptTracer{
-			startTime: time.Now(),
-		}
-	} else {
-		mt.currOp.currAttempt.setStatus(status.Code(d.err).String())
-		recordAttemptCompletion(mt)
-		delay, shouldRetry := retryer.Retry(d.err)
-		if !shouldRetry || d.state != queueingRetryable {
-			d.changeState(aborted)
-			return
-		}
-		if err := gax.Sleep(d.ctx, delay); err != nil {
-			d.err = err
-			d.changeState(aborted)
-			return
-		}
-		mt.currOp.incrementAttemptCount()
-		mt.currOp.currAttempt = &attemptTracer{
-			startTime: time.Now(),
-		}
+	mt.currOp.currAttempt.setStatus(status.Code(d.err).String())
+	recordAttemptCompletion(mt)
+	delay, shouldRetry := retryer.Retry(d.err)
+	if !shouldRetry || d.state != queueingRetryable {
+		d.changeState(aborted)
+		return
+	}
+	if err := gax.Sleep(d.ctx, delay); err != nil {
+		d.err = err
+		d.changeState(aborted)
+		return
+	}
+	mt.currOp.incrementAttemptCount()
+	mt.currOp.currAttempt = &attemptTracer{
+		startTime: time.Now(),
 	}
 	// Clear error and retry the stream.
 	d.err = nil
