@@ -18,7 +18,6 @@ package spanner
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -36,6 +35,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
+	otrace "go.opentelemetry.io/otel/trace"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 	"google.golang.org/api/option/internaloption"
@@ -44,17 +44,13 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/encoding/gzip"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
 	vkit "cloud.google.com/go/spanner/apiv1"
 	"cloud.google.com/go/spanner/internal"
-
-	// Install google-c2p resolver, which is required for direct path.
-	_ "google.golang.org/grpc/xds/googledirectpath"
-	// Install RLS load balancer policy, which is needed for gRPC RLS.
-	_ "google.golang.org/grpc/balancer/rls"
 )
 
 const (
@@ -122,7 +118,7 @@ func parseDatabaseName(db string) (project, instance, database string, err error
 // A client is safe to use concurrently, except for its Close method.
 type Client struct {
 	sc                   *sessionClient
-	idleSessions         *sessionPool
+	sm                   *sessionManager
 	logger               *log.Logger
 	qo                   QueryOptions
 	ro                   ReadOptions
@@ -134,6 +130,7 @@ type Client struct {
 	dro                  *sppb.DirectedReadOptions
 	otConfig             *openTelemetryConfig
 	metricsTracerFactory *builtinMetricsTracerFactory
+	clientContext        *sppb.RequestOptions_ClientContext
 }
 
 // DatabaseName returns the full name of a database, e.g.,
@@ -372,29 +369,31 @@ type ClientConfig struct {
 
 	// Default: false
 	IsExperimentalHost bool
+
+	// ClientContext is the default context for all requests made by the client.
+	ClientContext *sppb.RequestOptions_ClientContext
 }
 
 type openTelemetryConfig struct {
-	enabled                        bool
-	meterProvider                  metric.MeterProvider
-	attributeMap                   []attribute.KeyValue
-	attributeMapWithMultiplexed    []attribute.KeyValue
-	attributeMapWithoutMultiplexed []attribute.KeyValue
-	otMetricRegistration           metric.Registration
-	openSessionCount               metric.Int64ObservableGauge
-	maxAllowedSessionsCount        metric.Int64ObservableGauge
-	sessionsCount                  metric.Int64ObservableGauge
-	maxInUseSessionsCount          metric.Int64ObservableGauge
-	getSessionTimeoutsCount        metric.Int64Counter
-	acquiredSessionsCount          metric.Int64Counter
-	releasedSessionsCount          metric.Int64Counter
-	gfeLatency                     metric.Int64Histogram
-	gfeHeaderMissingCount          metric.Int64Counter
+	enabled                     bool
+	meterProvider               metric.MeterProvider
+	commonTraceStartOptions     []otrace.SpanStartOption
+	attributeMap                []attribute.KeyValue
+	attributeMapWithMultiplexed []attribute.KeyValue
+	otMetricRegistration        metric.Registration
+	openSessionCount            metric.Int64ObservableGauge
+	getSessionTimeoutsCount     metric.Int64Counter
+	acquiredSessionsCount       metric.Int64Counter
+	releasedSessionsCount       metric.Int64Counter
+	gfeLatency                  metric.Int64Histogram
+	gfeHeaderMissingCount       metric.Int64Counter
 }
 
 func contextWithOutgoingMetadata(ctx context.Context, md metadata.MD, disableRouteToLeader bool) context.Context {
 	existing, ok := metadata.FromOutgoingContext(ctx)
 	if ok {
+		// Make sure that we only send one resource header.
+		existing.Delete(resourcePrefixHeader)
 		md = metadata.Join(existing, md)
 	}
 	if !disableRouteToLeader {
@@ -422,8 +421,8 @@ func newClientWithConfig(ctx context.Context, database string, config ClientConf
 		return nil, err
 	}
 
-	ctx = trace.StartSpan(ctx, "cloud.google.com/go/spanner.NewClient")
-	defer func() { trace.EndSpan(ctx, err) }()
+	ctx, _ = startSpan(ctx, "NewClient")
+	defer func() { endSpan(ctx, err) }()
 
 	// Explicitly disable some gRPC experiments as they are not stable yet.
 	gRPCPickFirstEnvVarName := "GRPC_EXPERIMENTAL_ENABLE_NEW_PICK_FIRST"
@@ -532,9 +531,6 @@ func newClientWithConfig(ctx context.Context, database string, config ClientConf
 	if config.MaxBurst == 0 {
 		config.MaxBurst = DefaultSessionPoolConfig.MaxBurst
 	}
-	if config.incStep == 0 {
-		config.incStep = DefaultSessionPoolConfig.incStep
-	}
 	if config.BatchTimeout == 0 {
 		config.BatchTimeout = time.Minute
 	}
@@ -555,39 +551,13 @@ func newClientWithConfig(ctx context.Context, database string, config ClientConf
 		md.Append(afeMetricHeader, "true")
 	}
 
-	if isMultiplexed := strings.ToLower(os.Getenv("GOOGLE_CLOUD_SPANNER_MULTIPLEXED_SESSIONS")); isMultiplexed != "" && !config.enableMultiplexSession {
-		config.enableMultiplexSession, err = strconv.ParseBool(isMultiplexed)
-		if err != nil {
-			return nil, spannerErrorf(codes.InvalidArgument, "GOOGLE_CLOUD_SPANNER_MULTIPLEXED_SESSIONS must be either true or false")
-		}
-	}
-	if isMultiplexForRW := os.Getenv("GOOGLE_CLOUD_SPANNER_MULTIPLEXED_SESSIONS_FOR_RW"); isMultiplexForRW != "" && !config.enableMultiplexedSessionForRW {
-		config.enableMultiplexedSessionForRW, err = strconv.ParseBool(isMultiplexForRW)
-		if err != nil {
-			return nil, spannerErrorf(codes.InvalidArgument, "GOOGLE_CLOUD_SPANNER_MULTIPLEXED_SESSIONS_FOR_RW must be either true or false")
-		}
-		config.enableMultiplexedSessionForRW = config.enableMultiplexedSessionForRW && config.SessionPoolConfig.enableMultiplexSession
-	}
-	if isMultiplexForPartitionOps := os.Getenv("GOOGLE_CLOUD_SPANNER_MULTIPLEXED_SESSIONS_PARTITIONED_OPS"); isMultiplexForPartitionOps != "" && !config.enableMultiplexedSessionForPartitionedOps {
-		config.enableMultiplexedSessionForPartitionedOps, err = strconv.ParseBool(isMultiplexForPartitionOps)
-		if err != nil {
-			return nil, spannerErrorf(codes.InvalidArgument, "GOOGLE_CLOUD_SPANNER_MULTIPLEXED_SESSIONS_PARTITIONED_OPS must be either true or false")
-		}
-		config.enableMultiplexedSessionForPartitionedOps = config.enableMultiplexedSessionForPartitionedOps && config.SessionPoolConfig.enableMultiplexSession
-	}
-
-	if config.IsExperimentalHost {
-		config.SessionPoolConfig.enableMultiplexSession = true
-		config.enableMultiplexedSessionForRW = true
-		config.enableMultiplexedSessionForPartitionedOps = true
-		config.SessionPoolConfig.MinOpened = experimentalHostMinSessions
-	}
+	// Multiplexed sessions are always enabled as the session pool has been removed.
 
 	// Create a session client.
 	sc := newSessionClient(pool, database, config.UserAgent, sessionLabels, config.DatabaseRole, config.DisableRouteToLeader, md, config.BatchTimeout, config.Logger, config.CallOptions)
 
-	// Create a OpenTelemetry configuration
-	otConfig, err := createOpenTelemetryConfig(config.OpenTelemetryMeterProvider, config.Logger, sc.id, database)
+	// Create an OpenTelemetry configuration
+	otConfig, err := createOpenTelemetryConfig(ctx, config.OpenTelemetryMeterProvider, config.Logger, sc.id, database)
 	if err != nil {
 		// The error returned here will be due to database name parsing
 		return nil, err
@@ -598,17 +568,32 @@ func newClientWithConfig(ctx context.Context, database string, config ClientConf
 	sc.metricsTracerFactory = metricsTracerFactory
 	sc.mu.Unlock()
 
-	// Create a session pool.
-	config.SessionPoolConfig.sessionLabels = sessionLabels
-	sp, err := newSessionPool(sc, config.SessionPoolConfig)
+	// Create a session manager.
+	sp, err := newSessionManager(sc, config.SessionPoolConfig)
 	if err != nil {
 		sc.close()
 		return nil, err
 	}
 
+	if enableLogClientOptions() {
+		projectID, _, _, _ := parseDatabaseName(database)
+		logf(config.Logger, `
+-----Client Options--------
+Project ID: %v
+Num of gRPC channels: %v
+LAR enabled: %v
+Directpath enabled: %v
+End To End Tracing enabled: %v
+Built-in metrics enabled: %v
+gRPC metrics enabled: %v
+Multiplexed session enabled: true
+-----------------------------`,
+			projectID, config.NumChannels, !config.DisableRouteToLeader, isDirectPathEnabled,
+			config.EnableEndToEndTracing, !config.DisableNativeMetrics, isGRPCBuiltInMetricsEnabled)
+	}
 	c = &Client{
 		sc:                   sc,
-		idleSessions:         sp,
+		sm:                   sp,
 		logger:               config.Logger,
 		qo:                   getQueryOptions(config.QueryOptions),
 		ro:                   config.ReadOptions,
@@ -620,6 +605,7 @@ func newClientWithConfig(ctx context.Context, database string, config ClientConf
 		dro:                  config.DirectedReadOptions,
 		otConfig:             otConfig,
 		metricsTracerFactory: metricsTracerFactory,
+		clientContext:        config.ClientContext,
 	}
 	return c, nil
 }
@@ -676,10 +662,14 @@ func allClientOpts(numChannels int, compression string, userOpts ...option.Clien
 		option.WithUserAgent(fmt.Sprintf("spanner-go/v%s", internal.Version)),
 		option.WithGRPCDialOption(grpc.WithChainUnaryInterceptor(addNativeMetricsInterceptor()...)),
 		option.WithGRPCDialOption(grpc.WithChainStreamInterceptor(addStreamNativeMetricsInterceptor()...)),
+		option.WithGRPCDialOption(grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: 120 * time.Second})),
 	}
 	if enableDirectPathXds, _ := strconv.ParseBool(os.Getenv("GOOGLE_SPANNER_ENABLE_DIRECT_ACCESS")); enableDirectPathXds {
 		clientDefaultOpts = append(clientDefaultOpts, internaloption.AllowNonDefaultServiceAccount(true))
 		clientDefaultOpts = append(clientDefaultOpts, internaloption.EnableDirectPath(true), internaloption.EnableDirectPathXds())
+		if disableBoundToken, _ := strconv.ParseBool(os.Getenv("GOOGLE_SPANNER_DISABLE_DIRECT_ACCESS_BOUND_TOKEN")); !disableBoundToken {
+			clientDefaultOpts = append(clientDefaultOpts, internaloption.AllowHardBoundTokens("ALTS"))
+		}
 	}
 	if compression == "gzip" {
 		userOpts = append(userOpts, option.WithGRPCDialOption(grpc.WithDefaultCallOptions(
@@ -720,67 +710,14 @@ func metricsInterceptor() grpc.UnaryClientInterceptor {
 
 		statusCode, _ := status.FromError(err)
 		mt.currOp.currAttempt.setStatus(statusCode.Code().String())
-
-		isDirectPathUsed := false
-		if peerInfo.Addr != nil {
-			remoteIP := peerInfo.Addr.String()
-			if strings.HasPrefix(remoteIP, directPathIPV4Prefix) || strings.HasPrefix(remoteIP, directPathIPV6Prefix) {
-				isDirectPathUsed = true
-			}
-		}
-
-		mt.currOp.currAttempt.setDirectPathUsed(isDirectPathUsed)
-		metrics := parseServerTimingHeader(md)
-		mt.currOp.currAttempt.setServerTimingMetrics(metrics)
+		mt.currOp.currAttempt.setDirectPathUsed(peer.NewContext(ctx, peerInfo))
+		latencies := parseServerTimingHeader(md)
+		span := otrace.SpanFromContext(ctx)
+		setGFEAndAFESpanAttributes(span, latencies)
+		mt.currOp.currAttempt.setServerTimingMetrics(latencies)
 		recordAttemptCompletion(mt)
 		return err
 	}
-}
-
-// wrappedStream  wraps around the embedded grpc.ClientStream, and intercepts the RecvMsg and
-// SendMsg method call.
-type wrappedStream struct {
-	method string
-	target string
-	grpc.ClientStream
-}
-
-func (w *wrappedStream) RecvMsg(m any) error {
-	err := w.ClientStream.RecvMsg(m)
-	if errors.Is(err, io.EOF) {
-		return err
-	}
-	ctx := w.ClientStream.Context()
-	mt, ok := ctx.Value(metricsTracerKey).(*builtinMetricsTracer)
-	if !ok {
-		return err
-	}
-	mt.method = w.method
-	if strings.HasPrefix(w.target, "google-c2p") {
-		mt.currOp.setDirectPathEnabled(true)
-	}
-	isDirectPathUsed := false
-	peerInfo, ok := peer.FromContext(ctx)
-	if ok {
-		if peerInfo.Addr != nil {
-			remoteIP := peerInfo.Addr.String()
-			if strings.HasPrefix(remoteIP, directPathIPV4Prefix) || strings.HasPrefix(remoteIP, directPathIPV6Prefix) {
-				isDirectPathUsed = true
-			}
-		}
-	}
-	if mt.currOp.currAttempt != nil {
-		mt.currOp.currAttempt.setDirectPathUsed(isDirectPathUsed)
-	}
-	return err
-}
-
-func (w *wrappedStream) SendMsg(m any) error {
-	return w.ClientStream.SendMsg(m)
-}
-
-func newWrappedStream(s grpc.ClientStream, method, target string) grpc.ClientStream {
-	return &wrappedStream{ClientStream: s, method: method, target: target}
 }
 
 // metricsInterceptor is a gRPC stream client interceptor that records metrics for stream RPCs.
@@ -797,7 +734,14 @@ func metricsStreamInterceptor() grpc.StreamClientInterceptor {
 		if err != nil {
 			return nil, err
 		}
-		return newWrappedStream(s, method, cc.Target()), nil
+		mt, ok := ctx.Value(metricsTracerKey).(*builtinMetricsTracer)
+		if ok && mt != nil {
+			mt.method = method
+			if strings.HasPrefix(cc.Target(), "google-c2p") {
+				mt.currOp.setDirectPathEnabled(true)
+			}
+		}
+		return s, nil
 	}
 }
 
@@ -839,10 +783,10 @@ func (c *Client) Close() {
 	if c.metricsTracerFactory != nil {
 		c.metricsTracerFactory.shutdown(context.Background())
 	}
-	if c.idleSessions != nil {
+	if c.sm != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		c.idleSessions.close(ctx)
+		c.sm.close(ctx)
 	}
 	c.sc.close()
 }
@@ -858,29 +802,15 @@ func (c *Client) Close() {
 // TimestampBound for details.
 func (c *Client) Single() *ReadOnlyTransaction {
 	t := &ReadOnlyTransaction{singleUse: true}
-	t.txReadOnly.sp = c.idleSessions
+	t.txReadOnly.sm = c.sm
 	t.txReadOnly.txReadEnv = t
 	t.txReadOnly.qo = c.qo
 	t.txReadOnly.ro = c.ro
 	t.txReadOnly.disableRouteToLeader = true
-	t.txReadOnly.replaceSessionFunc = func(ctx context.Context) error {
-		if t.sh == nil {
-			return spannerErrorf(codes.InvalidArgument, "missing session handle on transaction")
-		}
-		// Remove the session that returned 'Session not found' from the pool.
-		t.sh.destroy()
-		// Reset the transaction, acquire a new session and retry.
-		t.state = txNew
-		sh, _, err := t.acquire(ctx)
-		if err != nil {
-			return err
-		}
-		t.sh = sh
-		return nil
-	}
 	t.txReadOnly.qo.DirectedReadOptions = c.dro
 	t.txReadOnly.ro.DirectedReadOptions = c.dro
 	t.txReadOnly.ro.LockHint = sppb.ReadRequest_LOCK_HINT_UNSPECIFIED
+	t.txReadOnly.clientContext = c.clientContext
 	t.ct = c.ct
 	t.otConfig = c.otConfig
 	return t
@@ -900,7 +830,7 @@ func (c *Client) ReadOnlyTransaction() *ReadOnlyTransaction {
 		singleUse:       false,
 		txReadyOrClosed: make(chan struct{}),
 	}
-	t.txReadOnly.sp = c.idleSessions
+	t.txReadOnly.sm = c.sm
 	t.txReadOnly.txReadEnv = t
 	t.txReadOnly.qo = c.qo
 	t.txReadOnly.ro = c.ro
@@ -908,6 +838,7 @@ func (c *Client) ReadOnlyTransaction() *ReadOnlyTransaction {
 	t.txReadOnly.qo.DirectedReadOptions = c.dro
 	t.txReadOnly.ro.DirectedReadOptions = c.dro
 	t.txReadOnly.ro.LockHint = sppb.ReadRequest_LOCK_HINT_UNSPECIFIED
+	t.txReadOnly.clientContext = c.clientContext
 	t.ct = c.ct
 	t.otConfig = c.otConfig
 	return t
@@ -928,24 +859,14 @@ func (c *Client) BatchReadOnlyTransaction(ctx context.Context, tb TimestampBound
 	var (
 		tx  transactionID
 		rts time.Time
-		s   *session
 		sh  *sessionHandle
 		err error
 	)
 
-	if c.idleSessions.isMultiplexedSessionForPartitionedOpsEnabled() {
-		sh, err = c.idleSessions.takeMultiplexed(ctx)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		// Create session.
-		s, err = c.sc.createSession(ctx)
-		if err != nil {
-			return nil, err
-		}
-		sh = &sessionHandle{session: s}
-		sh.updateLastUseTime()
+	// Always use multiplexed sessions for batch read operations.
+	sh, err = c.sm.takeMultiplexed(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	// Begin transaction.
@@ -956,11 +877,9 @@ func (c *Client) BatchReadOnlyTransaction(ctx context.Context, tb TimestampBound
 				ReadOnly: buildTransactionOptionsReadOnly(tb, true),
 			},
 		},
+		RequestOptions: createRequestOptions(sppb.RequestOptions_PRIORITY_UNSPECIFIED, "", "", c.clientContext),
 	})
 	if err != nil {
-		if isUnimplementedErrorForMultiplexedPartitionedDML(err) && c.idleSessions.isMultiplexedSessionForPartitionedOpsEnabled() {
-			c.idleSessions.disableMultiplexedSessionForRW()
-		}
 		return nil, ToSpannerError(err)
 	}
 	tx = res.Id
@@ -982,7 +901,7 @@ func (c *Client) BatchReadOnlyTransaction(ctx context.Context, tb TimestampBound
 			rts: rts,
 		},
 	}
-	t.txReadOnly.sp = c.idleSessions
+	t.txReadOnly.sm = c.sm
 	t.txReadOnly.sh = sh
 	t.txReadOnly.txReadEnv = t
 	t.txReadOnly.qo = c.qo
@@ -991,6 +910,7 @@ func (c *Client) BatchReadOnlyTransaction(ctx context.Context, tb TimestampBound
 	t.txReadOnly.qo.DirectedReadOptions = c.dro
 	t.txReadOnly.ro.DirectedReadOptions = c.dro
 	t.txReadOnly.ro.LockHint = sppb.ReadRequest_LOCK_HINT_UNSPECIFIED
+	t.txReadOnly.clientContext = c.clientContext
 	t.ct = c.ct
 	t.otConfig = c.otConfig
 	return t, nil
@@ -1018,7 +938,7 @@ func (c *Client) BatchReadOnlyTransactionFromID(tid BatchReadOnlyTransactionID) 
 		},
 		ID: tid,
 	}
-	t.txReadOnly.sp = c.idleSessions
+	t.txReadOnly.sm = c.sm
 	t.txReadOnly.sh = sh
 	t.txReadOnly.txReadEnv = t
 	t.txReadOnly.qo = c.qo
@@ -1027,6 +947,7 @@ func (c *Client) BatchReadOnlyTransactionFromID(tid BatchReadOnlyTransactionID) 
 	t.txReadOnly.qo.DirectedReadOptions = c.dro
 	t.txReadOnly.ro.DirectedReadOptions = c.dro
 	t.txReadOnly.ro.LockHint = sppb.ReadRequest_LOCK_HINT_UNSPECIFIED
+	t.txReadOnly.clientContext = c.clientContext
 	t.ct = c.ct
 	t.otConfig = c.otConfig
 	return t
@@ -1060,8 +981,8 @@ func checkNestedTxn(ctx context.Context) error {
 // See https://godoc.org/cloud.google.com/go/spanner#ReadWriteTransaction for
 // more details.
 func (c *Client) ReadWriteTransaction(ctx context.Context, f func(context.Context, *ReadWriteTransaction) error) (commitTimestamp time.Time, err error) {
-	ctx = trace.StartSpan(ctx, "cloud.google.com/go/spanner.ReadWriteTransaction")
-	defer func() { trace.EndSpan(ctx, err) }()
+	ctx, _ = startSpan(ctx, "ReadWriteTransaction", c.otConfig.commonTraceStartOptions...)
+	defer func() { endSpan(ctx, err) }()
 	resp, err := c.rwTransaction(ctx, f, TransactionOptions{})
 	return resp.CommitTs, err
 }
@@ -1074,8 +995,8 @@ func (c *Client) ReadWriteTransaction(ctx context.Context, f func(context.Contex
 // See https://godoc.org/cloud.google.com/go/spanner#ReadWriteTransaction for
 // more details.
 func (c *Client) ReadWriteTransactionWithOptions(ctx context.Context, f func(context.Context, *ReadWriteTransaction) error, options TransactionOptions) (resp CommitResponse, err error) {
-	ctx = trace.StartSpan(ctx, "cloud.google.com/go/spanner.ReadWriteTransactionWithOptions")
-	defer func() { trace.EndSpan(ctx, err) }()
+	ctx, _ = startSpan(ctx, "ReadWriteTransactionWithOptions", c.otConfig.commonTraceStartOptions...)
+	defer func() { endSpan(ctx, err) }()
 	resp, err = c.rwTransaction(ctx, f, options)
 	return resp, err
 }
@@ -1094,32 +1015,46 @@ func (c *Client) rwTransaction(ctx context.Context, f func(context.Context, *Rea
 			sh.recycle()
 		}
 	}()
-	err = runWithRetryOnAbortedOrFailedInlineBeginOrSessionNotFound(ctx, func(ctx context.Context) error {
+	err = runWithRetryOnAbortedOrFailedInlineBegin(ctx, func(ctx context.Context) error {
 		var (
 			err error
 		)
 		if sh == nil || sh.getID() == "" || sh.getClient() == nil {
-			if c.idleSessions.isMultiplexedSessionForRWEnabled() {
-				sh, err = c.idleSessions.takeMultiplexed(ctx)
-			} else {
-				// Session handle hasn't been allocated or has been destroyed.
-				sh, err = c.idleSessions.take(ctx)
-			}
+			sh, err = c.sm.takeMultiplexed(ctx)
 			if err != nil {
-				// If session retrieval fails, just fail the transaction.
 				return err
 			}
-
-			// Some operations (for ex BatchUpdate) can be long-running. For such operations set the isLongRunningTransaction flag to be true
-			t.setSessionEligibilityForLongRunning(sh)
 		}
-		if t.shouldExplicitBegin(attempt) {
+		initTx := func(t *ReadWriteTransaction) {
+			t.txReadOnly.sm = c.sm
+			t.txReadOnly.txReadEnv = t
+			t.txReadOnly.qo = c.qo
+			t.txReadOnly.ro = c.ro
+			t.txReadOnly.disableRouteToLeader = c.disableRouteToLeader
+			t.txReadOnly.clientContext = c.clientContext
+			t.wb = []*Mutation{}
+			t.txOpts = c.txo.merge(options)
+			t.txReadOnly.clientContext = mergeClientContext(c.clientContext, t.txOpts.ClientContext)
+			t.ct = c.ct
+			t.otConfig = c.otConfig
+		}
+		if t.shouldExplicitBegin(attempt, options) {
+			if t == nil {
+				t = &ReadWriteTransaction{
+					txReadyOrClosed: make(chan struct{}),
+				}
+			}
+			initTx(t)
 			// Make sure we set the current session handle before calling BeginTransaction.
 			// Note that the t.begin(ctx) call could change the session that is being used by the transaction, as the
 			// BeginTransaction RPC invocation will be retried on a new session if it returns SessionNotFound.
 			t.txReadOnly.sh = sh
 			if err = t.begin(ctx, nil); err != nil {
-				trace.TracePrintf(ctx, nil, "Error while BeginTransaction during retrying a ReadWrite transaction: %v", ToSpannerError(err))
+				if attempt > 0 {
+					trace.TracePrintf(ctx, nil, "Error while BeginTransaction during retrying a ReadWrite transaction: %v", ToSpannerError(err))
+				} else {
+					trace.TracePrintf(ctx, nil, "Error during the initial BeginTransaction for a ReadWrite transaction: %v", ToSpannerError(err))
+				}
 				return ToSpannerError(err)
 			}
 		} else {
@@ -1132,17 +1067,9 @@ func (c *Client) rwTransaction(ctx context.Context, f func(context.Context, *Rea
 				previousTx:      previousTx,
 			}
 			t.txReadOnly.sh = sh
+			initTx(t)
 		}
 		attempt++
-		t.txReadOnly.sp = c.idleSessions
-		t.txReadOnly.txReadEnv = t
-		t.txReadOnly.qo = c.qo
-		t.txReadOnly.ro = c.ro
-		t.txReadOnly.disableRouteToLeader = c.disableRouteToLeader
-		t.wb = []*Mutation{}
-		t.txOpts = c.txo.merge(options)
-		t.ct = c.ct
-		t.otConfig = c.otConfig
 
 		trace.TracePrintf(ctx, map[string]interface{}{"transactionSelector": t.getTransactionSelector().String()},
 			"Starting transaction attempt")
@@ -1150,9 +1077,6 @@ func (c *Client) rwTransaction(ctx context.Context, f func(context.Context, *Rea
 		resp, err = t.runInTransaction(ctx, f)
 		return err
 	})
-	if isUnimplementedErrorForMultiplexedRW(err) {
-		c.idleSessions.disableMultiplexedSessionForRW()
-	}
 	return resp, err
 }
 
@@ -1244,8 +1168,8 @@ func (c *Client) Apply(ctx context.Context, ms []*Mutation, opts ...ApplyOption)
 		opt(ao)
 	}
 
-	ctx = trace.StartSpan(ctx, "cloud.google.com/go/spanner.Apply")
-	defer func() { trace.EndSpan(ctx, err) }()
+	ctx, _ = startSpan(ctx, "Apply", c.otConfig.commonTraceStartOptions...)
+	defer func() { endSpan(ctx, err) }()
 
 	if !ao.atLeastOnce {
 		resp, err := c.ReadWriteTransactionWithOptions(ctx, func(ctx context.Context, t *ReadWriteTransaction) error {
@@ -1253,7 +1177,7 @@ func (c *Client) Apply(ctx context.Context, ms []*Mutation, opts ...ApplyOption)
 		}, TransactionOptions{CommitPriority: ao.priority, TransactionTag: ao.transactionTag, ExcludeTxnFromChangeStreams: ao.excludeTxnFromChangeStreams, CommitOptions: ao.commitOptions, IsolationLevel: ao.isolationLevel})
 		return resp.CommitTs, err
 	}
-	t := &writeOnlyTransaction{sp: c.idleSessions, commitPriority: ao.priority, transactionTag: ao.transactionTag, disableRouteToLeader: c.disableRouteToLeader, excludeTxnFromChangeStreams: ao.excludeTxnFromChangeStreams, commitOptions: ao.commitOptions, isolationLevel: ao.isolationLevel}
+	t := &writeOnlyTransaction{sm: c.sm, commitPriority: ao.priority, transactionTag: ao.transactionTag, disableRouteToLeader: c.disableRouteToLeader, excludeTxnFromChangeStreams: ao.excludeTxnFromChangeStreams, commitOptions: ao.commitOptions, isolationLevel: ao.isolationLevel, clientContext: c.clientContext}
 	return t.applyAtLeastOnce(ctx, ms...)
 }
 
@@ -1269,6 +1193,9 @@ type BatchWriteOptions struct {
 	// in this batch write request will not be recorded in allowed tracking
 	// change treams with DDL option allow_txn_exclusion=true.
 	ExcludeTxnFromChangeStreams bool
+
+	// ClientContext contains client-owned context information to be passed with the batch write request.
+	ClientContext *sppb.RequestOptions_ClientContext
 }
 
 // merge combines two BatchWriteOptions such that the input parameter will have higher
@@ -1278,6 +1205,7 @@ func (bwo BatchWriteOptions) merge(opts BatchWriteOptions) BatchWriteOptions {
 		TransactionTag:              bwo.TransactionTag,
 		Priority:                    bwo.Priority,
 		ExcludeTxnFromChangeStreams: bwo.ExcludeTxnFromChangeStreams || opts.ExcludeTxnFromChangeStreams,
+		ClientContext:               mergeClientContext(bwo.ClientContext, opts.ClientContext),
 	}
 	if opts.TransactionTag != "" {
 		merged.TransactionTag = opts.TransactionTag
@@ -1293,9 +1221,7 @@ type BatchWriteResponseIterator struct {
 	ctx                context.Context
 	stream             sppb.Spanner_BatchWriteClient
 	err                error
-	dataReceived       bool
 	meterTracerFactory *builtinMetricsTracerFactory
-	replaceSession     func(ctx context.Context) error
 	rpc                func(ctx context.Context) (sppb.Spanner_BatchWriteClient, error)
 	release            func(error)
 	cancel             func()
@@ -1331,7 +1257,6 @@ func (r *BatchWriteResponseIterator) Next() (*sppb.BatchWriteResponse, error) {
 
 		// Return an item.
 		if r.err == nil {
-			r.dataReceived = true
 			return response, nil
 		}
 
@@ -1339,12 +1264,6 @@ func (r *BatchWriteResponseIterator) Next() (*sppb.BatchWriteResponse, error) {
 		if r.err == io.EOF {
 			r.err = iterator.Done
 			return nil, r.err
-		}
-
-		// Retry request on session not found error only if no data has been received before.
-		if !r.dataReceived && r.replaceSession != nil && isSessionNotFoundError(r.err) {
-			r.err = r.replaceSession(r.ctx)
-			r.stream = nil
 		}
 	}
 }
@@ -1417,7 +1336,7 @@ func (c *Client) BatchWrite(ctx context.Context, mgs []*MutationGroup) *BatchWri
 
 // BatchWriteWithOptions is same as BatchWrite. It accepts additional options to customize the request.
 func (c *Client) BatchWriteWithOptions(ctx context.Context, mgs []*MutationGroup, opts BatchWriteOptions) *BatchWriteResponseIterator {
-	ctx = trace.StartSpan(ctx, "cloud.google.com/go/spanner.BatchWrite")
+	ctx, _ = startSpan(ctx, "BatchWrite", c.otConfig.commonTraceStartOptions...)
 
 	var err error
 	defer func() {
@@ -1432,18 +1351,17 @@ func (c *Client) BatchWriteWithOptions(ctx context.Context, mgs []*MutationGroup
 	}
 
 	var sh *sessionHandle
-	sh, err = c.idleSessions.take(ctx)
+	sh, err = c.sm.takeMultiplexed(ctx)
 	if err != nil {
 		return &BatchWriteResponseIterator{meterTracerFactory: c.metricsTracerFactory, err: err}
 	}
 
 	rpc := func(ct context.Context) (sppb.Spanner_BatchWriteClient, error) {
 		var md metadata.MD
-		sh.updateLastUseTime()
 		stream, rpcErr := sh.getClient().BatchWrite(contextWithOutgoingMetadata(ct, sh.getMetadata(), c.disableRouteToLeader), &sppb.BatchWriteRequest{
 			Session:                     sh.getID(),
 			MutationGroups:              mgsPb,
-			RequestOptions:              createRequestOptions(opts.Priority, "", opts.TransactionTag),
+			RequestOptions:              createRequestOptions(opts.Priority, "", opts.TransactionTag, mergeClientContext(c.clientContext, opts.ClientContext)),
 			ExcludeTxnFromChangeStreams: opts.ExcludeTxnFromChangeStreams,
 		}, gax.WithGRPCOptions(grpc.Header(&md)))
 
@@ -1458,32 +1376,19 @@ func (c *Client) BatchWriteWithOptions(ctx context.Context, mgs []*MutationGroup
 		return stream, rpcErr
 	}
 
-	replaceSession := func(ct context.Context) error {
-		if sh != nil {
-			sh.destroy()
-		}
-		var sessionErr error
-		sh, sessionErr = c.idleSessions.take(ct)
-		return sessionErr
-	}
-
 	release := func(err error) {
 		if sh == nil {
 			return
-		}
-		if isSessionNotFoundError(err) {
-			sh.destroy()
 		}
 		sh.recycle()
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
-	ctx = trace.StartSpan(ctx, "cloud.google.com/go/spanner.BatchWriteResponseIterator")
+	ctx, _ = startSpan(ctx, "BatchWriteResponseIterator", c.otConfig.commonTraceStartOptions...)
 	return &BatchWriteResponseIterator{
 		ctx:                ctx,
 		meterTracerFactory: c.metricsTracerFactory,
 		rpc:                rpc,
-		replaceSession:     replaceSession,
 		release:            release,
 		cancel:             cancel,
 	}
@@ -1516,7 +1421,7 @@ func parseServerTimingHeader(md metadata.MD) map[string]time.Duration {
 		for _, match := range matches {
 			if len(match) == 3 { // full match + 2 capture groups
 				metricName := match[1]
-				duration, err := strconv.ParseFloat(match[2], 10)
+				duration, err := strconv.ParseFloat(match[2], 64)
 				if err == nil {
 					metrics[metricName] = time.Duration(duration*1000) * time.Microsecond
 				}
@@ -1524,4 +1429,22 @@ func parseServerTimingHeader(md metadata.MD) map[string]time.Duration {
 		}
 	}
 	return metrics
+}
+
+// enableLogClientOptions returns true if the environment variable for enabling has been set to true, or if the
+// environment variable for disabling has been set to false. It returns false by default if no env var has been set.
+// The function uses two environment variables because this function was initially added with a default return value of
+// true, which caused the config to always be logged. This again caused unnecessary log spamming.
+func enableLogClientOptions() bool {
+	if enableLogString, found := os.LookupEnv("GOOGLE_CLOUD_SPANNER_ENABLE_LOG_CLIENT_OPTIONS"); found {
+		if enableLog, err := strconv.ParseBool(enableLogString); err == nil {
+			return enableLog
+		}
+	}
+	if disableLogString, found := os.LookupEnv("GOOGLE_CLOUD_SPANNER_DISABLE_LOG_CLIENT_OPTIONS"); found {
+		if disableLog, err := strconv.ParseBool(disableLogString); err == nil {
+			return !disableLog
+		}
+	}
+	return false
 }
