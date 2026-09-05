@@ -114,3 +114,74 @@ defer client.Close()
 // session <session-info> checked out of pool at <session-checkout-time> is long running and will be removed due to possible session leak for goroutine 
 // <Stack Trace of transaction>
 ```
+
+## Metrics
+
+Cloud Spanner client supports [client-side metrics](https://cloud.google.com/spanner/docs/view-manage-client-side-metrics) that you can use along with server-side metrics to optimize performance and troubleshoot performance issues if they occur.
+
+Client-side metrics are measured from the time a request leaves your application to the time your application receives the response.
+In contrast, server-side metrics are measured from the time Spanner receives a request until the last byte of data is sent to the client.
+
+These metrics are enabled by default. You can opt out of using client-side metrics with the following code:
+
+```go
+client, err := spanner.NewClientWithConfig(
+	ctx, database, spanner.ClientConfig{DisableNativeMetrics: true},
+)
+if err != nil {
+log.Fatal(err)
+}
+defer client.Close()
+```
+
+You can also disable these metrics by setting `SPANNER_DISABLE_BUILTIN_METRICS` to `true`.
+
+> Note: Exporting client-side metrics requires the `monitoring.timeSeries.create` IAM permission. To grant this, ask your administrator to assign the [Monitoring Metric Writer](https://cloud.google.com/iam/docs/roles-permissions/monitoring#monitoring.metricWriter) (`roles/monitoring.metricWriter`) IAM role to your application's service account.
+
+### Exporting client metrics to OpenTelemetry
+
+To additionally export the same built-in client metrics through a caller-owned
+OpenTelemetry pipeline, configure a dedicated meter provider and set
+`ClientMetricsProvider`:
+
+```go
+reader := sdkmetric.NewPeriodicReader(exporter) // OTLP, Prometheus, or another exporter.
+providerOptions := spanner.ClientMetricsMeterProviderOptions()
+providerOptions = append(providerOptions, sdkmetric.WithReader(reader))
+provider := sdkmetric.NewMeterProvider(providerOptions...)
+defer provider.Shutdown(ctx)
+
+client, err := spanner.NewClientWithConfig(ctx, database, spanner.ClientConfig{
+	ClientMetricsProvider: provider,
+})
+if err != nil {
+	log.Fatal(err)
+}
+defer client.Close()
+```
+
+The caller owns the meter provider. Spanner instruments use the
+`spanner/client/` prefix; `ClientMetricsMeterProviderOptions` also maps the gRPC
+instruments into that namespace. Use a dedicated meter provider because these
+views select gRPC instrument names shared by other clients.
+
+The OpenTelemetry Prometheus exporter renders counters as
+`spanner_client_<name>_total` and millisecond histograms as
+`spanner_client_<name>_milliseconds_{bucket,count,sum}`. For example, it exports
+`spanner_client_operation_count_total` and
+`spanner_client_operation_latencies_milliseconds_bucket`.
+
+The gRPC-layer instruments are included only when gRPC built-in metrics are
+enabled through `SPANNER_DISABLE_DIRECT_ACCESS_GRPC_BUILTIN_METRICS=false` or
+DirectPath. AFE latency instruments are included only when AFE server timing is
+enabled.
+
+This caller-owned export is independent of the Cloud Monitoring export.
+`DisableNativeMetrics` and `SPANNER_DISABLE_BUILTIN_METRICS` control only Cloud
+Monitoring, so both sinks can be enabled together. Neither sink records metrics
+when the client targets the Spanner emulator. `OpenTelemetryMeterProvider`
+configures the older Spanner metrics surface and does not enable this built-in
+client-metrics export.
+
+On Spanner Omni, the Cloud Monitoring export is unavailable and always off.
+Use `ClientMetricsProvider` to export client metrics from an Omni client.
