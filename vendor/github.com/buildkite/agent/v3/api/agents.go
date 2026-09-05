@@ -30,6 +30,7 @@ type AgentRegisterResponse struct {
 	JobStatusInterval int               `json:"job_status_interval"`
 	HeartbeatInterval int               `json:"heartbeat_interval"`
 	Tags              []string          `json:"meta_data"`
+	Tracing           *AgentTracing     `json:"tracing,omitempty"`
 }
 
 // Registers the agent against the Buildkite Agent API. The client for this
@@ -45,9 +46,6 @@ func (c *Client) Register(ctx context.Context, regReq *AgentRegisterRequest) (*A
 	if err != nil {
 		return nil, resp, err
 	}
-
-	// If Buildkite told us to use Buildkite-* request headers, store those
-	c.setRequestHeaders(a.RequestHeaders)
 
 	return a, resp, err
 }

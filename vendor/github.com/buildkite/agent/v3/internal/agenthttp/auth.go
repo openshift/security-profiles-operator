@@ -31,13 +31,13 @@ func (t authenticatedTransport) RoundTrip(req *http.Request) (*http.Response, er
 	if req.Body != nil {
 		defer func() {
 			if !reqBodyClosed {
-				req.Body.Close()
+				req.Body.Close() //nolint:errcheck // req.Body is only used in a read-only manner.
 			}
 		}()
 	}
 
 	if t.Token == "" && t.Bearer == "" {
-		return nil, fmt.Errorf("Invalid token, empty string supplied")
+		return nil, fmt.Errorf("invalid token: empty string supplied")
 	}
 
 	// Per net/http#RoundTripper:

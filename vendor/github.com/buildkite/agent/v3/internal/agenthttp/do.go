@@ -29,9 +29,9 @@ func Do(l logger.Logger, client *http.Client, req *http.Request, opts ...DoOptio
 		dumpBody := !strings.Contains(req.Header.Get("Content-Type"), "multipart/form-data")
 		requestDump, err := httputil.DumpRequestOut(req, dumpBody)
 		if err != nil {
-			l.Debug("ERR: %s\n%s", err, string(requestDump))
+			l.Debugf("ERR: %s\n%s", err, string(requestDump))
 		} else {
-			l.Debug("%s", string(requestDump))
+			l.Debugf("%s", string(requestDump))
 		}
 	}
 
@@ -44,7 +44,7 @@ func Do(l logger.Logger, client *http.Client, req *http.Request, opts ...DoOptio
 
 	ts := time.Now()
 
-	l.Debug("%s %s", req.Method, req.URL)
+	l.Debugf("%s %s", req.Method, req.URL)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -58,14 +58,14 @@ func Do(l logger.Logger, client *http.Client, req *http.Request, opts ...DoOptio
 		logger.StringField("proto", resp.Proto),
 		logger.IntField("status", resp.StatusCode),
 		logger.DurationField("Δ", time.Since(ts)),
-	).Debug("↳ %s %s", req.Method, req.URL)
+	).Debugf("↳ %s %s", req.Method, req.URL)
 
 	if cfg.debugHTTP {
 		responseDump, err := httputil.DumpResponse(resp, true)
 		if err != nil {
-			l.Debug("\nERR: %s\n%s", err, string(responseDump))
+			l.Debugf("\nERR: %s\n%s", err, string(responseDump))
 		} else {
-			l.Debug("\n%s", string(responseDump))
+			l.Debugf("\n%s", string(responseDump))
 		}
 	}
 	if cfg.traceHTTP {
@@ -85,11 +85,6 @@ type doConfig struct {
 func WithDebugHTTP(d bool) DoOption { return func(c *doConfig) { c.debugHTTP = d } }
 func WithTraceHTTP(t bool) DoOption { return func(c *doConfig) { c.traceHTTP = t } }
 
-type traceEvent struct {
-	event string
-	since time.Duration
-}
-
 type tracer struct {
 	startTime time.Time
 	logger.Logger
@@ -100,29 +95,29 @@ func (t *tracer) Start() {
 }
 
 func (t *tracer) LogTiming(event string) {
-	t.Logger = t.Logger.WithFields(logger.DurationField(event, time.Since(t.startTime)))
+	t.Logger = t.WithFields(logger.DurationField(event, time.Since(t.startTime)))
 }
 
 func (t *tracer) LogField(key, value string) {
-	t.Logger = t.Logger.WithFields(logger.StringField(key, value))
+	t.Logger = t.WithFields(logger.StringField(key, value))
 }
 
 func (t *tracer) LogDuration(event string, d time.Duration) {
-	t.Logger = t.Logger.WithFields(logger.DurationField(event, d))
+	t.Logger = t.WithFields(logger.DurationField(event, d))
 }
 
 // Currently logger.Logger doesn't give us a way to set the level we want to emit logs at dynamically
 func (t *tracer) EmitTraceToLog(level logger.Level) {
-	msg := "HTTP Timing Trace"
+	const msg = "HTTP Timing Trace"
 	switch level {
 	case logger.DEBUG:
-		t.Debug(msg)
+		t.Debugf(msg)
 	case logger.INFO:
-		t.Info(msg)
+		t.Infof(msg)
 	case logger.WARN:
-		t.Warn(msg)
+		t.Warnf(msg)
 	case logger.ERROR:
-		t.Error(msg)
+		t.Errorf(msg)
 	}
 }
 
