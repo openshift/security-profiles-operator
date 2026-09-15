@@ -952,6 +952,26 @@ func runWebhook(ctx *cli.Context, info *version.Info) error {
 		return fmt.Errorf("add profilerecording v1 API to scheme: %w", err)
 	}
 
+	// The conversion webhook (/convert) serves all CRDs of the operator, so
+	// every API version has to be part of the scheme, including the ones not
+	// used by the admission webhooks. Otherwise SPOD and node status objects
+	// stored in a previous API version cannot be read after an upgrade.
+	if err := spodv1alpha1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add spod API to scheme: %w", err)
+	}
+
+	if err := spodv1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add spod v1 API to scheme: %w", err)
+	}
+
+	if err := secprofnodestatusv1alpha1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add per-node Status API to scheme: %w", err)
+	}
+
+	if err := secprofnodestatusv1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add per-node Status v1 API to scheme: %w", err)
+	}
+
 	setupLog.Info("registering webhooks")
 
 	hookserver := mgr.GetWebhookServer()
