@@ -14,12 +14,19 @@ import (
 
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Printf("Usage: %s <manifest_directory> <version>\n", os.Args[0])
+		fmt.Printf("Usage: %s <manifest_directory> <version> [previous_version]\n", os.Args[0])
 		os.Exit(1)
 	}
 
 	manifestDirectory := os.Args[1]
 	version := os.Args[2]
+	// The previous downstream version this bundle replaces. Defaults to the
+	// version of the upstream CSV, which is only correct if the upstream and
+	// downstream versions are in sync.
+	previousVersion := ""
+	if len(os.Args) > 3 {
+		previousVersion = os.Args[3]
+	}
 
 	buildManifestFilePath, err := getManifestFilePathFromDirectory(manifestDirectory)
 	if err != nil {
@@ -53,7 +60,7 @@ func main() {
 		fmt.Println(err)
 		os.Exit(1)
 	}
-	if err := replaceVersion(manifest, version); err != nil {
+	if err := replaceVersion(manifest, version, previousVersion); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
@@ -328,7 +335,7 @@ func updateManifestWithRedHatDetails(m map[string]interface{}) error {
 }
 
 // replaceVersion updates references to the new version inside the manifest.
-func replaceVersion(m map[string]interface{}, newVersion string) error {
+func replaceVersion(m map[string]interface{}, newVersion, previousVersion string) error {
 	spec, ok := m["spec"].(map[string]interface{})
 	if !ok {
 		return errors.New("manifest has no 'spec' field")
@@ -361,7 +368,13 @@ func replaceVersion(m map[string]interface{}, newVersion string) error {
 	}
 
 	// spec.replaces
-	spec["replaces"] = "security-profiles-operator.v" + oldVersion
+	if previousVersion == "" {
+		previousVersion = oldVersion
+	}
+	if previousVersion == newVersion {
+		return fmt.Errorf("previous version %s must differ from the new version %s", previousVersion, newVersion)
+	}
+	spec["replaces"] = "security-profiles-operator.v" + previousVersion
 
 	// spec.version
 	spec["version"] = newVersion
