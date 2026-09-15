@@ -18,6 +18,9 @@ package v1alpha2
 
 import (
 	"context"
+	"errors"
+	"strings"
+	"unicode/utf8"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -36,6 +39,10 @@ type RawSelinuxProfileSpec struct {
 	// Common spec fields for all profiles.
 	profilebasev1alpha1.SpecBase `json:",inline"`
 
+	// policy is the raw SELinux policy module content.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=500000
 	Policy string `json:"policy,omitempty"`
 }
 
@@ -47,11 +54,17 @@ type RawSelinuxProfileSpec struct {
 // +kubebuilder:printcolumn:name="Usage",type="string",JSONPath=`.status.usage`
 // +kubebuilder:printcolumn:name="State",type="string",JSONPath=`.status.status`
 type RawSelinuxProfile struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+	// metadata contains the object metadata.
+	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   RawSelinuxProfileSpec `json:"spec,omitempty"`
-	Status SelinuxProfileStatus  `json:"status,omitempty"`
+	// spec defines the desired state of the RawSelinuxProfile.
+	// +optional
+	Spec RawSelinuxProfileSpec `json:"spec,omitempty"`
+	// status contains the observed state of the RawSelinuxProfile.
+	// +optional
+	Status SelinuxProfileStatus `json:"status,omitempty"`
 }
 
 func (sp *RawSelinuxProfile) GetStatusBase() *profilebasev1alpha1.StatusBase {
@@ -84,6 +97,24 @@ func (sp *RawSelinuxProfile) ListProfilesByRecording(
 	recording string,
 ) ([]metav1.Object, error) {
 	return profilebasev1alpha1.ListProfilesByRecording(ctx, cli, recording, sp.Namespace, &RawSelinuxProfileList{})
+}
+
+func (sp *RawSelinuxProfile) ValidatePolicy() error {
+	policy := sp.Spec.Policy
+
+	if strings.TrimSpace(policy) == "" {
+		return errors.New("policy must not be empty")
+	}
+
+	if !utf8.ValidString(policy) {
+		return errors.New("policy must be valid UTF-8")
+	}
+
+	if strings.ContainsRune(policy, '\x00') {
+		return errors.New("policy must not contain null bytes")
+	}
+
+	return nil
 }
 
 func (sp *RawSelinuxProfile) IsPartial() bool {

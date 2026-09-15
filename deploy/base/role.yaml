@@ -42,6 +42,7 @@ rules:
   - admissionregistration.k8s.io
   resources:
   - mutatingwebhookconfigurations
+  - validatingwebhookconfigurations
   verbs:
   - create
   - get
@@ -247,6 +248,16 @@ rules:
   verbs:
   - create
 - apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
   - security-profiles-operator.x-k8s.io
   resources:
   - apparmorprofiles
@@ -277,6 +288,7 @@ rules:
   - apparmorprofiles/status
   - rawselinuxprofiles/status
   - seccompprofiles/status
+  - securityprofilenodestatuses/status
   - selinuxprofiles/status
   verbs:
   - get
@@ -349,6 +361,17 @@ rules:
 - apiGroups:
   - security-profiles-operator.x-k8s.io
   resources:
+  - apparmorprofiles
+  - rawselinuxprofiles
+  - seccompprofiles
+  - selinuxprofiles
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - security-profiles-operator.x-k8s.io
+  resources:
   - profilebindings
   - profilerecordings
   verbs:
@@ -377,15 +400,6 @@ rules:
   - get
   - patch
   - update
-- apiGroups:
-  - security-profiles-operator.x-k8s.io
-  resources:
-  - seccompprofiles
-  - selinuxprofiles
-  verbs:
-  - get
-  - list
-  - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

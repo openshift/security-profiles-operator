@@ -121,14 +121,13 @@ func ParseTransparencyLogs(tlogs []*prototrustroot.TransparencyLogInstance) (tra
 		if tlog.GetHashAlgorithm() != protocommon.HashAlgorithm_SHA2_256 {
 			return nil, fmt.Errorf("unsupported tlog hash algorithm: %s", tlog.GetHashAlgorithm())
 		}
-		//nolint:staticcheck // Continuing to use log ID
 		if tlog.GetLogId() == nil {
 			return nil, fmt.Errorf("tlog missing log ID")
 		}
-		if tlog.GetLogId().GetKeyId() == nil { //nolint:staticcheck
+		if tlog.GetLogId().GetKeyId() == nil {
 			return nil, fmt.Errorf("tlog missing log ID key ID")
 		}
-		encodedKeyID := hex.EncodeToString(tlog.GetLogId().GetKeyId()) //nolint:staticcheck
+		encodedKeyID := hex.EncodeToString(tlog.GetLogId().GetKeyId())
 
 		if tlog.GetPublicKey() == nil {
 			return nil, fmt.Errorf("tlog missing public key")
@@ -147,7 +146,7 @@ func ParseTransparencyLogs(tlogs []*prototrustroot.TransparencyLogInstance) (tra
 
 		tlogEntry := &TransparencyLog{
 			BaseURL:           tlog.GetBaseUrl(),
-			ID:                tlog.GetLogId().GetKeyId(), //nolint:staticcheck
+			ID:                tlog.GetLogId().GetKeyId(),
 			HashFunc:          hashFunc,
 			SignatureHashFunc: crypto.SHA256,
 		}
@@ -186,7 +185,7 @@ func ParseTransparencyLogs(tlogs []*prototrustroot.TransparencyLogInstance) (tra
 				return nil, fmt.Errorf("tlog public key is not RSA: %s", tlog.GetPublicKey().GetKeyDetails())
 			}
 			tlogEntry.PublicKey = rsaKey
-		case protocommon.PublicKeyDetails_PKIX_ED25519: //nolint:staticcheck
+		case protocommon.PublicKeyDetails_PKIX_ED25519:
 			key, err := x509.ParsePKIXPublicKey(tlog.GetPublicKey().GetRawBytes())
 			if err != nil {
 				return nil, fmt.Errorf("failed to parse public key for tlog: %s %w",
@@ -499,29 +498,41 @@ func NewLiveTrustedRootFromTargetWithPeriod(opts *tuf.Options, target string, rf
 		mu:          sync.RWMutex{},
 	}
 
+	var done <-chan struct{}
+	if opts != nil && opts.Context != nil {
+		done = opts.Context.Done()
+	}
+
 	ticker := time.NewTicker(rfPeriod)
-	log.Printf("setting TUF refresh period to %s", rfPeriod)
 	go func() {
-		for range ticker.C {
-			client, err = tuf.New(opts)
-			if err != nil {
-				log.Printf("error creating TUF client: %v", err)
-			}
+		for {
+			select {
+			case <-done:
+				ticker.Stop()
+				return
+			case <-ticker.C:
+				client, err = tuf.New(opts)
+				if err != nil {
+					log.Printf("error creating TUF client: %v", err)
+					continue
+				}
 
-			b, err := client.GetTarget(target)
-			if err != nil {
-				log.Printf("error fetching trusted root: %v", err)
-			}
+				b, err := client.GetTarget(target)
+				if err != nil {
+					log.Printf("error fetching trusted root: %v", err)
+					continue
+				}
 
-			newTr, err := NewTrustedRootFromJSON(b)
-			if err != nil {
-				log.Printf("error fetching trusted root: %v", err)
-				continue
+				newTr, err := NewTrustedRootFromJSON(b)
+				if err != nil {
+					log.Printf("error fetching trusted root: %v", err)
+					continue
+				}
+				ltr.mu.Lock()
+				ltr.TrustedRoot = newTr
+				ltr.mu.Unlock()
+				log.Printf("successfully refreshed the TUF root")
 			}
-			ltr.mu.Lock()
-			ltr.TrustedRoot = newTr
-			ltr.mu.Unlock()
-			log.Printf("successfully refreshed the TUF root")
 		}
 	}()
 	return ltr, nil

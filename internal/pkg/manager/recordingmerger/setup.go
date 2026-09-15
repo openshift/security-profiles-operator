@@ -21,7 +21,7 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	profilerecording1alpha1 "sigs.k8s.io/security-profiles-operator/api/profilerecording/v1alpha1"
+	profilerecordingapi "sigs.k8s.io/security-profiles-operator/api/profilerecording/v1"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/daemon/metrics"
 )
 
@@ -33,11 +33,11 @@ func (r *PolicyMergeReconciler) Setup(
 ) error {
 	r.client = mgr.GetClient()
 	r.log = ctrl.Log.WithName(r.Name())
-	r.record = mgr.GetEventRecorderFor(r.Name())
+	r.record = mgr.GetEventRecorderFor(r.Name()) //nolint:staticcheck,nolintlint // TODO: migrate to GetEventRecorder
 
 	// Register a special reconciler for status events
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(r.Name()).
-		For(&profilerecording1alpha1.ProfileRecording{}).
+		For(&profilerecordingapi.ProfileRecording{}).
 		Complete(r)
 }
