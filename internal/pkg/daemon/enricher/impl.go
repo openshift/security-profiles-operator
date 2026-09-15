@@ -57,7 +57,7 @@ func newDefaultImpl() *defaultImpl {
 //counterfeiter:generate . impl
 type impl interface {
 	Getenv(key string) string
-	Dial() (*grpc.ClientConn, context.CancelFunc, error)
+	Dial() (*grpc.ClientConn, error)
 	Close(*grpc.ClientConn) error
 	StartTail(src auditsource.AuditLineSource) (chan *types.AuditLine, error)
 	TailErr(src auditsource.AuditLineSource) error
@@ -87,7 +87,7 @@ func (d *defaultImpl) Getenv(key string) string {
 	return os.Getenv(key)
 }
 
-func (d *defaultImpl) Dial() (*grpc.ClientConn, context.CancelFunc, error) {
+func (d *defaultImpl) Dial() (*grpc.ClientConn, error) {
 	return metrics.Dial()
 }
 
@@ -245,9 +245,9 @@ func (d *defaultImpl) EnvForPid(pid int) (map[string]string, error) {
 		return envMap, retErr
 	}
 
-	envVars := bytes.Split(content, []byte{0})
+	envVars := bytes.SplitSeq(content, []byte{0})
 
-	for _, envVarBytes := range envVars {
+	for envVarBytes := range envVars {
 		envVar := string(envVarBytes)
 		if envVar == "" {
 			continue

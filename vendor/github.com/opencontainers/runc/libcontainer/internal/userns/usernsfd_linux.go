@@ -34,17 +34,18 @@ func (m Mapping) toSys() (uids, gids []syscall.SysProcIDMap) {
 			Size:        int(gid.Size),
 		})
 	}
-	return
+	return uids, gids
 }
 
 // id returns a unique identifier for this mapping, agnostic of the order of
 // the uid and gid mappings (because the order doesn't matter to the kernel).
 // The set of userns handles is indexed using this ID.
 func (m Mapping) id() string {
-	var uids, gids []string
+	uids := make([]string, 0, len(m.UIDMappings))
 	for _, idmap := range m.UIDMappings {
 		uids = append(uids, fmt.Sprintf("%d:%d:%d", idmap.ContainerID, idmap.HostID, idmap.Size))
 	}
+	gids := make([]string, 0, len(m.GIDMappings))
 	for _, idmap := range m.GIDMappings {
 		gids = append(gids, fmt.Sprintf("%d:%d:%d", idmap.ContainerID, idmap.HostID, idmap.Size))
 	}
@@ -61,7 +62,7 @@ type Handles struct {
 
 // Release all resources associated with this Handle. All existing files
 // returned from Get() will continue to work even after calling Release(). The
-// same Handles can be re-used after calling Release().
+// same Handles can be reused after calling Release().
 func (hs *Handles) Release() {
 	hs.m.Lock()
 	defer hs.m.Unlock()

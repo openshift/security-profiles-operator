@@ -1,5 +1,4 @@
 //go:build linux && !no_bpf
-// +build linux,!no_bpf
 
 /*
 Copyright 2023 The Kubernetes Authors.
@@ -28,8 +27,8 @@ import (
 	"unsafe"
 
 	"github.com/aquasecurity/libbpfgo"
-	"github.com/containers/common/pkg/seccomp"
 	libseccomp "github.com/seccomp/libseccomp-golang"
+	"go.podman.io/common/pkg/seccomp"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/cli-runtime/pkg/printers"
 

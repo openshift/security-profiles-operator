@@ -23,8 +23,9 @@ import (
 	"cuelang.org/go/cue/errors"
 	"cuelang.org/go/cue/token"
 	"cuelang.org/go/internal/core/adt"
+	"cuelang.org/go/internal/core/eval"
+	"cuelang.org/go/internal/iterutil"
 	"cuelang.org/go/internal/pkg"
-	"cuelang.org/go/internal/types"
 	"cuelang.org/go/internal/value"
 )
 
@@ -140,11 +141,7 @@ func Repeat(x []cue.Value, count int) ([]cue.Value, error) {
 	if count < 0 {
 		return nil, fmt.Errorf("negative count")
 	}
-	var a []cue.Value
-	for range count {
-		a = append(a, x...)
-	}
-	return a, nil
+	return slices.Repeat(x, count), nil
 }
 
 // Concat takes a list of lists and concatenates them.
@@ -233,7 +230,7 @@ func Reverse(x []cue.Value) []cue.Value {
 
 // MinItems reports whether a has at least n items.
 func MinItems(list pkg.List, n int) (bool, error) {
-	count := len(list.Elems())
+	count := iterutil.Count(list.Elems())
 	if count >= n {
 		return true, nil
 	}
@@ -249,7 +246,7 @@ func MinItems(list pkg.List, n int) (bool, error) {
 
 // MaxItems reports whether a has at most n items.
 func MaxItems(list pkg.List, n int) (bool, error) {
-	count := len(list.Elems())
+	count := iterutil.Count(list.Elems())
 	if count > n {
 		return false, pkg.ValidationError{B: &adt.Bottom{
 			Code: adt.EvalError,
@@ -273,9 +270,8 @@ func UniqueItems(a []cue.Value) (bool, error) {
 	// - Sort the elements based on the hash value.
 	// - Compare subsequent elements to see if they are equal.
 
-	var tv types.Value
-	a[0].Core(&tv)
-	ctx := adt.NewContext(tv.R, tv.V)
+	tv := a[0].Core()
+	ctx := eval.NewContext(tv.R, tv.V)
 
 	posX, posY := 0, 0
 	code := adt.IncompleteError
@@ -318,12 +314,7 @@ outer:
 // Contains reports whether v is contained in a. The value must be a
 // comparable value.
 func Contains(a []cue.Value, v cue.Value) bool {
-	for _, w := range a {
-		if v.Equals(w) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(a, v.Equals)
 }
 
 // MatchN is a validator that checks that the number of elements in the given
@@ -331,15 +322,22 @@ func Contains(a []cue.Value, v cue.Value) bool {
 // "n" may be a number constraint and does not have to be a concrete number.
 // Likewise, "matchValue" will usually be a non-concrete value.
 func MatchN(list []cue.Value, n pkg.Schema, matchValue pkg.Schema) (bool, error) {
+	c := value.OpContext(n)
+	return matchN(c, list, n, matchValue)
+}
+
+// matchN is the actual implementation of MatchN.
+func matchN(c *adt.OpContext, list []cue.Value, n pkg.Schema, matchValue pkg.Schema) (bool, error) {
 	var nmatch int64
 	for _, w := range list {
-		if matchValue.Unify(w).Validate(cue.Final()) == nil {
+		vx := adt.Unify(c, value.Vertex(matchValue), value.Vertex(w))
+		x := value.Make(c, vx)
+		if x.Validate(cue.Final()) == nil {
 			nmatch++
 		}
 	}
 
-	r, _ := value.ToInternal(n)
-	ctx := (*cue.Context)(r)
+	ctx := value.Context(c)
 
 	if err := n.Unify(ctx.Encode(nmatch)).Err(); err != nil {
 		return false, pkg.ValidationError{B: &adt.Bottom{
