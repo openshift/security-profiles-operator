@@ -24,6 +24,9 @@ import (
 	secprofnodestatusv1 "sigs.k8s.io/security-profiles-operator/api/secprofnodestatus/v1"
 )
 
+// ConvertTo converts this SecurityProfileNodeStatus to the Hub version (v1).
+// The v1alpha1 API keeps nodeName and status at the root of the object,
+// while v1 moved them into spec and status.
 func (src *SecurityProfileNodeStatus) ConvertTo(dstRaw conversion.Hub) error {
 	dst, ok := dstRaw.(*secprofnodestatusv1.SecurityProfileNodeStatus)
 	if !ok {
@@ -31,13 +34,13 @@ func (src *SecurityProfileNodeStatus) ConvertTo(dstRaw conversion.Hub) error {
 	}
 
 	dst.ObjectMeta = src.ObjectMeta
-
-	dst.Spec.NodeName = src.Spec.NodeName
-	dst.Status.Status = secprofnodestatusv1.ProfileState(src.Status.Status)
+	dst.Spec.NodeName = src.NodeName
+	dst.Status.Status = secprofnodestatusv1.ProfileState(src.Status)
 
 	return nil
 }
 
+// ConvertFrom converts from the Hub version (v1) to this version.
 func (dst *SecurityProfileNodeStatus) ConvertFrom(srcRaw conversion.Hub) error {
 	src, ok := srcRaw.(*secprofnodestatusv1.SecurityProfileNodeStatus)
 	if !ok {
@@ -45,9 +48,8 @@ func (dst *SecurityProfileNodeStatus) ConvertFrom(srcRaw conversion.Hub) error {
 	}
 
 	dst.ObjectMeta = src.ObjectMeta
-
-	dst.Spec.NodeName = src.Spec.NodeName
-	dst.Status.Status = ProfileState(src.Status.Status)
+	dst.NodeName = src.Spec.NodeName
+	dst.Status = ProfileState(src.Status.Status)
 
 	return nil
 }
