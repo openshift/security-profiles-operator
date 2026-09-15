@@ -31,7 +31,7 @@ type ProfileRecordingKind string
 const (
 	ProfileRecordingKindSeccompProfile  ProfileRecordingKind = "SeccompProfile"
 	ProfileRecordingKindSelinuxProfile  ProfileRecordingKind = "SelinuxProfile"
-	ProfileRecordingKindAppArmorProfile ProfileRecordingKind = "ApparmorProfile"
+	ProfileRecordingKindAppArmorProfile ProfileRecordingKind = "AppArmorProfile"
 )
 
 type ProfileRecorder string
@@ -60,43 +60,50 @@ const (
 
 // ProfileRecordingSpec defines the desired state of ProfileRecording.
 type ProfileRecordingSpec struct {
-	// Kind of object to be recorded.
-	// +kubebuilder:validation:Enum=SeccompProfile;SelinuxProfile;ApparmorProfile
-	Kind ProfileRecordingKind `json:"kind"`
+	// kind specifies the type of object to be recorded.
+	// +required
+	// +kubebuilder:validation:Enum=SeccompProfile;SelinuxProfile;AppArmorProfile
+	Kind ProfileRecordingKind `json:"kind,omitempty"`
 
-	// Recorder to be used.
+	// recorder specifies which recorder to use.
+	// +required
 	// +kubebuilder:validation:Enum=bpf;logs
-	Recorder ProfileRecorder `json:"recorder"`
+	Recorder ProfileRecorder `json:"recorder,omitempty"`
 
-	// Whether or how to merge recorded profiles. Can be one of "none" or "containers".
-	// Default is "none".
+	// mergeStrategy controls whether or how to merge recorded profiles.
+	// Can be one of "none" or "containers". Default is "none".
 	// +optional
-	// +kubebuilder:default="none"
+	// +default="none"
 	// +kubebuilder:validation:Enum=none;containers
-	MergeStrategy ProfileMergeStrategy `json:"mergeStrategy"`
+	MergeStrategy ProfileMergeStrategy `json:"mergeStrategy,omitempty"`
 
-	// PodSelector selects the pods to record. This field follows standard
+	// podSelector selects the pods to record. This field follows standard
 	// label selector semantics. An empty podSelector matches all pods in this
 	// namespace.
-	PodSelector metav1.LabelSelector `json:"podSelector"`
+	// +required
+	PodSelector *metav1.LabelSelector `json:"podSelector,omitempty"`
 
-	// Containers is a set of containers to record. This allows to select
+	// containers is a set of containers to record. This allows to select
 	// only specific containers to record instead of all containers present
 	// in the pod.
 	// +optional
+	// +listType=set
 	Containers []string `json:"containers,omitempty"`
 
-	// DisableProfileAfterRecording indicates whether the profile should be disabled
-	// after recording and thus skipped during reconcile. In case of SELinux profiles,
-	// reconcile can take a significant amount of time and for all profiles might not be needed.
-	// This Defaults to false.
+	// disableProfileAfterRecording indicates whether the profile should be
+	// disabled after recording and thus skipped during reconcile. In case of
+	// SELinux profiles, reconcile can take a significant amount of time and
+	// for all profiles might not be needed. Defaults to false.
 	// +optional
-	// +kubebuilder:default=false
+	// +default=false
 	DisableProfileAfterRecording bool `json:"disableProfileAfterRecording,omitempty"`
 }
 
 // ProfileRecordingStatus contains status of the ProfileRecording.
 type ProfileRecordingStatus struct {
+	// activeWorkloads lists the workloads currently using this recording.
+	// +optional
+	// +listType=set
 	ActiveWorkloads []string `json:"activeWorkloads,omitempty"`
 }
 
@@ -106,10 +113,16 @@ type ProfileRecordingStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="PodSelector",type=string,priority=10,JSONPath=`.spec.podSelector`
 type ProfileRecording struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+	// metadata contains the object metadata.
+	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   ProfileRecordingSpec   `json:"spec,omitempty"`
+	// spec defines the desired state of the ProfileRecording.
+	// +required
+	Spec ProfileRecordingSpec `json:"spec,omitzero"`
+	// status contains the observed state of the ProfileRecording.
+	// +optional
 	Status ProfileRecordingStatus `json:"status,omitempty"`
 }
 
@@ -137,6 +150,31 @@ func (pr *ProfileRecording) IsKindSupported() bool {
 	default:
 		return false
 	}
+}
+
+func (pr *ProfileRecording) ValidateRecorderKindCombination() error {
+	switch pr.Spec.Kind {
+	case ProfileRecordingKindSelinuxProfile:
+		if pr.Spec.Recorder != ProfileRecorderLogs {
+			return fmt.Errorf(
+				"recorder %q is not supported for %s, only %q is supported",
+				pr.Spec.Recorder, pr.Spec.Kind, ProfileRecorderLogs,
+			)
+		}
+	case ProfileRecordingKindAppArmorProfile:
+		if pr.Spec.Recorder != ProfileRecorderBpf {
+			return fmt.Errorf(
+				"recorder %q is not supported for %s, only %q is supported",
+				pr.Spec.Recorder, pr.Spec.Kind, ProfileRecorderBpf,
+			)
+		}
+	case ProfileRecordingKindSeccompProfile:
+		// All recorders are supported.
+	default:
+		return fmt.Errorf("unsupported kind: %s", pr.Spec.Kind)
+	}
+
+	return nil
 }
 
 func (pr *ProfileRecording) ctrAnnotationValue(ctrName string) string {
@@ -178,6 +216,9 @@ func (pr *ProfileRecording) ctrAnnotationSelinux(ctrName string) (key, value str
 	case ProfileRecorderLogs:
 		annotationPrefix = config.SelinuxProfileRecordLogsAnnotationKey
 	case ProfileRecorderBpf:
+		return "", "", fmt.Errorf(
+			"invalid recorder: %s, only %s is supported", pr.Spec.Recorder, ProfileRecorderLogs,
+		)
 	default:
 		return "", "", fmt.Errorf(
 			"invalid recorder: %s, only %s is supported", pr.Spec.Recorder, ProfileRecorderLogs,
@@ -197,6 +238,9 @@ func (pr *ProfileRecording) ctrAnnotationApparmor(ctrName string) (key, value st
 	case ProfileRecorderBpf:
 		annotationPrefix = config.ApparmorProfileRecordBpfAnnotationKey
 	case ProfileRecorderLogs:
+		return "", "", fmt.Errorf(
+			"invalid recorder: %s, only %s is supported", pr.Spec.Recorder, ProfileRecorderBpf,
+		)
 	default:
 		return "", "", fmt.Errorf(
 			"invalid recorder: %s, only %s is supported", pr.Spec.Recorder, ProfileRecorderBpf,

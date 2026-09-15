@@ -1,7 +1,6 @@
 { pkgs, buildGoModule }:
 with pkgs; buildGoModule rec {
   name = "security-profiles-operator";
-  # Use Pure to avoid exuding the .git directory
   src = nix-gitignore.gitignoreSourcePure [ ../.gitignore ] ./..;
   vendorHash = null;
   doCheck = false;
@@ -16,7 +15,7 @@ with pkgs; buildGoModule rec {
     glibc
     glibc.static
     libapparmor
-    libbpf_1
+    libbpf
     libseccomp
     zlib.static
     (zstd.override { static = true; })

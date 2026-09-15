@@ -6,7 +6,8 @@
 //
 //	// Read reads the contents of a file.
 //	Read: {
-//		$id: "tool/file.Read"
+//		$id: _id
+//		_id: "tool/file.Read"
 //
 //		// filename names the file to read.
 //		//
@@ -22,7 +23,8 @@
 //
 //	// Append writes contents to the given file.
 //	Append: {
-//		$id: "tool/file.Append"
+//		$id: _id
+//		_id: "tool/file.Append"
 //
 //		// filename names the file to append.
 //		//
@@ -39,7 +41,8 @@
 //
 //	// Create writes contents to the given file.
 //	Create: {
-//		$id: "tool/file.Create"
+//		$id: _id
+//		_id: "tool/file.Create"
 //
 //		// filename names the file to write.
 //		//
@@ -54,9 +57,28 @@
 //		contents: bytes | string
 //	}
 //
+//	// Symlink creates a symbolic link.
+//	Symlink: {
+//		$id: _id
+//		_id: "tool/file.Symlink"
+//
+//		// filename defines the name of the symlink.
+//		//
+//		// Relative names are taken relative to the current working directory.
+//		// Slashes are converted to the native OS path separator.
+//		filename: !=""
+//
+//		// target names the target file or directory of the symlink.
+//		//
+//		// Relative names are taken relative to the current working directory.
+//		// Slashes are converted to the native OS path separator.
+//		target: !=""
+//	}
+//
 //	// Glob returns a list of files.
 //	Glob: {
-//		$id: "tool/file.Glob"
+//		$id: _id
+//		_id: "tool/file.Glob"
 //
 //		// glob specifies the pattern to match files with.
 //		//
@@ -68,7 +90,8 @@
 //
 //	// Mkdir creates a directory at the specified path.
 //	Mkdir: {
-//		$id: "tool/file.Mkdir"
+//		$id: _id
+//		_id: "tool/file.Mkdir"
 //
 //		// The directory path to create.
 //		// If path is already a directory, Mkdir does nothing.
@@ -95,7 +118,8 @@
 //	// It is the caller's responsibility to remove the directory when it is no
 //	// longer needed.
 //	MkdirTemp: {
-//		$id: "tool/file.MkdirTemp"
+//		$id: _id
+//		_id: "tool/file.MkdirTemp"
 //
 //		// The temporary directory is created in the directory specified by dir.
 //		// If dir is the empty string, MkdirTemp uses the default directory for
@@ -113,7 +137,8 @@
 //	// RemoveAll removes path and any children it contains.
 //	// It removes everything it can but returns the first error it encounters.
 //	RemoveAll: {
-//		$id: "tool/file.RemoveAll"
+//		$id: _id
+//		_id: "tool/file.RemoveAll"
 //
 //		// The path to remove.
 //		// If the path does not exist, RemoveAll does nothing.
@@ -141,29 +166,40 @@ var p = &pkg.Package{
 	Native: []*pkg.Builtin{},
 	CUE: `{
 	Read: {
-		$id:      "tool/file.Read"
+		$id:      _id
+		_id:      "tool/file.Read"
 		filename: !=""
 		contents: *bytes | string
 	}
 	Append: {
-		$id:         "tool/file.Append"
+		$id:         _id
+		_id:         "tool/file.Append"
 		filename:    !=""
 		permissions: int | *0o666
 		contents:    bytes | string
 	}
 	Create: {
-		$id:         "tool/file.Create"
+		$id:         _id
+		_id:         "tool/file.Create"
 		filename:    !=""
 		permissions: int | *0o666
 		contents:    bytes | string
 	}
+	Symlink: {
+		$id:      _id
+		_id:      "tool/file.Symlink"
+		filename: !=""
+		target:   !=""
+	}
 	Glob: {
-		$id:  "tool/file.Glob"
+		$id:  _id
+		_id:  "tool/file.Glob"
 		glob: !=""
 		files: [...string]
 	}
 	Mkdir: {
-		$id:           "tool/file.Mkdir"
+		$id:           _id
+		_id:           "tool/file.Mkdir"
 		path:          string
 		createParents: bool | *false
 		permissions:   int | *0o777
@@ -172,13 +208,15 @@ var p = &pkg.Package{
 		createParents: true
 	}
 	MkdirTemp: {
-		$id:     "tool/file.MkdirTemp"
+		$id:     _id
+		_id:     "tool/file.MkdirTemp"
 		dir:     string | *""
 		pattern: string | *""
 		path:    string
 	}
 	RemoveAll: {
-		$id:     "tool/file.RemoveAll"
+		$id:     _id
+		_id:     "tool/file.RemoveAll"
 		path:    string
 		success: bool
 	}

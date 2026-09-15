@@ -34,6 +34,9 @@ import (
 	"strings"
 
 	rsafork "github.com/go-piv/piv-go/v2/third_party/rsa"
+	"golang.org/x/crypto/cryptobyte"
+
+	_ "embed"
 )
 
 // errMismatchingAlgorithms is returned when a cryptographic operation
@@ -42,6 +45,13 @@ var errMismatchingAlgorithms = errors.New("mismatching key algorithms")
 
 // errUnsupportedKeySize is returned when a key has an unsupported size
 var errUnsupportedKeySize = errors.New("unsupported key size")
+
+// errTagNotFound is returned by findTLVTag() when the given tag is not found.
+var errTagNotFound = fmt.Errorf("tag not found")
+
+// errMalformedTLV is returned by findTLVTag() when the parser encounters
+// unexpected data.
+var errMalformedTLV = fmt.Errorf("malformed TLV data")
 
 // unsupportedCurveError is used when a key has an unsupported curve
 type unsupportedCurveError struct {
@@ -180,6 +190,10 @@ func (a *Attestation) addExt(e pkix.Extension) error {
 			a.PINPolicy = PINPolicyOnce
 		case 0x03:
 			a.PINPolicy = PINPolicyAlways
+		case 0x04:
+			a.PINPolicy = PINPolicyMatchOnce
+		case 0x05:
+			a.PINPolicy = PINPolicyMatchAlways
 		default:
 			return fmt.Errorf("unrecognized pin policy: 0x%x", e.Value[0])
 		}
@@ -228,15 +242,20 @@ type Verifier struct {
 func (v *Verifier) Verify(attestationCert, slotCert *x509.Certificate) (*Attestation, error) {
 	o := x509.VerifyOptions{KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}}
 	o.Roots = v.Roots
+	var intermediates *x509.CertPool
 	if o.Roots == nil {
-		cas, err := yubicoCAs()
+		cas, in, err := yubicoCAs()
 		if err != nil {
 			return nil, fmt.Errorf("failed to load yubico CAs: %v", err)
 		}
 		o.Roots = cas
+		intermediates = in
 	}
 
-	o.Intermediates = x509.NewCertPool()
+	if intermediates == nil {
+		intermediates = x509.NewCertPool()
+	}
+	o.Intermediates = intermediates
 
 	// The attestation cert in some yubikey 4 does not encode X509v3 Basic Constraints.
 	// This isn't valid as per https://datatracker.ietf.org/doc/html/rfc5280#section-4.2.1.9
@@ -344,21 +363,28 @@ sG/5xUb/Btwb2X2g4InpiB/yt/3CpQXpiWX/K4mBvUKiGn05ZsqeY1gx4g0xLBqc
 U9psmyPzK+Vsgw2jeRQ5JlKDyqE0hebfC1tvFu0CCrJFcw==
 -----END CERTIFICATE-----`
 
-func yubicoCAs() (*x509.CertPool, error) {
+//go:embed certs/yubico-ca-1.pem
+var yubicoAttestationCA2024 []byte
+
+//go:embed certs/yubico-intermediate.pem
+var yubicoIntermediates []byte
+
+func yubicoCAs() (roots, intermediates *x509.CertPool, err error) {
 	certPool := x509.NewCertPool()
+	intermediates = x509.NewCertPool()
 
 	if !certPool.AppendCertsFromPEM([]byte(yubicoPIVCAPEMAfter2018)) {
-		return nil, fmt.Errorf("failed to parse yubico cert")
+		return nil, nil, fmt.Errorf("failed to parse yubico cert")
 	}
 
 	bU2F, _ := pem.Decode([]byte(yubicoPIVCAPEMU2F))
 	if bU2F == nil {
-		return nil, fmt.Errorf("failed to decode yubico pem data")
+		return nil, nil, fmt.Errorf("failed to decode yubico pem data")
 	}
 
 	certU2F, err := x509.ParseCertificate(bU2F.Bytes)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse yubico cert: %v", err)
+		return nil, nil, fmt.Errorf("failed to parse yubico cert: %v", err)
 	}
 
 	// The U2F root cert has pathlen x509 basic constraint set to 0.
@@ -371,7 +397,13 @@ func yubicoCAs() (*x509.CertPool, error) {
 	certU2F.MaxPathLen = 1
 	certPool.AddCert(certU2F)
 
-	return certPool, nil
+	if !certPool.AppendCertsFromPEM(yubicoAttestationCA2024) {
+		return nil, nil, fmt.Errorf("failed to parse yubico attestation certificate")
+	}
+	if !intermediates.AppendCertsFromPEM(yubicoIntermediates) {
+		return nil, nil, fmt.Errorf("failed to parse yubico intermediates certificates")
+	}
+	return certPool, intermediates, nil
 }
 
 // Slot combinations pre-defined by this package.
@@ -465,6 +497,18 @@ const (
 	PINPolicyNever PINPolicy = iota + 1
 	PINPolicyOnce
 	PINPolicyAlways
+	// PINPolicyMatchOnce and PINPolicyMatchAlways require biometric user
+	// verification (YubiKey Bio). The naming convention of these policies aligns
+	// with yubico-piv-tool.
+	//
+	// The library handles biometric verification transparently:
+	//   - MatchOnce: VerifyBiometrics is performed on demand, then the operation
+	//     is retried once.
+	//   - MatchAlways: VerifyBiometrics is performed before every operation.
+	//
+	// See https://docs.yubico.com/yesdk/users-manual/application-piv/pin-touch-policies.html
+	PINPolicyMatchOnce
+	PINPolicyMatchAlways
 )
 
 // TouchPolicy represents proof-of-presence requirements when signing or
@@ -494,15 +538,19 @@ const (
 )
 
 var pinPolicyMap = map[PINPolicy]byte{
-	PINPolicyNever:  0x01,
-	PINPolicyOnce:   0x02,
-	PINPolicyAlways: 0x03,
+	PINPolicyNever:       0x01,
+	PINPolicyOnce:        0x02,
+	PINPolicyAlways:      0x03,
+	PINPolicyMatchOnce:   0x04,
+	PINPolicyMatchAlways: 0x05,
 }
 
 var pinPolicyMapInv = map[byte]PINPolicy{
 	0x01: PINPolicyNever,
 	0x02: PINPolicyOnce,
 	0x03: PINPolicyAlways,
+	0x04: PINPolicyMatchOnce,
+	0x05: PINPolicyMatchAlways,
 }
 
 var touchPolicyMap = map[TouchPolicy]byte{
@@ -725,6 +773,118 @@ func (yk *YubiKey) Certificate(slot Slot) (*x509.Certificate, error) {
 	return cert, nil
 }
 
+// FormFactor returns the physical form factor of the YubiKey.
+func (yk *YubiKey) FormFactor() (Formfactor, error) {
+	if err := ykSelectApplication(yk.tx, aidManagement[:]); err != nil {
+		return 0, fmt.Errorf("selecting management applet: %v", err)
+	}
+	defer ykSelectApplication(yk.tx, aidPIV[:])
+	// INS_READ_CONFIG = 0x1D
+	// https://github.com/Yubico/yubikey-manager/blob/9fe76be2cbf5e9a3b5a9a8d78411949a028b3745/yubikit/management.py#L512
+	cmd := apdu{instruction: 0x1D}
+	resp, err := yk.tx.Transmit(cmd)
+	if err != nil {
+		return 0, fmt.Errorf("reading device info: %v", err)
+	}
+	if len(resp) < 1 {
+		return 0, fmt.Errorf("invalid response length")
+	}
+	payload := resp[1:]
+	// TAG_FORM_FACTOR = 0x04
+	// https://github.com/Yubico/yubikey-manager/blob/9fe76be2cbf5e9a3b5a9a8d78411949a028b3745/yubikit/management.py#L211
+	formFactorData, err := findTLVTag(payload, 0x04)
+	if err != nil {
+		if err == errTagNotFound {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("parsing response: %v", err)
+	}
+	if len(formFactorData) == 0 {
+		return 0, nil
+	}
+	return Formfactor(formFactorData[0]), nil
+}
+
+// findTLVTag searches through TLV (Tag-Length-Value) encoded data for a
+// specific tag and returns its corresponding value.
+//
+// See https://luca.ntop.org/Teaching/Appunti/asn1.html section 3.1 for
+// information on tag and length encoding.
+func findTLVTag(data []byte, targetTag uint32) ([]byte, error) {
+	// Manually parse tags and lengths using cryptobyte primitives instead of
+	// cryptobyte's ReadASN1 methods because:
+	// 1. cryptobyte does not support high-tag-number format (tags > 30), which
+	//    are used in PIV.
+	// 2. cryptobyte enforces strict DER, whereas PIV may use BER (non-minimal
+	//    length encoding).
+	s := cryptobyte.String(data)
+	for !s.Empty() {
+		var tagByte byte
+		if !s.ReadUint8(&tagByte) {
+			return nil, errMalformedTLV
+		}
+		tag := uint32(tagByte)
+		// Handle multi-byte tags: if the lowest 5 bits are 11111,
+		// the tag is multi-byte.
+		if tagByte&0x1F == 0x1F {
+			lastByteFound := false
+			for range 3 {
+				var nextByte byte
+				if !s.ReadUint8(&nextByte) {
+					return nil, errMalformedTLV
+				}
+				tag = (tag << 8) | uint32(nextByte)
+				// The last byte of a multi-byte tag has the highest bit set to 0.
+				if nextByte&0x80 == 0 {
+					lastByteFound = true
+					break
+				}
+			}
+			if !lastByteFound {
+				return nil, errMalformedTLV
+			}
+		}
+		// Read the first length byte.
+		var lengthByte byte
+		if !s.ReadUint8(&lengthByte) {
+			return nil, errMalformedTLV
+		}
+		// Handle long form length.
+		var length uint32
+		if lengthByte < 0x80 {
+			// Lengths < 128 are encoded in a single byte.
+			length = uint32(lengthByte)
+		} else if lengthByte == 0x80 {
+			// Indefinite length not supported.
+			return nil, errMalformedTLV
+		} else {
+			// Lengths >= 128 have the high bit set. The lower 7 bits indicate
+			// the number of subsequent bytes that make up the length.
+			numBytes := uint32(lengthByte & 0x7F)
+			if numBytes > 3 {
+				return nil, errMalformedTLV
+			}
+			for range numBytes {
+				var b byte
+				if !s.ReadUint8(&b) {
+					return nil, errMalformedTLV
+				}
+				length = (length << 8) | uint32(b)
+			}
+		}
+		// Finally read the value.
+		var value []byte
+		if !s.ReadBytes(&value, int(length)) {
+			return nil, errMalformedTLV
+		}
+		// Return if we found the target tag, otherwise loop to the next element.
+		if tag == targetTag {
+			return value, nil
+		}
+	}
+	return nil, errTagNotFound
+}
+
 // marshalASN1Length encodes the length.
 func marshalASN1Length(n uint64) []byte {
 	var l []byte
@@ -911,6 +1071,11 @@ func (k KeyAuth) authTx(yk *YubiKey, pp PINPolicy) error {
 		return nil
 	}
 
+	// Match policies use biometric verification (not PIN) and are handled in do().
+	if pp == PINPolicyMatchOnce || pp == PINPolicyMatchAlways {
+		return nil
+	}
+
 	// PINPolicyAlways should always prompt a PIN even if the key says that
 	// login isn't needed.
 	// https://github.com/go-piv/piv-go/issues/49
@@ -933,6 +1098,33 @@ func (k KeyAuth) authTx(yk *YubiKey, pp PINPolicy) error {
 }
 
 func (k KeyAuth) do(yk *YubiKey, pp PINPolicy, f func(tx *scTx) ([]byte, error)) ([]byte, error) {
+	const swSecurityStatusNotSatisfied = 0x6982
+
+	if pp == PINPolicyMatchAlways {
+		if err := yk.VerifyBiometrics(); err != nil {
+			return nil, err
+		}
+		return f(yk.tx)
+	}
+
+	if pp == PINPolicyMatchOnce {
+		if err := k.authTx(yk, pp); err != nil {
+			return nil, err
+		}
+		resp, err := f(yk.tx)
+		if err == nil {
+			return resp, nil
+		}
+		var apdu *apduErr
+		if errors.As(err, &apdu) && apdu.Status() == swSecurityStatusNotSatisfied {
+			if err := yk.VerifyBiometrics(); err != nil {
+				return nil, err
+			}
+			return f(yk.tx)
+		}
+		return nil, err
+	}
+
 	if err := k.authTx(yk, pp); err != nil {
 		return nil, err
 	}

@@ -23,6 +23,7 @@ import (
 // ProfileState defines the state that the profile is in. A profile in this context
 // refers to a SeccompProfile or a SELinux profile, the states are shared between them
 // as well as the management API.
+// +kubebuilder:validation:Enum=Partial;Disabled;Pending;InProgress;Installed;Terminating;Error
 type ProfileState string
 
 const (
@@ -84,20 +85,38 @@ func LowerOfTwoStates(currentLowest, candidate ProfileState) ProfileState {
 
 // SecurityProfileNodeStatus is a per-node status of a security profile
 // +kubebuilder:resource:shortName=spns,scope=Cluster
-// +kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.status`
+// +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.status.status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
-// +kubebuilder:printcolumn:name="Node",type=string,priority=10,JSONPath=`.nodeName`
+// +kubebuilder:printcolumn:name="Node",type=string,priority=10,JSONPath=`.spec.nodeName`
 type SecurityProfileNodeStatus struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+	// metadata contains the object metadata.
+	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec SecurityProfileNodeStatusSpec `json:"spec,omitempty"`
-
-	NodeName string       `json:"nodeName"`
-	Status   ProfileState `json:"status,omitempty"`
+	// spec defines the desired state of the SecurityProfileNodeStatus.
+	// +required
+	Spec SecurityProfileNodeStatusSpec `json:"spec,omitzero"`
+	// status contains the observed state of the SecurityProfileNodeStatus.
+	// +optional
+	Status SecurityProfileNodeStatusStatus `json:"status,omitempty"`
 }
 
-type SecurityProfileNodeStatusSpec struct{}
+// SecurityProfileNodeStatusSpec defines the desired state of SecurityProfileNodeStatus.
+type SecurityProfileNodeStatusSpec struct {
+	// nodeName is the name of the node on which the profile is installed.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	NodeName string `json:"nodeName,omitempty"`
+}
+
+// SecurityProfileNodeStatusStatus defines the observed state of SecurityProfileNodeStatus.
+type SecurityProfileNodeStatusStatus struct {
+	// status is the installation status of the profile on this node.
+	// +optional
+	Status ProfileState `json:"status,omitempty"`
+}
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 

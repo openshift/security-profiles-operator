@@ -40,10 +40,10 @@ import (
 )
 
 const (
-	kindVersion      = "v0.27.0"
-	kindImage        = "kindest/node:v1.32.2@sha256:f226345927d7e348497136874b6d207e0b32cc52154ad8323129352923a3142f"
-	kindDarwinSHA512 = "ccd2413c2293a80f4944937a0855fc800e5fe1ad41baea0b528ed390cdce473f076c1c0fd61f0d24adec87589878ab136377cd4a546c19a349bf140ecd7df5a3" //nolint:lll // full length SHA
-	kindLinuxSHA512  = "7b744426a5a8cb9908eda1cc9af3308deb0318cc589a7fc864f4717815839644e31b24b351ee46d14422d990b9eb3ab10a25063c97a76973534d6d112631000c" //nolint:lll // full length SHA
+	kindVersion      = "v0.30.0"
+	kindImage        = "kindest/node:v1.34.0@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a"
+	kindDarwinSHA512 = "437aab801fe8f4f75ec36b40c4963a554898d0498261ac440713cc0faea63f577fe009df0c6f55ca46c0572bf8fa23e4d0c55297a39549302557d15b4ae6f59f" //nolint:lll // full length SHA
+	kindLinuxSHA512  = "ac4bf7294522d48c5f573d938981d392f66e6e8a868dcbbcb82bb9217fe6a16d005d7b0556353a2d0e498f0ec49d1d80505de9a954f2c10781b4aba216e02cf6" //nolint:lll // full length SHA
 )
 
 var (
@@ -338,7 +338,7 @@ func (e *kinde2e) SetupSuite() {
 
 	e.kubectlPath, err = exec.LookPath("kubectl")
 	e.updateManifest(e.operatorManifest, "value: .*quay.io/.*/selinuxd.*", "value: "+e.selinuxdImage)
-	e.NoError(err)
+	e.Require().NoError(err)
 }
 
 // SetupTest starts a fresh kind cluster for each test.
@@ -532,7 +532,7 @@ func (e *vanilla) SetupSuite() {
 	e.deployCertManager = e.deployCertManagerVanilla
 	e.setupRecordingSa = e.deployRecordingSa
 	e.updateManifest(e.operatorManifest, "value: .*quay.io/.*/selinuxd.*", "value: "+e.selinuxdImage)
-	e.NoError(err)
+	e.Require().NoError(err)
 }
 
 func (e *vanilla) SetupTest() {
@@ -606,7 +606,7 @@ func (e *e2e) breakPoint() { //nolint:unused // used on demand
 
 func (e *e2e) run(cmd string, args ...string) string {
 	output, err := e.runCommand(cmd, args...)
-	e.NoError(err)
+	e.Require().NoError(err)
 
 	return output
 }
@@ -738,11 +738,13 @@ func (e *e2e) runAndRetryPodCMD(podCMD string) string {
 		if len(strings.Split(output, "\n")) > 1 {
 			return nil
 		}
+
 		output = ""
 
 		return errors.New("no output from pod command")
 	}, func(err error) bool {
 		e.logf("retry on error: %s", err)
+
 		if maxTries < 3 {
 			maxTries++
 
@@ -775,7 +777,7 @@ func (e *e2e) waitInOperatorNSFor(args ...string) {
 	)
 }
 
-func (e *e2e) logf(format string, a ...interface{}) {
+func (e *e2e) logf(format string, a ...any) {
 	e.logger.Info(fmt.Sprintf(format, a...))
 }
 
@@ -791,9 +793,9 @@ func (e *e2e) enableSelinuxInSpod() {
 	selinuxEnabledInSPODDS := e.kubectlOperatorNS("get", "ds", "spod", "-o", "yaml")
 	if !strings.Contains(selinuxEnabledInSPODDS, "--with-selinux=true") {
 		e.logf("Enable selinux in SPOD")
-		e.kubectlOperatorNS("patch", "spod", "spod", "-p", `{"spec":{"enableSelinux": true}}`, "--type=merge")
+		e.kubectlOperatorNS("patch", "spod", "spod", "-p", `{"spec":{"selinux":{"enable": true}}}`, "--type=merge")
 		e.kubectlOperatorNS("patch", "spod", "spod", "-p",
-			`{"spec":{"selinuxOptions":{"allowedSystemProfiles":["container","net_container"]}}}`,
+			`{"spec":{"selinux":{"options":{"allowedSystemProfiles":["container","net_container"]}}}}`,
 			"--type=merge")
 
 		time.Sleep(defaultWaitTime)
@@ -847,13 +849,13 @@ func (e *e2e) jsonEnricherOnlyTestCaseFileOptions(jsonLogFileName string,
 
 func (e *e2e) enableLogEnricherBpfInSpod() {
 	e.kubectlOperatorNS("patch", "spod", "spod", "-p",
-		`{"spec":{"logEnricherSource": "bpf"}}`, "--type=merge")
+		`{"spec":{"enricher":{"logEnricherSource": "Bpf"}}}`, "--type=merge")
 }
 
 func (e *e2e) enableLogEnricherInSpod() {
 	e.logf("Enable log-enricher in SPOD")
 	e.kubectlOperatorNS("patch", "spod", "spod", "-p",
-		`{"spec":{"enableJsonEnricher": false,"enableLogEnricher": true}}`, "--type=merge")
+		`{"spec":{"enricher":{"enableJsonEnricher": false,"enableLogEnricher": true}}}`, "--type=merge")
 
 	time.Sleep(defaultWaitTime)
 	e.waitInOperatorNSFor("condition=ready", "spod", "spod")
@@ -874,8 +876,8 @@ func (e *e2e) enableLogEnricherInSpod() {
 func (e *e2e) enableLogEnricherInSpodWithFilters(enricherFilterJsonStr string) {
 	e.logf("Enable log-enricher in SPOD")
 	e.kubectlOperatorNS("patch", "spod", "spod", "-p",
-		"{\"spec\":{\"enableJsonEnricher\": false,\"enableLogEnricher\": true"+
-			",\"logEnricherFilters\":"+enricherFilterJsonStr+"}}", "--type=merge")
+		"{\"spec\":{\"enricher\":{\"enableJsonEnricher\": false,\"enableLogEnricher\": true"+
+			",\"logEnricherFilters\":"+enricherFilterJsonStr+"}}}", "--type=merge")
 
 	time.Sleep(defaultWaitTime)
 	e.waitInOperatorNSFor("condition=ready", "spod", "spod")
@@ -886,8 +888,8 @@ func (e *e2e) enableLogEnricherInSpodWithFilters(enricherFilterJsonStr string) {
 func (e *e2e) enableJsonEnricherInSpod() {
 	e.logf("Enable json-enricher in SPOD with 20 second flush interval")
 	e.kubectlOperatorNS("patch", "spod", "spod", "-p",
-		`{"spec":{"enableLogEnricher": false, "enableJsonEnricher": true,
-		"jsonEnricherOptions":{"auditLogIntervalSeconds":20}}}`, "--type=merge")
+		`{"spec":{"enricher":{"enableLogEnricher": false, "enableJsonEnricher": true,
+		"jsonEnricherOptions":{"auditLogIntervalSeconds":20}}}}`, "--type=merge")
 
 	time.Sleep(defaultWaitTime)
 	e.waitInOperatorNSFor("condition=ready", "spod", "spod")
@@ -967,8 +969,8 @@ func (e *e2e) enableJsonEnricherInSpodFileOptions(logPath, enricherFilterJsonStr
 	_ = os.Remove(patchOperatorJson)
 
 	e.kubectlOperatorNS("patch", "spod", "spod", "-p",
-		fmt.Sprintf(`{"spec":{"enableLogEnricher": false,"enableJsonEnricher": true,
-		"jsonEnricherOptions":{"auditLogIntervalSeconds":20,"auditLogPath": "%s"},"jsonEnricherFilters": "%s"}}`,
+		fmt.Sprintf(`{"spec":{"enricher":{"enableLogEnricher": false,"enableJsonEnricher": true,
+		"jsonEnricherOptions":{"auditLogIntervalSeconds":20,"auditLogPath": "%s"},"jsonEnricherFilters": "%s"}}}`,
 			logPath, enricherFilterJsonStr), "--type=merge")
 
 	e.logf("Patched the SPOD")
@@ -1001,7 +1003,7 @@ func (e *e2e) singleNodeTestCase() {
 
 func (e *e2e) enableBpfRecorderInSpod() {
 	e.logf("Enable bpf recorder in SPOD")
-	e.kubectlOperatorNS("patch", "spod", "spod", "-p", `{"spec":{"enableBpfRecorder": true}}`, "--type=merge")
+	e.kubectlOperatorNS("patch", "spod", "spod", "-p", `{"spec":{"enricher":{"enableBpfRecorder": true}}}`, "--type=merge")
 
 	time.Sleep(defaultWaitTime)
 	e.waitInOperatorNSFor("condition=ready", "spod", "spod")
@@ -1152,8 +1154,8 @@ func (e *e2e) getPodNamesByLabel(labelMatcher string) []string {
 
 	var filteredPodNames []string
 
-	podNames := strings.Split(output, "\n")
-	for _, name := range podNames {
+	podNames := strings.SplitSeq(output, "\n")
+	for name := range podNames {
 		trimmedName := strings.Trim(name, "'")
 		if trimmedName != "" {
 			filteredPodNames = append(filteredPodNames, trimmedName)

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -31,16 +32,18 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/scheme"
 
-	seccompprofileapi "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1beta1"
-	spodv1alpha1 "sigs.k8s.io/security-profiles-operator/api/spod/v1alpha1"
+	seccompprofileapi "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1"
+	spodapi "sigs.k8s.io/security-profiles-operator/api/spod/v1"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/config"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/controller"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/manager/spod/bindata"
@@ -51,8 +54,9 @@ const (
 	// default reconcile timeout.
 	reconcileTimeout = 1 * time.Minute
 
-	reasonCannotCreateSPOD string = "CannotCreateSPOD"
-	reasonCannotUpdateSPOD string = "CannotUpdateSPOD"
+	reasonCannotCreateSPOD           string = "CannotCreateSPOD"
+	reasonCannotUpdateSPOD           string = "CannotUpdateSPOD"
+	reasonCannotMountCustomTemplates string = "CannotMountCustomTemplates"
 
 	appArmorAnnotation = "container.seccomp.security.alpha.kubernetes.io/security-profiles-operator"
 )
@@ -88,7 +92,7 @@ func (r *ReconcileSPOd) Name() string {
 
 // SchemeBuilder returns the API scheme of the controller.
 func (r *ReconcileSPOd) SchemeBuilder() *scheme.Builder {
-	return spodv1alpha1.SchemeBuilder
+	return spodapi.SchemeBuilder
 }
 
 // Healthz is the liveness probe endpoint of the controller.
@@ -107,6 +111,7 @@ func (r *ReconcileSPOd) Healthz(*http.Request) error {
 // +kubebuilder:rbac:groups=apps,resources=deployments;daemonsets,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments;daemonsets/finalizers,verbs=delete;get;update;patch
 // +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=mutatingwebhookconfigurations,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingwebhookconfigurations,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=cert-manager.io,resources=issuers;certificates,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=security-profiles-operator.x-k8s.io,resources=securityprofilesoperatordaemons,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups=security-profiles-operator.x-k8s.io,resources=securityprofilesoperatordaemons/status,verbs=get;update;patch
@@ -139,7 +144,7 @@ func (r *ReconcileSPOd) Reconcile(ctx context.Context, req reconcile.Request) (r
 
 	logger := r.log.WithValues("profile", req.Name, "namespace", req.Namespace)
 	// Fetch the ConfigMap instance
-	spod := &spodv1alpha1.SecurityProfilesOperatorDaemon{}
+	spod := &spodapi.SecurityProfilesOperatorDaemon{}
 	if err := r.client.Get(ctx, req.NamespacedName, spod); err != nil {
 		if errors.IsNotFound(err) {
 			return reconcile.Result{}, nil
@@ -180,10 +185,15 @@ func (r *ReconcileSPOd) Reconcile(ctx context.Context, req reconcile.Request) (r
 		return reconcile.Result{}, fmt.Errorf("get ca inject type: %w", err)
 	}
 
-	configuredSPOd := r.getConfiguredSPOd(spod, image, pullPolicy, caInjectType)
+	configuredSPOd, err := r.getConfiguredSPOd(ctx, spod, image, pullPolicy, caInjectType)
+	if err != nil {
+		return reconcile.Result{}, fmt.Errorf("get configured SPOD: %w", err)
+	}
+
 	webhook := r.getConfiguredWebook(spod, image, pullPolicy, caInjectType)
 	metricsService := bindata.GetMetricsService(r.namespace, caInjectType)
-	serviceMonitor := bindata.ServiceMonitor(caInjectType)
+	serviceMonitor := bindata.ServiceMonitor(caInjectType,
+		ptr.Deref(spod.Spec.EnableInsecureMetricsAccess, false))
 
 	var certManagerResources *bindata.CertManagerResources
 	if caInjectType == bindata.CAInjectTypeCertManager {
@@ -211,7 +221,7 @@ func (r *ReconcileSPOd) Reconcile(ctx context.Context, req reconcile.Request) (r
 	spodUpdate := spodNeedsUpdate(configuredSPOd, foundSPOd)
 
 	var hookUpdate bool
-	if !spod.Spec.StaticWebhookConfig {
+	if !ptr.Deref(spod.Spec.Webhook.StaticConfig, false) {
 		hookUpdate, err = webhook.NeedsUpdate(ctx, r.client)
 		if err != nil {
 			return reconcile.Result{}, fmt.Errorf("determining if webhook needs update: %w", err)
@@ -239,7 +249,7 @@ func (r *ReconcileSPOd) Reconcile(ctx context.Context, req reconcile.Request) (r
 	if foundSPOd.Status.NumberReady == foundSPOd.Status.DesiredNumberScheduled {
 		condready := spod.Status.GetReadyCondition()
 		// Don't pollute the logs. Let's only update when needed.
-		if condready.Status != corev1.ConditionTrue {
+		if condready.Status != metav1.ConditionTrue {
 			return reconcile.Result{}, r.handleRunningStatus(ctx, spod, logger)
 		}
 	}
@@ -249,7 +259,7 @@ func (r *ReconcileSPOd) Reconcile(ctx context.Context, req reconcile.Request) (r
 
 func (r *ReconcileSPOd) handleInitialStatus(
 	ctx context.Context,
-	spod *spodv1alpha1.SecurityProfilesOperatorDaemon,
+	spod *spodapi.SecurityProfilesOperatorDaemon,
 	l logr.Logger,
 ) (err error) {
 	l.Info("Adding an initial status to the SPOD instance")
@@ -267,7 +277,7 @@ func (r *ReconcileSPOd) handleInitialStatus(
 
 func (r *ReconcileSPOd) handleCreatingStatus(
 	ctx context.Context,
-	spod *spodv1alpha1.SecurityProfilesOperatorDaemon,
+	spod *spodapi.SecurityProfilesOperatorDaemon,
 	l logr.Logger,
 ) (err error) {
 	l.Info("Adding 'Creating' status to the SPOD instance")
@@ -285,7 +295,7 @@ func (r *ReconcileSPOd) handleCreatingStatus(
 
 func (r *ReconcileSPOd) handleUpdatingStatus(
 	ctx context.Context,
-	spod *spodv1alpha1.SecurityProfilesOperatorDaemon,
+	spod *spodapi.SecurityProfilesOperatorDaemon,
 	l logr.Logger,
 ) (err error) {
 	l.Info("Adding 'Updating' status to the SPOD instance")
@@ -302,9 +312,9 @@ func (r *ReconcileSPOd) handleUpdatingStatus(
 }
 
 func (r *ReconcileSPOd) defaultProfiles(
-	cfg *spodv1alpha1.SecurityProfilesOperatorDaemon,
+	cfg *spodapi.SecurityProfilesOperatorDaemon,
 ) (defaultProfiles []*seccompprofileapi.SeccompProfile) {
-	if cfg.Spec.EnableLogEnricher {
+	if ptr.Deref(cfg.Spec.Enricher.EnableLogEnricher, false) {
 		defaultProfiles = append(defaultProfiles, bindata.DefaultLogEnricherProfile())
 	}
 
@@ -313,7 +323,7 @@ func (r *ReconcileSPOd) defaultProfiles(
 
 func (r *ReconcileSPOd) handleRunningStatus(
 	ctx context.Context,
-	spod *spodv1alpha1.SecurityProfilesOperatorDaemon,
+	spod *spodapi.SecurityProfilesOperatorDaemon,
 	l logr.Logger,
 ) (err error) {
 	l.Info("Adding 'Running' status to the SPOD instance")
@@ -331,7 +341,7 @@ func (r *ReconcileSPOd) handleRunningStatus(
 
 func (r *ReconcileSPOd) handleCreate(
 	ctx context.Context,
-	cfg *spodv1alpha1.SecurityProfilesOperatorDaemon,
+	cfg *spodapi.SecurityProfilesOperatorDaemon,
 	newSPOd *appsv1.DaemonSet,
 	webhook *bindata.Webhook,
 	metricsService *corev1.Service,
@@ -346,7 +356,7 @@ func (r *ReconcileSPOd) handleCreate(
 		}
 	}
 
-	if !cfg.Spec.StaticWebhookConfig {
+	if !ptr.Deref(cfg.Spec.Webhook.StaticConfig, false) {
 		r.log.Info("Deploying operator webhook")
 
 		if err := webhook.Create(ctx, r.client); err != nil {
@@ -417,7 +427,7 @@ func (r *ReconcileSPOd) handleCreate(
 
 func (r *ReconcileSPOd) handleUpdate(
 	ctx context.Context,
-	cfg *spodv1alpha1.SecurityProfilesOperatorDaemon,
+	cfg *spodapi.SecurityProfilesOperatorDaemon,
 	spodInstance *appsv1.DaemonSet,
 	webhook *bindata.Webhook,
 	metricsService *corev1.Service,
@@ -432,7 +442,7 @@ func (r *ReconcileSPOd) handleUpdate(
 		}
 	}
 
-	if !cfg.Spec.StaticWebhookConfig {
+	if !ptr.Deref(cfg.Spec.Webhook.StaticConfig, false) {
 		r.log.Info("Updating operator webhook")
 
 		if err := webhook.Update(ctx, r.client); err != nil {
@@ -511,12 +521,15 @@ func (r *ReconcileSPOd) handleUpdate(
 
 // getConfiguredSPOd gets a fully configured SPOd instance from a desired
 // configuration and the reference base SPOd.
+//
+//nolint:gocognit,gocyclo // large function with many config branches
 func (r *ReconcileSPOd) getConfiguredSPOd(
-	cfg *spodv1alpha1.SecurityProfilesOperatorDaemon,
+	ctx context.Context,
+	cfg *spodapi.SecurityProfilesOperatorDaemon,
 	image string,
 	pullPolicy corev1.PullPolicy,
 	caInjectType bindata.CAInjectType,
-) *appsv1.DaemonSet {
+) (*appsv1.DaemonSet, error) {
 	newSPOd := r.baseSPOd.DeepCopy()
 
 	newSPOd.SetName(cfg.GetName())
@@ -552,9 +565,9 @@ func (r *ReconcileSPOd) getConfiguredSPOd(
 	}
 
 	// SELinux parameters
-	enableSelinux := (cfg.Spec.EnableSelinux != nil && *cfg.Spec.EnableSelinux) ||
+	enableSelinux := (cfg.Spec.Selinux.Enable != nil && *cfg.Spec.Selinux.Enable) ||
 		// enable SELinux support per default in OpenShift
-		(cfg.Spec.EnableSelinux == nil && caInjectType == bindata.CAInjectTypeOpenShift)
+		(cfg.Spec.Selinux.Enable == nil && caInjectType == bindata.CAInjectTypeOpenShift)
 
 	if enableSelinux {
 		templateSpec.InitContainers = append(
@@ -564,9 +577,30 @@ func (r *ReconcileSPOd) getConfiguredSPOd(
 			templateSpec.Containers,
 			r.baseSPOd.Spec.Template.Spec.Containers[bindata.ContainerIDSelinuxd])
 
+		templateSpec.Containers[bindata.ContainerIDDaemon].VolumeMounts = append(
+			templateSpec.Containers[bindata.ContainerIDDaemon].VolumeMounts,
+			corev1.VolumeMount{
+				Name:      "host-varlibselinux-volume",
+				MountPath: bindata.SelinuxModuleStorePath,
+				ReadOnly:  true,
+			})
+
 		templateSpec.Containers[bindata.ContainerIDDaemon].Args = append(
 			templateSpec.Containers[bindata.ContainerIDDaemon].Args,
 			"--with-selinux=true")
+
+		enableRawSelinux := ptr.Deref(cfg.Spec.Selinux.EnableRawSelinuxProfiles, true)
+		templateSpec.Containers[bindata.ContainerIDDaemon].Args = append(
+			templateSpec.Containers[bindata.ContainerIDDaemon].Args,
+			fmt.Sprintf("--with-raw-selinux=%t", enableRawSelinux))
+
+		if err := addSelinuxCustomTemplatesVolume(cfg, templateSpec); err != nil {
+			r.record.Event(cfg, util.EventTypeWarning, reasonCannotMountCustomTemplates, err.Error())
+
+			return nil, fmt.Errorf("unable to mount custom SELinux templates: %w", err)
+		}
+	} else if cfg.Spec.Selinux.CustomTemplatesConfigMap != "" {
+		r.log.Info("customTemplatesConfigMap is set but SELinux is disabled, the field will be ignored")
 	}
 
 	// Custom host proc volume
@@ -622,7 +656,7 @@ func (r *ReconcileSPOd) getConfiguredSPOd(
 		addEnvVar(templateSpec, config.EnableBpfRecorderEnvKey)
 
 		// Configure the apparmor profile for bpf-recorder when apparmor is enabled.
-		if cfg.Spec.EnableAppArmor {
+		if ptr.Deref(cfg.Spec.EnableAppArmor, false) {
 			localApparmorProfile := config.BpfRecorderApparmorProfileName
 			ctr.SecurityContext.AppArmorProfile = &corev1.AppArmorProfile{
 				Type:             corev1.AppArmorProfileTypeLocalhost,
@@ -639,6 +673,46 @@ func (r *ReconcileSPOd) getConfiguredSPOd(
 			ctr.VolumeMounts = append(ctr.VolumeMounts, mount)
 		}
 
+		// Dynamically read the json-enricher log volume configuration from the ConfigMap
+		// during each reconciliation to handle ConfigMap updates without requiring operator restart
+		jsonEnricherLogVolumeSource, jsonEnricherLogVolumeMountPath, err := r.getJsonEnricherVolume(ctx)
+		if err == nil && jsonEnricherLogVolumeSource != nil {
+			logVolume, logMount := bindata.CustomLogVolume(jsonEnricherLogVolumeMountPath, jsonEnricherLogVolumeSource)
+			// Replace existing volume or append if not found.
+			// Using replace (not skip) so that ConfigMap changes to the volume source
+			// or mount path are applied even when baseSPOd already has an older version.
+			volumeReplaced := false
+
+			for i := range templateSpec.Volumes {
+				if templateSpec.Volumes[i].Name == logVolume.Name {
+					templateSpec.Volumes[i] = logVolume
+					volumeReplaced = true
+
+					break
+				}
+			}
+
+			if !volumeReplaced {
+				templateSpec.Volumes = append(templateSpec.Volumes, logVolume)
+			}
+
+			// Replace existing mount or append if not found.
+			mountReplaced := false
+
+			for i, m := range ctr.VolumeMounts {
+				if m.Name == logMount.Name {
+					ctr.VolumeMounts[i] = logMount
+					mountReplaced = true
+
+					break
+				}
+			}
+
+			if !mountReplaced {
+				ctr.VolumeMounts = append(ctr.VolumeMounts, logMount)
+			}
+		}
+
 		templateSpec.Containers = append(templateSpec.Containers, ctr)
 		// pass the json enricher env var to the daemon as the profile recorder is otherwise disabled
 		addEnvVar(templateSpec, config.EnableJsonEnricherEnvKey)
@@ -647,7 +721,7 @@ func (r *ReconcileSPOd) getConfiguredSPOd(
 	}
 
 	// AppArmor parameters
-	if cfg.Spec.EnableAppArmor {
+	if ptr.Deref(cfg.Spec.EnableAppArmor, false) {
 		falsely, truly := false, true
 
 		var userRoot int64
@@ -695,10 +769,16 @@ func (r *ReconcileSPOd) getConfiguredSPOd(
 	}
 
 	// Enable memory optimization for spod controller
-	if cfg.Spec.EnableMemoryOptimization {
+	if ptr.Deref(cfg.Spec.EnableMemoryOptimization, false) {
 		templateSpec.Containers[bindata.ContainerIDDaemon].Args = append(
 			templateSpec.Containers[bindata.ContainerIDDaemon].Args,
 			"--with-mem-optim=true")
+	}
+
+	if isInsecureMetricsEnabled(cfg) {
+		templateSpec.Containers[bindata.ContainerIDDaemon].Args = append(
+			templateSpec.Containers[bindata.ContainerIDDaemon].Args,
+			"--with-insecure-metrics-access=true")
 	}
 
 	for i := range templateSpec.InitContainers {
@@ -713,8 +793,8 @@ func (r *ReconcileSPOd) getConfiguredSPOd(
 		// SELinux can be active on the node regardless if the SELinux feature is enabled or not in the operator.
 		// For instance, on Flatcar Linux SELinux type tag needs to be set to 'unconfined_t' instead of 'spc_t'
 		// even though SELinux is disabled in order to get the containers to start.
-		if !cfg.Spec.EnableAppArmor {
-			configureSeLinuxTag(templateSpec.InitContainers[i].SecurityContext, cfg.Spec.SelinuxTypeTag)
+		if !ptr.Deref(cfg.Spec.EnableAppArmor, false) {
+			configureSeLinuxTag(templateSpec.InitContainers[i].SecurityContext, cfg.Spec.Selinux.TypeTag)
 		}
 	}
 
@@ -726,7 +806,7 @@ func (r *ReconcileSPOd) getConfiguredSPOd(
 		templateSpec.Containers[i].Env = append(templateSpec.Containers[i].Env, verbosityEnv(cfg.Spec.Verbosity))
 
 		// Enable profiling if requested
-		if cfg.Spec.EnableProfiling {
+		if ptr.Deref(cfg.Spec.EnableProfiling, false) {
 			enableContainerProfiling(templateSpec, i)
 		}
 		// Update the SELinux type tag only when AppArmor is not enabled this is to prevent a crash.
@@ -734,94 +814,96 @@ func (r *ReconcileSPOd) getConfiguredSPOd(
 		// SELinux can be active on the node regardless if the SELinux feature is enabled or not in the operator.
 		// For instance, on Flatcar Linux SELinux type tag needs to be set to 'unconfined_t' instead of 'spc_t'
 		// even though SELinux is disabled in order to get the containers to start.
-		if !cfg.Spec.EnableAppArmor {
-			configureSeLinuxTag(templateSpec.Containers[i].SecurityContext, cfg.Spec.SelinuxTypeTag)
+		if !ptr.Deref(cfg.Spec.EnableAppArmor, false) {
+			configureSeLinuxTag(templateSpec.Containers[i].SecurityContext, cfg.Spec.Selinux.TypeTag)
 		}
 	}
 
-	templateSpec.Tolerations = cfg.Spec.Tolerations
-	templateSpec.Affinity = cfg.Spec.Affinity
+	templateSpec.Tolerations = cfg.Spec.Scheduling.Tolerations
+	templateSpec.Affinity = cfg.Spec.Scheduling.Affinity
 	templateSpec.ImagePullSecrets = cfg.Spec.ImagePullSecrets
-	templateSpec.PriorityClassName = cfg.Spec.PriorityClassName
+	templateSpec.PriorityClassName = cfg.Spec.Scheduling.PriorityClassName
 
-	return newSPOd
+	return newSPOd, nil
 }
 
-func (r *ReconcileSPOd) getConfiguredLogEnricher(cfg *spodv1alpha1.SecurityProfilesOperatorDaemon) {
-	if cfg.Spec.LogEnricherFilters != "" {
+func (r *ReconcileSPOd) getConfiguredLogEnricher(cfg *spodapi.SecurityProfilesOperatorDaemon) {
+	if cfg.Spec.Enricher.LogEnricherFilters != "" {
 		r.log.Info("Setting LogEnricherFilters",
-			"LogEnricherFilters", cfg.Spec.LogEnricherFilters)
+			"LogEnricherFilters", cfg.Spec.Enricher.LogEnricherFilters)
 
 		r.baseSPOd.Spec.Template.Spec.Containers[bindata.ContainerIDLogEnricher].Args = addArgsConfig(
 			r.baseSPOd.Spec.Template.Spec.Containers[bindata.ContainerIDLogEnricher].Args,
-			"--enricher-filters-json="+cfg.Spec.LogEnricherFilters,
+			"--enricher-filters-json="+cfg.Spec.Enricher.LogEnricherFilters,
 		)
 	}
 
-	if cfg.Spec.LogEnricherSource != "" {
-		r.log.Info("Setting LogEnricherSource", "LogEnricherSource", cfg.Spec.LogEnricherSource)
+	if cfg.Spec.Enricher.LogEnricherSource != "" {
+		r.log.Info("Setting LogEnricherSource", "LogEnricherSource", cfg.Spec.Enricher.LogEnricherSource)
 
 		r.baseSPOd.Spec.Template.Spec.Containers[bindata.ContainerIDLogEnricher].Args = addArgsConfig(
 			r.baseSPOd.Spec.Template.Spec.Containers[bindata.ContainerIDLogEnricher].Args,
-			"--enricher-log-source="+cfg.Spec.LogEnricherSource,
+			"--enricher-log-source="+string(cfg.Spec.Enricher.LogEnricherSource),
 		)
 	}
 }
 
-func (r *ReconcileSPOd) getConfiguredJsonEnricher(cfg *spodv1alpha1.SecurityProfilesOperatorDaemon) {
-	if cfg.Spec.JsonEnricherFilters != "" {
+func (r *ReconcileSPOd) getConfiguredJsonEnricher(cfg *spodapi.SecurityProfilesOperatorDaemon) {
+	if cfg.Spec.Enricher.JsonEnricherFilters != "" {
 		r.log.Info("Setting LogEnricherFilters",
-			"JsonEnricherFilters", cfg.Spec.JsonEnricherFilters)
+			"JsonEnricherFilters", cfg.Spec.Enricher.JsonEnricherFilters)
 
 		r.baseSPOd.Spec.Template.Spec.Containers[bindata.ContainerIDJsonEnricher].Args = addArgsConfig(
 			r.baseSPOd.Spec.Template.Spec.Containers[bindata.ContainerIDJsonEnricher].Args,
-			"--enricher-filters-json="+cfg.Spec.JsonEnricherFilters,
+			"--enricher-filters-json="+cfg.Spec.Enricher.JsonEnricherFilters,
 		)
 	}
 
-	if cfg.Spec.JsonEnricherOpt != nil {
+	if cfg.Spec.Enricher.JsonEnricherOptions != nil {
 		r.log.Info("Setting JsonEnricherOpt",
-			"AuditLogIntervalSeconds", cfg.Spec.JsonEnricherOpt.AuditLogIntervalSeconds,
-			"AuditLogPath", cfg.Spec.JsonEnricherOpt.AuditLogPath,
-			"AuditLogMaxAge", cfg.Spec.JsonEnricherOpt.AuditLogMaxAge,
-			"AuditLogMaxSize", cfg.Spec.JsonEnricherOpt.AuditLogMaxSize,
-			"AuditLogMaxBackups", cfg.Spec.JsonEnricherOpt.AuditLogMaxBackups,
+			"AuditLogIntervalSeconds", cfg.Spec.Enricher.JsonEnricherOptions.AuditLogIntervalSeconds,
+			"AuditLogPath", cfg.Spec.Enricher.JsonEnricherOptions.AuditLogPath,
+			"AuditLogMaxAge", cfg.Spec.Enricher.JsonEnricherOptions.AuditLogMaxAge,
+			"AuditLogMaxSize", cfg.Spec.Enricher.JsonEnricherOptions.AuditLogMaxSize,
+			"AuditLogMaxBackups", cfg.Spec.Enricher.JsonEnricherOptions.AuditLogMaxBackups,
 		)
 
-		r.baseSPOd.Spec.Template.Spec.Containers[bindata.ContainerIDJsonEnricher].Args = addArgsConfig(
-			r.baseSPOd.Spec.Template.Spec.Containers[bindata.ContainerIDJsonEnricher].Args,
-			fmt.Sprintf("--audit-log-interval-seconds=%d",
-				cfg.Spec.JsonEnricherOpt.AuditLogIntervalSeconds),
-		)
+		if cfg.Spec.Enricher.JsonEnricherOptions.AuditLogIntervalSeconds != nil {
+			r.baseSPOd.Spec.Template.Spec.Containers[bindata.ContainerIDJsonEnricher].Args = addArgsConfig(
+				r.baseSPOd.Spec.Template.Spec.Containers[bindata.ContainerIDJsonEnricher].Args,
+				fmt.Sprintf("--audit-log-interval-seconds=%d",
+					*cfg.Spec.Enricher.JsonEnricherOptions.AuditLogIntervalSeconds),
+			)
+		}
 
-		if cfg.Spec.JsonEnricherOpt.AuditLogMaxAge != nil {
+		if cfg.Spec.Enricher.JsonEnricherOptions.AuditLogMaxAge != nil {
 			r.baseSPOd.Spec.Template.Spec.Containers[bindata.ContainerIDJsonEnricher].Args = addArgsConfig(
 				r.baseSPOd.Spec.Template.Spec.Containers[bindata.ContainerIDJsonEnricher].Args,
 				fmt.Sprintf("--audit-log-maxage=%d",
-					*cfg.Spec.JsonEnricherOpt.AuditLogMaxAge),
+					*cfg.Spec.Enricher.JsonEnricherOptions.AuditLogMaxAge),
 			)
 		}
 
-		if cfg.Spec.JsonEnricherOpt.AuditLogMaxSize != nil {
+		if cfg.Spec.Enricher.JsonEnricherOptions.AuditLogMaxSize != nil {
 			r.baseSPOd.Spec.Template.Spec.Containers[bindata.ContainerIDJsonEnricher].Args = addArgsConfig(
 				r.baseSPOd.Spec.Template.Spec.Containers[bindata.ContainerIDJsonEnricher].Args,
 				fmt.Sprintf("--audit-log-maxsize=%d",
-					*cfg.Spec.JsonEnricherOpt.AuditLogMaxSize),
+					*cfg.Spec.Enricher.JsonEnricherOptions.AuditLogMaxSize),
 			)
 		}
 
-		if cfg.Spec.JsonEnricherOpt.AuditLogMaxBackups != nil {
+		if cfg.Spec.Enricher.JsonEnricherOptions.AuditLogMaxBackups != nil {
 			r.baseSPOd.Spec.Template.Spec.Containers[bindata.ContainerIDJsonEnricher].Args = addArgsConfig(
 				r.baseSPOd.Spec.Template.Spec.Containers[bindata.ContainerIDJsonEnricher].Args,
 				fmt.Sprintf("--audit-log-maxbackup=%d",
-					*cfg.Spec.JsonEnricherOpt.AuditLogMaxBackups),
+					*cfg.Spec.Enricher.JsonEnricherOptions.AuditLogMaxBackups),
 			)
 		}
 
-		if cfg.Spec.JsonEnricherOpt.AuditLogPath != nil {
+		if cfg.Spec.Enricher.JsonEnricherOptions.AuditLogPath != nil {
 			r.baseSPOd.Spec.Template.Spec.Containers[bindata.ContainerIDJsonEnricher].Args = addArgsConfig(
 				r.baseSPOd.Spec.Template.Spec.Containers[bindata.ContainerIDJsonEnricher].Args,
-				"--audit-log-path="+(*cfg.Spec.JsonEnricherOpt.AuditLogPath),
+				"--audit-log-path="+(*cfg.Spec.Enricher.JsonEnricherOptions.AuditLogPath),
 			)
 		}
 	}
@@ -829,31 +911,65 @@ func (r *ReconcileSPOd) getConfiguredJsonEnricher(cfg *spodv1alpha1.SecurityProf
 
 // getConfiguredWebook gets a fully configured webhook instance from a desired
 // configuration and the reference base SPOd.
-func (r *ReconcileSPOd) getConfiguredWebook(cfg *spodv1alpha1.SecurityProfilesOperatorDaemon,
+func (r *ReconcileSPOd) getConfiguredWebook(cfg *spodapi.SecurityProfilesOperatorDaemon,
 	image string, pullPolicy corev1.PullPolicy, caInjectType bindata.CAInjectType,
 ) *bindata.Webhook {
-	webhook := bindata.GetWebhook(r.log, r.namespace, cfg.Spec.WebhookOpts, image,
-		pullPolicy, caInjectType, cfg.Spec.Tolerations, cfg.Spec.ImagePullSecrets, isJsonEnricherEnabled(cfg))
+	webhook := bindata.GetWebhook(r.log, r.namespace, cfg.Spec.Webhook.Options, image,
+		pullPolicy, caInjectType, cfg.Spec.Scheduling.Tolerations, cfg.Spec.ImagePullSecrets, isJsonEnricherEnabled(cfg))
 
 	return webhook
 }
 
-func isLogEnricherEnabled(cfg *spodv1alpha1.SecurityProfilesOperatorDaemon) bool {
+func addSelinuxCustomTemplatesVolume(
+	cfg *spodapi.SecurityProfilesOperatorDaemon,
+	templateSpec *corev1.PodSpec,
+) error {
+	if cfg.Spec.Selinux.CustomTemplatesConfigMap == "" {
+		return nil
+	}
+
+	idx := slices.IndexFunc(templateSpec.InitContainers, func(c corev1.Container) bool {
+		return c.Name == bindata.SelinuxPoliciesCopierContainerName
+	})
+	if idx == -1 {
+		return fmt.Errorf(
+			"customTemplatesConfigMap is set but %s init container was not found",
+			bindata.SelinuxPoliciesCopierContainerName,
+		)
+	}
+
+	vol, mount := bindata.CustomTemplatesVolume(cfg.Spec.Selinux.CustomTemplatesConfigMap)
+	templateSpec.Volumes = append(templateSpec.Volumes, vol)
+	templateSpec.InitContainers[idx].VolumeMounts = append(templateSpec.InitContainers[idx].VolumeMounts, mount)
+
+	return nil
+}
+
+func isLogEnricherEnabled(cfg *spodapi.SecurityProfilesOperatorDaemon) bool {
 	enableLogEnricherEnv, err := strconv.ParseBool(os.Getenv(config.EnableLogEnricherEnvKey))
 	if err != nil {
 		enableLogEnricherEnv = false
 	}
 
-	return cfg.Spec.EnableLogEnricher || enableLogEnricherEnv
+	return ptr.Deref(cfg.Spec.Enricher.EnableLogEnricher, false) || enableLogEnricherEnv
 }
 
-func isJsonEnricherEnabled(cfg *spodv1alpha1.SecurityProfilesOperatorDaemon) bool {
+func isJsonEnricherEnabled(cfg *spodapi.SecurityProfilesOperatorDaemon) bool {
 	enableJsonEnricherEnv, err := strconv.ParseBool(os.Getenv(config.EnableJsonEnricherEnvKey))
 	if err != nil {
 		enableJsonEnricherEnv = false
 	}
 
-	return cfg.Spec.EnableJsonEnricher || enableJsonEnricherEnv
+	return ptr.Deref(cfg.Spec.Enricher.EnableJsonEnricher, false) || enableJsonEnricherEnv
+}
+
+func isInsecureMetricsEnabled(cfg *spodapi.SecurityProfilesOperatorDaemon) bool {
+	enableInsecureMetricsEnv, err := strconv.ParseBool(os.Getenv(config.EnableInsecureMetricsAccessEnvKey))
+	if err != nil {
+		enableInsecureMetricsEnv = false
+	}
+
+	return ptr.Deref(cfg.Spec.EnableInsecureMetricsAccess, false) || enableInsecureMetricsEnv
 }
 
 func addArgsConfig(args []string, argonfig string) []string {
@@ -893,22 +1009,16 @@ func sliceReplaceArg(slice []string, s string) bool {
 }
 
 func sliceContainsString(slice []string, s string) bool {
-	for _, item := range slice {
-		if item == s {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(slice, s)
 }
 
-func isBpfRecorderEnabled(cfg *spodv1alpha1.SecurityProfilesOperatorDaemon) bool {
+func isBpfRecorderEnabled(cfg *spodapi.SecurityProfilesOperatorDaemon) bool {
 	enableBpfRecorderEnv, err := strconv.ParseBool(os.Getenv(config.EnableBpfRecorderEnvKey))
 	if err != nil {
 		enableBpfRecorderEnv = false
 	}
 
-	return cfg.Spec.EnableBpfRecorder || enableBpfRecorderEnv
+	return ptr.Deref(cfg.Spec.Enricher.EnableBpfRecorder, false) || enableBpfRecorderEnv
 }
 
 func addEnvVar(templateSpec *corev1.PodSpec, envVarKey string) {
@@ -939,10 +1049,10 @@ func configureSeLinuxTag(secContext *corev1.SecurityContext, seLinuxTag string) 
 	secContext.SELinuxOptions.Type = seLinuxTag
 }
 
-func verbosityEnv(value uint) corev1.EnvVar {
+func verbosityEnv(value int32) corev1.EnvVar {
 	return corev1.EnvVar{
 		Name:  config.VerbosityEnvKey,
-		Value: strconv.FormatUint(uint64(value), 10),
+		Value: strconv.FormatInt(int64(value), 10),
 	}
 }
 

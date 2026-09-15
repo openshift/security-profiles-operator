@@ -21,13 +21,14 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
 	"sigs.k8s.io/release-utils/command"
 
-	seccompprofileapi "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1beta1"
-	secprofnodestatusv1alpha1 "sigs.k8s.io/security-profiles-operator/api/secprofnodestatus/v1alpha1"
+	seccompprofileapi "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1"
+	secprofnodestatusapi "sigs.k8s.io/security-profiles-operator/api/secprofnodestatus/v1"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/config"
 )
 
@@ -149,7 +150,7 @@ func (e *e2e) TestSecurityProfilesOperator() {
 			e.testCaseProfilingHTTP,
 		},
 		{
-			"SPOD: Enable memory optimiztaion",
+			"SPOD: Enable memory optimization",
 			e.testCaseMemOptmEnable,
 		},
 		{
@@ -167,6 +168,10 @@ func (e *e2e) TestSecurityProfilesOperator() {
 		{
 			"SPOD: Enable profile recorder",
 			e.testCaseSPODEnableProfileRecorder,
+		},
+		{
+			"API v1 Graduation: Verify conversion webhooks",
+			e.testCaseAPIV1Graduation,
 		},
 	}
 	for _, testCase := range testCases {
@@ -290,15 +295,15 @@ spec:
 `
 
 	file, err := os.CreateTemp("", "test-resource*.yaml")
-	e.Nil(err)
+	e.Require().NoError(err)
 	_, err = file.WriteString(certManifest)
-	e.Nil(err)
+	e.Require().NoError(err)
 
 	defer os.Remove(file.Name())
 
 	for range tries {
 		output, err := command.New(e.kubectlPath, "apply", "-f", file.Name()).Run()
-		e.Nil(err)
+		e.Require().NoError(err)
 
 		if output.Success() {
 			break
@@ -316,12 +321,12 @@ spec:
 
 func (e *e2e) updateManifest(path, src, repl string) {
 	content, err := os.ReadFile(path)
-	e.Nil(err)
+	e.Require().NoError(err)
 
 	re := regexp.MustCompile(src)
 	result := re.ReplaceAllString(string(content), repl)
 	err = os.WriteFile(path, []byte(result), 0o600)
-	e.Nil(err)
+	e.Require().NoError(err)
 }
 
 func (e *e2e) deployOperator(manifest string) {
@@ -397,22 +402,22 @@ func (e *e2e) getSeccompProfile(name string) *seccompprofileapi.SeccompProfile {
 		"get", "seccompprofile", name, "-o", "json",
 	)
 	seccompProfile := &seccompprofileapi.SeccompProfile{}
-	e.Nil(json.Unmarshal([]byte(seccompProfileJSON), seccompProfile))
+	e.Require().NoError(json.Unmarshal([]byte(seccompProfileJSON), seccompProfile))
 
 	return seccompProfile
 }
 
 func (e *e2e) getSeccompProfileNodeStatus(
 	id, node string,
-) *secprofnodestatusv1alpha1.SecurityProfileNodeStatus {
+) *secprofnodestatusapi.SecurityProfileNodeStatus {
 	selector := fmt.Sprintf("spo.x-k8s.io/node-name=%s,spo.x-k8s.io/profile-id=SeccompProfile-%s", node, id)
 	seccompProfileNodeStatusJSON := e.kubectl(
 		"get", "securityprofilenodestatus", "-l", selector, "-o", "json",
 	)
-	secpolNodeStatusList := &secprofnodestatusv1alpha1.SecurityProfileNodeStatusList{}
-	e.Nil(json.Unmarshal([]byte(seccompProfileNodeStatusJSON), secpolNodeStatusList))
+	secpolNodeStatusList := &secprofnodestatusapi.SecurityProfileNodeStatusList{}
+	e.Require().NoError(json.Unmarshal([]byte(seccompProfileNodeStatusJSON), secpolNodeStatusList))
 
-	if e.Equal(len(secpolNodeStatusList.Items), 1) {
+	if e.Len(secpolNodeStatusList.Items, 1) {
 		return &secpolNodeStatusList.Items[0]
 	}
 
@@ -421,13 +426,13 @@ func (e *e2e) getSeccompProfileNodeStatus(
 
 func (e *e2e) getAllSeccompProfileNodeStatuses(
 	id string,
-) *secprofnodestatusv1alpha1.SecurityProfileNodeStatusList {
+) *secprofnodestatusapi.SecurityProfileNodeStatusList {
 	selector := "spo.x-k8s.io/profile-id=SeccompProfile-" + id
 	seccompProfileNodeStatusJSON := e.kubectl(
 		"get", "securityprofilenodestatus", "-l", selector, "-o", "json",
 	)
-	secpolNodeStatusList := &secprofnodestatusv1alpha1.SecurityProfileNodeStatusList{}
-	e.Nil(json.Unmarshal([]byte(seccompProfileNodeStatusJSON), secpolNodeStatusList))
+	secpolNodeStatusList := &secprofnodestatusapi.SecurityProfileNodeStatusList{}
+	e.Require().NoError(json.Unmarshal([]byte(seccompProfileNodeStatusJSON), secpolNodeStatusList))
 
 	return secpolNodeStatusList
 }
@@ -453,11 +458,11 @@ func (e *e2e) writeAndDo(verb, manifest, filePattern string) func() {
 	file, err := os.CreateTemp("", filePattern)
 	fileName := file.Name()
 
-	e.Nil(err)
+	e.Require().NoError(err)
 	_, err = file.WriteString(manifest)
-	e.Nil(err)
+	e.Require().NoError(err)
 	err = file.Close()
-	e.Nil(err)
+	e.Require().NoError(err)
 	e.kubectl(verb, "-f", fileName)
 
 	return func() { os.Remove(fileName) }
@@ -479,13 +484,7 @@ func (e *e2e) getSELinuxPolicyUsage(kind, policy string) string {
 }
 
 func (e *e2e) sliceContainsString(slice []string, s string) bool {
-	for _, item := range slice {
-		if item == s {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(slice, s)
 }
 
 func (e *e2e) waitForSpod() {
@@ -494,7 +493,7 @@ func (e *e2e) waitForSpod() {
 			e.kubectlPath, "-n", config.OperatorName,
 			"get", "pod", "-l", "name=spod",
 		).RunSilent()
-		e.Nil(err)
+		e.Require().NoError(err)
 
 		if !strings.Contains(output.Error(), "No resources found") {
 			return
@@ -512,7 +511,7 @@ func (e *e2e) retryGet(args ...string) string {
 		output, err := command.New(
 			e.kubectlPath, append([]string{"get"}, args...)...,
 		).RunSilent()
-		e.Nil(err)
+		e.Require().NoError(err)
 
 		if !strings.Contains(output.Error(), "not found") {
 			return output.OutputTrimNL()
@@ -531,7 +530,7 @@ func (e *e2e) exists(args ...string) bool {
 	output, err := command.New(
 		e.kubectlPath, append([]string{"get"}, args...)...,
 	).RunSilent()
-	e.Nil(err)
+	e.Require().NoError(err)
 
 	return !strings.Contains(output.Error(), "not found")
 }

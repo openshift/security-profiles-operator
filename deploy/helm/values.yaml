@@ -24,14 +24,28 @@ selinuxdImage:
     repository: security-profiles-operator/selinuxd-fedora
     tag: latest
 
+# Deprecated, use selinux.enable instead
 enableSelinux: false
+selinux:
+  # enable: false # Overrides deprecated enableSelinux flag
+  enableRawSelinuxProfiles: true
+  typeTag: spc_t
+  customTemplatesConfigMap: ""
+  options: {}
+    # allowedSystemProfiles:
+    #   - container
+    # deniedTypes: []
+    # deniedClasses: []
+    # deniedPermissions: []
+    # allowedTypes: []
+    # allowedClasses: []
+    # allowedPermissions: []
 enableLogEnricher: false
 enableJsonEnricher: false
 enableAppArmor: false
 enableBpfRecorder: false
 enableProfiling: false
 verbosity: 0
-
 
 nameOverride: ""
 fullnameOverride: ""

@@ -48,13 +48,21 @@ import (
 	metricsfilters "sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	webhookconversion "sigs.k8s.io/controller-runtime/pkg/webhook/conversion"
 
+	apparmorprofilev1 "sigs.k8s.io/security-profiles-operator/api/apparmorprofile/v1"
 	apparmorprofileapi "sigs.k8s.io/security-profiles-operator/api/apparmorprofile/v1alpha1"
+	profilebindingv1 "sigs.k8s.io/security-profiles-operator/api/profilebinding/v1"
 	profilebindingv1alpha1 "sigs.k8s.io/security-profiles-operator/api/profilebinding/v1alpha1"
+	profilerecordingv1 "sigs.k8s.io/security-profiles-operator/api/profilerecording/v1"
 	profilerecording1alpha1 "sigs.k8s.io/security-profiles-operator/api/profilerecording/v1alpha1"
+	seccompprofilev1 "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1"
 	seccompprofileapi "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1beta1"
+	secprofnodestatusv1 "sigs.k8s.io/security-profiles-operator/api/secprofnodestatus/v1"
 	secprofnodestatusv1alpha1 "sigs.k8s.io/security-profiles-operator/api/secprofnodestatus/v1alpha1"
+	selinuxprofilev1 "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1"
 	selxv1alpha2 "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1alpha2"
+	spodv1 "sigs.k8s.io/security-profiles-operator/api/spod/v1"
 	spodv1alpha1 "sigs.k8s.io/security-profiles-operator/api/spod/v1alpha1"
 	"sigs.k8s.io/security-profiles-operator/cmd"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/config"
@@ -77,6 +85,7 @@ import (
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/webhooks/binding"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/webhooks/execmetadata"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/webhooks/recording"
+	"sigs.k8s.io/security-profiles-operator/internal/pkg/webhooks/validation"
 )
 
 const (
@@ -90,8 +99,10 @@ const (
 	seccompFlag                  string = "with-seccomp"
 	selinuxFlag                  string = "with-selinux"
 	apparmorFlag                 string = "with-apparmor"
+	rawSelinuxFlag               string = "with-raw-selinux"
 	webhookFlag                  string = "webhook"
 	memOptimFlag                 string = "with-mem-optim"
+	insecureMetricsAccessFlag    string = "with-insecure-metrics-access"
 	defaultWebhookPort           int    = 9443
 	auditLogIntervalSecondsParam string = "audit-log-interval-seconds"
 	auditLogPathParam            string = "audit-log-path"
@@ -199,6 +210,11 @@ func main() {
 					Value: false,
 				},
 				&cli.BoolFlag{
+					Name:  rawSelinuxFlag,
+					Usage: "Listen for RawSelinuxProfile API resources",
+					Value: false,
+				},
+				&cli.BoolFlag{
 					Name:    recordingFlag,
 					Usage:   "Listen for ProfileRecording API resources",
 					Value:   false,
@@ -208,6 +224,12 @@ func main() {
 					Name:  memOptimFlag,
 					Usage: "Enable memory optimization by watching only labeled pods",
 					Value: false,
+				},
+				&cli.BoolFlag{
+					Name:    insecureMetricsAccessFlag,
+					Usage:   "Allow unauthenticated access to metrics endpoint",
+					Value:   false,
+					EnvVars: []string{config.EnableInsecureMetricsAccessEnvKey},
 				},
 			},
 		},
@@ -275,7 +297,7 @@ func main() {
 				&cli.StringFlag{
 					Name:  enricherLogSourceParam,
 					Value: "",
-					Usage: "Log source to ingest (`bpf` or `auditd`)",
+					Usage: "Log source to ingest (`Bpf` or `Auditd`)",
 				},
 			},
 			Action: func(ctx *cli.Context) error {
@@ -365,7 +387,7 @@ func main() {
 	)
 
 	app.Flags = []cli.Flag{
-		&cli.UintFlag{
+		&cli.IntFlag{
 			Name:    "verbosity",
 			Aliases: []string{"V"},
 			Usage:   "the logging verbosity to be used",
@@ -386,14 +408,10 @@ func main() {
 		},
 	}
 
-	if err := app.Run(os.Args); err != nil {
+	if err := app.RunContext(mainctx, os.Args); err != nil {
 		setupLog.Error(err, "running security-profiles-operator")
 		//nolint:gocritic // this is intentional to return to correct exit code
 		os.Exit(1)
-	}
-
-	if err := app.RunContext(mainctx, os.Args); err != nil {
-		fmt.Printf("application error: %v", err)
 	}
 }
 
@@ -414,14 +432,14 @@ func initLogging(ctx *cli.Context) error {
 	set := flag.NewFlagSet("logging", flag.ContinueOnError)
 	klog.InitFlags(set)
 
-	level := ctx.Uint("verbosity")
+	level := ctx.Int("verbosity")
 	if err := set.Parse([]string{fmt.Sprintf("-v=%d", level)}); err != nil {
 		return fmt.Errorf("parse verbosity flag: %w", err)
 	}
 
-	ctrl.SetLogger(ctrl.Log.V(int(level)))
+	ctrl.SetLogger(ctrl.Log.V(level))
 
-	if err := logConfig.Verbosity().Set(strconv.FormatUint(uint64(level), 10)); err != nil {
+	if err := logConfig.Verbosity().Set(strconv.FormatInt(int64(level), 10)); err != nil {
 		return fmt.Errorf("setting the verbosity flag to level %d: %w", level, err)
 	}
 
@@ -498,16 +516,32 @@ func runManager(ctx *cli.Context, info *version.Info) error {
 		return fmt.Errorf("add profilebinding API to scheme: %w", err)
 	}
 
+	if err := profilebindingv1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add profilebinding v1 API to scheme: %w", err)
+	}
+
 	if err := seccompprofileapi.AddToScheme(mgr.GetScheme()); err != nil {
 		return fmt.Errorf("add seccompprofile API to scheme: %w", err)
+	}
+
+	if err := seccompprofilev1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add seccompprofile v1 API to scheme: %w", err)
 	}
 
 	if err := apparmorprofileapi.AddToScheme(mgr.GetScheme()); err != nil {
 		return fmt.Errorf("add apparmorprofile API to scheme: %w", err)
 	}
 
+	if err := apparmorprofilev1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add apparmorprofile v1 API to scheme: %w", err)
+	}
+
 	if err := selxv1alpha2.AddToScheme(mgr.GetScheme()); err != nil {
 		return fmt.Errorf("add selinuxprofile API to scheme: %w", err)
+	}
+
+	if err := selinuxprofilev1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add selinuxprofile v1 API to scheme: %w", err)
 	}
 
 	if err := monitoringv1.AddToScheme(mgr.GetScheme()); err != nil {
@@ -601,9 +635,11 @@ func getEnabledControllers(ctx *cli.Context) []controller.Controller {
 	}
 
 	if ctx.Bool(selinuxFlag) {
-		controllers = append(controllers,
-			selinuxprofile.NewController(),
-			selinuxprofile.NewRawController())
+		controllers = append(controllers, selinuxprofile.NewController())
+
+		if ctx.Bool(rawSelinuxFlag) {
+			controllers = append(controllers, selinuxprofile.NewRawController())
+		}
 	}
 
 	if ctx.Bool(apparmorFlag) {
@@ -681,6 +717,15 @@ func runDaemon(ctx *cli.Context, info *version.Info) error {
 		},
 	}
 
+	if ctx.Bool(insecureMetricsAccessFlag) {
+		setupLog.Info("Insecure metrics access enabled, TLS and authentication are disabled")
+
+		ctrlOpts.Metrics.SecureServing = false
+		ctrlOpts.Metrics.CertDir = ""
+		ctrlOpts.Metrics.FilterProvider = nil
+		ctrlOpts.Metrics.TLSOpts = nil
+	}
+
 	setControllerOptionsForNamespaces(&ctrlOpts)
 
 	mgr, err := ctrl.NewManager(cfg, ctrlOpts)
@@ -693,8 +738,16 @@ func runDaemon(ctx *cli.Context, info *version.Info) error {
 		return fmt.Errorf("add per-node Status API to scheme: %w", err)
 	}
 
+	if err := secprofnodestatusv1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add per-node Status v1 API to scheme: %w", err)
+	}
+
 	if err := spodv1alpha1.AddToScheme(mgr.GetScheme()); err != nil {
 		return fmt.Errorf("add SPOD config API to scheme: %w", err)
+	}
+
+	if err := spodv1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add SPOD config v1 API to scheme: %w", err)
 	}
 
 	if err := setupEnabledControllers(ctx.Context, enabledControllers, mgr, met); err != nil {
@@ -782,7 +835,7 @@ func runNonRootEnabler(ctx *cli.Context, info *version.Info) error {
 
 	printInfo(component, info)
 
-	runtime := ctx.String("runtime")
+	containerRuntime := ctx.String("runtime")
 	apparmor := ctx.Bool("apparmor")
 
 	cfg, err := ctrl.GetConfig()
@@ -800,7 +853,7 @@ func runNonRootEnabler(ctx *cli.Context, info *version.Info) error {
 		kubeletDir = config.KubeletDir()
 	}
 
-	return nonrootenabler.New().Run(ctrl.Log.WithName(component), runtime, kubeletDir, apparmor)
+	return nonrootenabler.New().Run(ctrl.Log.WithName(component), containerRuntime, kubeletDir, apparmor)
 }
 
 func runWebhook(ctx *cli.Context, info *version.Info) error {
@@ -849,28 +902,54 @@ func runWebhook(ctx *cli.Context, info *version.Info) error {
 		return fmt.Errorf("add profilebinding API to scheme: %w", err)
 	}
 
+	if err := profilebindingv1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add profilebinding v1 API to scheme: %w", err)
+	}
+
 	if err := seccompprofileapi.AddToScheme(mgr.GetScheme()); err != nil {
 		return fmt.Errorf("add seccompprofile API to scheme: %w", err)
+	}
+
+	if err := seccompprofilev1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add seccompprofile v1 API to scheme: %w", err)
 	}
 
 	if err := apparmorprofileapi.AddToScheme(mgr.GetScheme()); err != nil {
 		return fmt.Errorf("add apparmorprofile API to scheme: %w", err)
 	}
 
+	if err := apparmorprofilev1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add apparmorprofile v1 API to scheme: %w", err)
+	}
+
 	if err := selxv1alpha2.AddToScheme(mgr.GetScheme()); err != nil {
 		return fmt.Errorf("add selinuxprofile API to scheme: %w", err)
+	}
+
+	if err := selinuxprofilev1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add selinuxprofile v1 API to scheme: %w", err)
 	}
 
 	if err := profilerecording1alpha1.AddToScheme(mgr.GetScheme()); err != nil {
 		return fmt.Errorf("add profilerecording API to scheme: %w", err)
 	}
 
+	if err := profilerecordingv1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add profilerecording v1 API to scheme: %w", err)
+	}
+
 	setupLog.Info("registering webhooks")
 
 	hookserver := mgr.GetWebhookServer()
 	binding.RegisterWebhook(hookserver, mgr.GetScheme(), mgr.GetClient())
+
+	//nolint:staticcheck,nolintlint // TODO: migrate to GetEventRecorder
 	recording.RegisterWebhook(hookserver, mgr.GetScheme(), mgr.GetEventRecorderFor("recording-webhook"), mgr.GetClient())
 	execmetadata.RegisterWebhook(hookserver)
+	validation.RegisterWebhook(hookserver, mgr.GetScheme())
+
+	hookserver.Register("/convert",
+		webhookconversion.NewWebhookHandler(mgr.GetScheme(), webhookconversion.NewRegistry()))
 
 	sigHandler := ctrl.SetupSignalHandler()
 
