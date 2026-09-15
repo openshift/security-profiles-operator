@@ -181,6 +181,11 @@ linters:
       - linters:
           - kubeapilinter
         path-except: api/
+      # The v1alpha1 SPOD and node status APIs intentionally keep the wire
+      # format of v0.10 so that persisted objects can be converted to v1.
+      - linters:
+          - kubeapilinter
+        path: api/(spod|secprofnodestatus)/v1alpha1/.*_types\.go
     paths:
       - third_party$
       - builtin$

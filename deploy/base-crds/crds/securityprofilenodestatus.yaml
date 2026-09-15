@@ -84,21 +84,28 @@ spec:
     subresources:
       status: {}
   - additionalPrinterColumns:
-    - jsonPath: .status.status
+    - jsonPath: .status
       name: Status
       type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
-    - jsonPath: .spec.nodeName
+    - jsonPath: .nodeName
       name: Node
       priority: 10
       type: string
+    deprecated: true
+    deprecationWarning: v1alpha1 SecurityProfileNodeStatus is deprecated, use v1
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: SecurityProfileNodeStatus is a per-node status of a security
-          profile
+        description: |-
+          SecurityProfileNodeStatus is a per-node status of a security profile.
+
+          This is the deprecated v1alpha1 API which keeps the exact wire format of
+          the v0.10.x releases (nodeName and status at the root of the object) so
+          that objects persisted by those releases can be converted to v1. Do not
+          change the JSON layout of this type.
         properties:
           apiVersion:
             description: |-
@@ -117,37 +124,29 @@ spec:
             type: string
           metadata:
             type: object
+          nodeName:
+            type: string
           spec:
-            description: spec defines the desired state of the SecurityProfileNodeStatus.
-            properties:
-              nodeName:
-                description: nodeName is the name of the node on which the profile
-                  is installed.
-                minLength: 1
-                type: string
-            required:
-            - nodeName
+            description: SecurityProfileNodeStatusSpec is the empty spec of the v1alpha1
+              API.
             type: object
           status:
-            description: status contains the observed state of the SecurityProfileNodeStatus.
-            properties:
-              status:
-                description: status is the installation status of the profile on this
-                  node.
-                enum:
-                - Partial
-                - Disabled
-                - Pending
-                - InProgress
-                - Installed
-                - Terminating
-                - Error
-                type: string
-            type: object
+            description: |-
+              ProfileState defines the state that the profile is in. A profile in this context
+              refers to a SeccompProfile or a SELinux profile, the states are shared between them
+              as well as the management API.
+            enum:
+            - Partial
+            - Disabled
+            - Pending
+            - InProgress
+            - Installed
+            - Terminating
+            - Error
+            type: string
         required:
-        - spec
+        - nodeName
         type: object
     served: true
     storage: false
-    subresources:
-      status: {}
+    subresources: {}
