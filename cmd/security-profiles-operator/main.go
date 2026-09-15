@@ -574,6 +574,20 @@ func runManager(ctx *cli.Context, info *version.Info) error {
 		return fmt.Errorf("enable controllers: %w", err)
 	}
 
+	if manageWebhook(ctx) {
+		// Align the operator managed webhook deployment with the running
+		// operator image as soon as we become leader. The conversion
+		// webhook for the CRDs is served by the webhook deployment, so
+		// after an upgrade the SPOD controller cannot read its own
+		// configuration (stored in a previous API version) until the
+		// webhook deployment runs the new image.
+		if err := mgr.Add(bindata.NewWebhookImageBootstrapper(
+			setupLog, mgr.GetAPIReader(), mgr.GetClient(), config.GetOperatorNamespace(),
+		)); err != nil {
+			return fmt.Errorf("add webhook image bootstrapper: %w", err)
+		}
+	}
+
 	setupLog.Info("starting manager")
 
 	if err := mgr.Start(sigHandler); err != nil {
