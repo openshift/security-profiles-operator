@@ -23,7 +23,6 @@ import (
 
 	apparmorprofilev1 "sigs.k8s.io/security-profiles-operator/api/apparmorprofile/v1"
 	profilebasev1 "sigs.k8s.io/security-profiles-operator/api/profilebase/v1"
-	profilebasev1alpha1 "sigs.k8s.io/security-profiles-operator/api/profilebase/v1alpha1"
 	secprofnodestatusv1 "sigs.k8s.io/security-profiles-operator/api/secprofnodestatus/v1"
 	secprofnodestatusv1alpha1 "sigs.k8s.io/security-profiles-operator/api/secprofnodestatus/v1alpha1"
 )
@@ -37,8 +36,8 @@ func (src *AppArmorProfile) ConvertTo(dstRaw conversion.Hub) error {
 	dst.ObjectMeta = src.ObjectMeta
 
 	// Spec
-	dst.Spec.State = profilebasev1.SpecState(src.Spec.State)
-	dst.Spec.Mode = apparmorprofilev1.AppArmorMode(src.Spec.Mode)
+	dst.Spec.State = stateToV1(src.Spec.Disabled)
+	dst.Spec.Mode = modeToV1(src.Spec.ComplainMode)
 
 	if src.Spec.Abstract.Executable != nil {
 		dst.Spec.Abstract.Executable = &apparmorprofilev1.AppArmorExecutablesRules{
@@ -89,8 +88,8 @@ func (dst *AppArmorProfile) ConvertFrom(srcRaw conversion.Hub) error {
 	dst.ObjectMeta = src.ObjectMeta
 
 	// Spec
-	dst.Spec.State = profilebasev1alpha1.SpecState(src.Spec.State)
-	dst.Spec.Mode = AppArmorMode(src.Spec.Mode)
+	dst.Spec.Disabled = src.Spec.State == profilebasev1.SpecStateDisabled
+	dst.Spec.ComplainMode = src.Spec.Mode == apparmorprofilev1.AppArmorModeComplain
 
 	if src.Spec.Abstract.Executable != nil {
 		dst.Spec.Abstract.Executable = &AppArmorExecutablesRules{
@@ -130,4 +129,22 @@ func (dst *AppArmorProfile) ConvertFrom(srcRaw conversion.Hub) error {
 	dst.Status.Status = secprofnodestatusv1alpha1.ProfileState(src.Status.Status)
 
 	return nil
+}
+
+// stateToV1 converts the v1alpha1 disabled boolean into the v1 state enum.
+func stateToV1(disabled bool) profilebasev1.SpecState {
+	if disabled {
+		return profilebasev1.SpecStateDisabled
+	}
+
+	return ""
+}
+
+// modeToV1 converts the v1alpha1 complain mode boolean into the v1 mode enum.
+func modeToV1(complain bool) apparmorprofilev1.AppArmorMode {
+	if complain {
+		return apparmorprofilev1.AppArmorModeComplain
+	}
+
+	return ""
 }

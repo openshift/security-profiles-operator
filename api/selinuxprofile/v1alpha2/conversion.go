@@ -22,7 +22,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
 
 	profilebasev1 "sigs.k8s.io/security-profiles-operator/api/profilebase/v1"
-	profilebasev1alpha1 "sigs.k8s.io/security-profiles-operator/api/profilebase/v1alpha1"
 	secprofnodestatusv1 "sigs.k8s.io/security-profiles-operator/api/secprofnodestatus/v1"
 	secprofnodestatusv1alpha1 "sigs.k8s.io/security-profiles-operator/api/secprofnodestatus/v1alpha1"
 	selinuxprofilev1 "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1"
@@ -37,8 +36,8 @@ func (src *SelinuxProfile) ConvertTo(dstRaw conversion.Hub) error {
 	dst.ObjectMeta = src.ObjectMeta
 
 	// Spec
-	dst.Spec.State = profilebasev1.SpecState(src.Spec.State)
-	dst.Spec.Mode = selinuxprofilev1.SelinuxMode(src.Spec.Mode)
+	dst.Spec.State = stateToV1(src.Spec.Disabled)
+	dst.Spec.Mode = modeToV1(src.Spec.Permissive)
 
 	dst.Spec.Inherit = make([]selinuxprofilev1.PolicyRef, len(src.Spec.Inherit))
 	for i, p := range src.Spec.Inherit {
@@ -79,8 +78,8 @@ func (dst *SelinuxProfile) ConvertFrom(srcRaw conversion.Hub) error {
 	dst.ObjectMeta = src.ObjectMeta
 
 	// Spec
-	dst.Spec.State = profilebasev1alpha1.SpecState(src.Spec.State)
-	dst.Spec.Mode = SelinuxMode(src.Spec.Mode)
+	dst.Spec.Disabled = src.Spec.State == profilebasev1.SpecStateDisabled
+	dst.Spec.Permissive = src.Spec.Mode == selinuxprofilev1.SelinuxModePermissive
 
 	dst.Spec.Inherit = make([]PolicyRef, len(src.Spec.Inherit))
 	for i, p := range src.Spec.Inherit {
@@ -120,7 +119,7 @@ func (src *RawSelinuxProfile) ConvertTo(dstRaw conversion.Hub) error {
 
 	dst.ObjectMeta = src.ObjectMeta
 
-	dst.Spec.State = profilebasev1.SpecState(src.Spec.State)
+	dst.Spec.State = stateToV1(src.Spec.Disabled)
 	dst.Spec.Policy = src.Spec.Policy
 
 	dst.Status.ConditionedStatus = src.Status.ConditionedStatus
@@ -139,7 +138,7 @@ func (dst *RawSelinuxProfile) ConvertFrom(srcRaw conversion.Hub) error {
 
 	dst.ObjectMeta = src.ObjectMeta
 
-	dst.Spec.State = profilebasev1alpha1.SpecState(src.Spec.State)
+	dst.Spec.Disabled = src.Spec.State == profilebasev1.SpecStateDisabled
 	dst.Spec.Policy = src.Spec.Policy
 
 	dst.Status.ConditionedStatus = src.Status.ConditionedStatus
@@ -148,4 +147,22 @@ func (dst *RawSelinuxProfile) ConvertFrom(srcRaw conversion.Hub) error {
 	dst.Status.ActiveWorkloads = src.Status.ActiveWorkloads
 
 	return nil
+}
+
+// stateToV1 converts the v1alpha2 disabled boolean into the v1 state enum.
+func stateToV1(disabled bool) profilebasev1.SpecState {
+	if disabled {
+		return profilebasev1.SpecStateDisabled
+	}
+
+	return ""
+}
+
+// modeToV1 converts the v1alpha2 permissive boolean into the v1 mode enum.
+func modeToV1(permissive bool) selinuxprofilev1.SelinuxMode {
+	if permissive {
+		return selinuxprofilev1.SelinuxModePermissive
+	}
+
+	return ""
 }

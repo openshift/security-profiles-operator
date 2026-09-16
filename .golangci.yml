@@ -185,7 +185,10 @@ linters:
       # format of v0.10 so that persisted objects can be converted to v1.
       - linters:
           - kubeapilinter
-        path: api/(spod|secprofnodestatus)/v1alpha1/.*_types\.go
+        path: api/(spod|secprofnodestatus|apparmorprofile|profilebase)/v1alpha1/.*\.go
+      - linters:
+          - kubeapilinter
+        path: api/selinuxprofile/v1alpha2/.*\.go
     paths:
       - third_party$
       - builtin$

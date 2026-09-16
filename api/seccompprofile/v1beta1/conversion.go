@@ -22,7 +22,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
 
 	profilebasev1 "sigs.k8s.io/security-profiles-operator/api/profilebase/v1"
-	profilebasev1alpha1 "sigs.k8s.io/security-profiles-operator/api/profilebase/v1alpha1"
 	seccompprofilev1 "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1"
 	secprofnodestatusv1 "sigs.k8s.io/security-profiles-operator/api/secprofnodestatus/v1"
 	secprofnodestatusv1alpha1 "sigs.k8s.io/security-profiles-operator/api/secprofnodestatus/v1alpha1"
@@ -37,7 +36,7 @@ func (src *SeccompProfile) ConvertTo(dstRaw conversion.Hub) error {
 	dst.ObjectMeta = src.ObjectMeta
 
 	// Spec
-	dst.Spec.State = profilebasev1.SpecState(src.Spec.State)
+	dst.Spec.State = stateToV1(src.Spec.Disabled)
 	dst.Spec.BaseProfileName = src.Spec.BaseProfileName
 	dst.Spec.DefaultAction = src.Spec.DefaultAction
 	dst.Spec.ListenerPath = src.Spec.ListenerPath
@@ -98,7 +97,7 @@ func (dst *SeccompProfile) ConvertFrom(srcRaw conversion.Hub) error {
 	dst.ObjectMeta = src.ObjectMeta
 
 	// Spec
-	dst.Spec.State = profilebasev1alpha1.SpecState(src.Spec.State)
+	dst.Spec.Disabled = src.Spec.State == profilebasev1.SpecStateDisabled
 	dst.Spec.BaseProfileName = src.Spec.BaseProfileName
 	dst.Spec.DefaultAction = src.Spec.DefaultAction
 	dst.Spec.ListenerPath = src.Spec.ListenerPath
@@ -148,4 +147,13 @@ func (dst *SeccompProfile) ConvertFrom(srcRaw conversion.Hub) error {
 	dst.Status.LocalhostProfile = src.Status.LocalhostProfile
 
 	return nil
+}
+
+// stateToV1 converts the v1alpha1 disabled boolean into the v1 state enum.
+func stateToV1(disabled bool) profilebasev1.SpecState {
+	if disabled {
+		return profilebasev1.SpecStateDisabled
+	}
+
+	return ""
 }
