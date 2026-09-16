@@ -22,13 +22,13 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	selxv1alpha2 "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1alpha2"
-	spodv1alpha1 "sigs.k8s.io/security-profiles-operator/api/spod/v1alpha1"
+	selinuxprofileapi "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1"
+	spodapi "sigs.k8s.io/security-profiles-operator/api/spod/v1"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/manager/spod/bindata"
 )
 
@@ -39,13 +39,13 @@ func Test_selinuxProfileHandler(t *testing.T) {
 	//nolint:usetesting // we want to set the env here
 	os.Setenv("OPERATOR_NAMESPACE", ns)
 
-	schemeInstance := scheme.Scheme
-	if err := spodv1alpha1.AddToScheme(schemeInstance); err != nil {
+	schemeInstance := runtime.NewScheme()
+	if err := spodapi.AddToScheme(schemeInstance); err != nil {
 		t.Fatalf("couldn't add SPOD API to scheme")
 	}
 
-	if err := selxv1alpha2.AddToScheme(schemeInstance); err != nil {
-		t.Fatalf("couldn't add SPOD API to scheme")
+	if err := selinuxprofileapi.AddToScheme(schemeInstance); err != nil {
+		t.Fatalf("couldn't add selinux API to scheme")
 	}
 
 	spodinstance := bindata.DefaultSPOD.DeepCopy()
@@ -53,7 +53,7 @@ func Test_selinuxProfileHandler(t *testing.T) {
 
 	tests := []struct {
 		name            string
-		profile         selxv1alpha2.SelinuxProfileObject
+		profile         selinuxprofileapi.SelinuxProfileObject
 		wantInitErr     bool
 		wantValidateErr bool
 		wantErrMatches  []string
@@ -62,18 +62,18 @@ func Test_selinuxProfileHandler(t *testing.T) {
 	}{
 		{
 			name: "Test validate errorlogger with default Kind",
-			profile: &selxv1alpha2.SelinuxProfile{
+			profile: &selinuxprofileapi.SelinuxProfile{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "foo",
 					Namespace: "bar",
 				},
-				Spec: selxv1alpha2.SelinuxProfileSpec{
-					Inherit: []selxv1alpha2.PolicyRef{
+				Spec: selinuxprofileapi.SelinuxProfileSpec{
+					Inherit: []selinuxprofileapi.PolicyRef{
 						{
 							Name: "container",
 						},
 					},
-					Allow: selxv1alpha2.Allow{
+					Allow: selinuxprofileapi.Allow{
 						"var_log_t": {
 							"dir": []string{
 								"open",
@@ -119,19 +119,19 @@ func Test_selinuxProfileHandler(t *testing.T) {
 		},
 		{
 			name: "Test successful inherit reference",
-			profile: &selxv1alpha2.SelinuxProfile{
+			profile: &selinuxprofileapi.SelinuxProfile{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-selinux-recording-nginx",
 					Namespace: "default",
 				},
-				Spec: selxv1alpha2.SelinuxProfileSpec{
-					Inherit: []selxv1alpha2.PolicyRef{
+				Spec: selinuxprofileapi.SelinuxProfileSpec{
+					Inherit: []selinuxprofileapi.PolicyRef{
 						{
 							Kind: "SelinuxProfile",
 							Name: "foo",
 						},
 					},
-					Allow: selxv1alpha2.Allow{
+					Allow: selinuxprofileapi.Allow{
 						"http_port_t": {
 							"tcp_socket": []string{
 								"name_bind",
@@ -142,7 +142,7 @@ func Test_selinuxProfileHandler(t *testing.T) {
 			},
 			existingObjs: []client.Object{
 				spodinstance.DeepCopy(),
-				&selxv1alpha2.SelinuxProfile{
+				&selinuxprofileapi.SelinuxProfile{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "foo",
 						Namespace: "default",
@@ -152,19 +152,19 @@ func Test_selinuxProfileHandler(t *testing.T) {
 		},
 		{
 			name: "Test unexistent system reference",
-			profile: &selxv1alpha2.SelinuxProfile{
+			profile: &selinuxprofileapi.SelinuxProfile{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-selinux-recording-nginx",
 					Namespace: "default",
 				},
-				Spec: selxv1alpha2.SelinuxProfileSpec{
-					Inherit: []selxv1alpha2.PolicyRef{
+				Spec: selinuxprofileapi.SelinuxProfileSpec{
+					Inherit: []selinuxprofileapi.PolicyRef{
 						{
-							Kind: selxv1alpha2.SystemPolicyKind,
+							Kind: selinuxprofileapi.SystemPolicyKind,
 							Name: "unexistent-system-ref",
 						},
 					},
-					Allow: selxv1alpha2.Allow{
+					Allow: selinuxprofileapi.Allow{
 						"http_port_t": {
 							"tcp_socket": []string{
 								"name_bind",
@@ -183,19 +183,19 @@ func Test_selinuxProfileHandler(t *testing.T) {
 		},
 		{
 			name: "Test unexistent inherit reference",
-			profile: &selxv1alpha2.SelinuxProfile{
+			profile: &selinuxprofileapi.SelinuxProfile{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-selinux-recording-nginx",
 					Namespace: "default",
 				},
-				Spec: selxv1alpha2.SelinuxProfileSpec{
-					Inherit: []selxv1alpha2.PolicyRef{
+				Spec: selinuxprofileapi.SelinuxProfileSpec{
+					Inherit: []selinuxprofileapi.PolicyRef{
 						{
 							Kind: "SelinuxProfile",
 							Name: "unexistent-ref",
 						},
 					},
-					Allow: selxv1alpha2.Allow{
+					Allow: selinuxprofileapi.Allow{
 						"http_port_t": {
 							"tcp_socket": []string{
 								"name_bind",
@@ -214,19 +214,19 @@ func Test_selinuxProfileHandler(t *testing.T) {
 		},
 		{
 			name: "Test invalid kind in inherit reference",
-			profile: &selxv1alpha2.SelinuxProfile{
+			profile: &selinuxprofileapi.SelinuxProfile{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-selinux-recording-nginx",
 					Namespace: "default",
 				},
-				Spec: selxv1alpha2.SelinuxProfileSpec{
-					Inherit: []selxv1alpha2.PolicyRef{
+				Spec: selinuxprofileapi.SelinuxProfileSpec{
+					Inherit: []selinuxprofileapi.PolicyRef{
 						{
 							Kind: "InvalidKind",
 							Name: "foo",
 						},
 					},
-					Allow: selxv1alpha2.Allow{
+					Allow: selinuxprofileapi.Allow{
 						"http_port_t": {
 							"tcp_socket": []string{
 								"name_bind",
@@ -245,19 +245,19 @@ func Test_selinuxProfileHandler(t *testing.T) {
 		},
 		{
 			name: "Test missing profile",
-			profile: &selxv1alpha2.SelinuxProfile{
+			profile: &selinuxprofileapi.SelinuxProfile{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-selinux-recording-nginx",
 					Namespace: "default",
 				},
-				Spec: selxv1alpha2.SelinuxProfileSpec{
-					Inherit: []selxv1alpha2.PolicyRef{
+				Spec: selinuxprofileapi.SelinuxProfileSpec{
+					Inherit: []selinuxprofileapi.PolicyRef{
 						{
 							Kind: "SelinuxProfile",
 							Name: "foo",
 						},
 					},
-					Allow: selxv1alpha2.Allow{
+					Allow: selinuxprofileapi.Allow{
 						"http_port_t": {
 							"tcp_socket": []string{
 								"name_bind",
@@ -274,13 +274,13 @@ func Test_selinuxProfileHandler(t *testing.T) {
 		},
 		{
 			name: "Test validate injection through label key",
-			profile: &selxv1alpha2.SelinuxProfile{
+			profile: &selinuxprofileapi.SelinuxProfile{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "foo",
 					Namespace: "bar",
 				},
-				Spec: selxv1alpha2.SelinuxProfileSpec{
-					Allow: selxv1alpha2.Allow{
+				Spec: selinuxprofileapi.SelinuxProfileSpec{
+					Allow: selinuxprofileapi.Allow{
 						"var_log_t) (typeattribute container_runtime_domain (process))": {
 							"dir": []string{
 								"open",
@@ -301,16 +301,19 @@ func Test_selinuxProfileHandler(t *testing.T) {
 			wantErrMatches: []string{
 				"didn't match expected characters: invalid label key",
 			},
+			existingObjs: []client.Object{
+				spodinstance.DeepCopy(),
+			},
 		},
 		{
 			name: "Test validate injection through object class key",
-			profile: &selxv1alpha2.SelinuxProfile{
+			profile: &selinuxprofileapi.SelinuxProfile{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "foo",
 					Namespace: "bar",
 				},
-				Spec: selxv1alpha2.SelinuxProfileSpec{
-					Allow: selxv1alpha2.Allow{
+				Spec: selinuxprofileapi.SelinuxProfileSpec{
+					Allow: selinuxprofileapi.Allow{
 						"var_log_t": {
 							"dir) (typeattribute container_runtime_domain (process))": []string{
 								"open",
@@ -331,16 +334,19 @@ func Test_selinuxProfileHandler(t *testing.T) {
 			wantErrMatches: []string{
 				"didn't match expected characters: invalid object class",
 			},
+			existingObjs: []client.Object{
+				spodinstance.DeepCopy(),
+			},
 		},
 		{
 			name: "Test validate injection through object permission",
-			profile: &selxv1alpha2.SelinuxProfile{
+			profile: &selinuxprofileapi.SelinuxProfile{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "foo",
 					Namespace: "bar",
 				},
-				Spec: selxv1alpha2.SelinuxProfileSpec{
-					Allow: selxv1alpha2.Allow{
+				Spec: selinuxprofileapi.SelinuxProfileSpec{
+					Allow: selinuxprofileapi.Allow{
 						"var_log_t": {
 							"dir": []string{
 								"open",
@@ -360,6 +366,9 @@ func Test_selinuxProfileHandler(t *testing.T) {
 			wantValidateErr: true,
 			wantErrMatches: []string{
 				"didn't match expected characters: invalid permission",
+			},
+			existingObjs: []client.Object{
+				spodinstance.DeepCopy(),
 			},
 		},
 	}

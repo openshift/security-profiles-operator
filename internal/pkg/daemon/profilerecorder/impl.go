@@ -19,7 +19,7 @@ package profilerecorder
 import (
 	"context"
 
-	"github.com/containers/common/pkg/seccomp"
+	"go.podman.io/common/pkg/seccomp"
 	"google.golang.org/grpc"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -34,8 +34,8 @@ import (
 
 	bpfrecorderapi "sigs.k8s.io/security-profiles-operator/api/grpc/bpfrecorder"
 	enricherapi "sigs.k8s.io/security-profiles-operator/api/grpc/enricher"
-	profilerecording1alpha1 "sigs.k8s.io/security-profiles-operator/api/profilerecording/v1alpha1"
-	spodapi "sigs.k8s.io/security-profiles-operator/api/spod/v1alpha1"
+	profilerecordingapi "sigs.k8s.io/security-profiles-operator/api/profilerecording/v1"
+	spodapi "sigs.k8s.io/security-profiles-operator/api/spod/v1"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/daemon/bpfrecorder"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/daemon/common"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/daemon/enricher"
@@ -55,7 +55,7 @@ type impl interface {
 	ManagerGetEventRecorderFor(manager.Manager, string) record.EventRecorder
 	GetPod(context.Context, client.Client, client.ObjectKey) (*corev1.Pod, error)
 	GetSPOD(context.Context, client.Client) (*spodapi.SecurityProfilesOperatorDaemon, error)
-	DialBpfRecorder() (*grpc.ClientConn, context.CancelFunc, error)
+	DialBpfRecorder() (*grpc.ClientConn, error)
 	StartBpfRecorder(context.Context, bpfrecorderapi.BpfRecorderClient) error
 	StopBpfRecorder(context.Context, bpfrecorderapi.BpfRecorderClient) error
 	SyscallsForProfile(
@@ -79,8 +79,8 @@ type impl interface {
 	ResetAvcs(
 		context.Context, enricherapi.EnricherClient, *enricherapi.AvcRequest,
 	) error
-	DialEnricher() (*grpc.ClientConn, context.CancelFunc, error)
-	GetRecording(context.Context, client.Client, client.ObjectKey) (*profilerecording1alpha1.ProfileRecording, error)
+	DialEnricher() (*grpc.ClientConn, error)
+	GetRecording(context.Context, client.Client, client.ObjectKey) (*profilerecordingapi.ProfileRecording, error)
 	ApparmorForProfile(
 		context.Context,
 		bpfrecorderapi.BpfRecorderClient,
@@ -124,7 +124,7 @@ func (*defaultImpl) ManagerGetClient(m manager.Manager) client.Client {
 func (*defaultImpl) ManagerGetEventRecorderFor(
 	m manager.Manager, name string,
 ) record.EventRecorder {
-	return m.GetEventRecorderFor(name)
+	return m.GetEventRecorderFor(name) //nolint:staticcheck,nolintlint // TODO: migrate to GetEventRecorder
 }
 
 func (*defaultImpl) GetPod(
@@ -142,7 +142,7 @@ func (*defaultImpl) GetSPOD(
 	return common.GetSPOD(ctx, c)
 }
 
-func (*defaultImpl) DialBpfRecorder() (*grpc.ClientConn, context.CancelFunc, error) {
+func (*defaultImpl) DialBpfRecorder() (*grpc.ClientConn, error) {
 	return bpfrecorder.Dial()
 }
 
@@ -219,7 +219,7 @@ func (*defaultImpl) ResetAvcs(
 	return err
 }
 
-func (*defaultImpl) DialEnricher() (*grpc.ClientConn, context.CancelFunc, error) {
+func (*defaultImpl) DialEnricher() (*grpc.ClientConn, error) {
 	return enricher.Dial()
 }
 
@@ -227,8 +227,8 @@ func (*defaultImpl) GetRecording(
 	ctx context.Context,
 	cli client.Client,
 	key client.ObjectKey,
-) (*profilerecording1alpha1.ProfileRecording, error) {
-	recording := profilerecording1alpha1.ProfileRecording{}
+) (*profilerecordingapi.ProfileRecording, error) {
+	recording := profilerecordingapi.ProfileRecording{}
 
 	err := cli.Get(ctx, key, &recording)
 

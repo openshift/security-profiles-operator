@@ -1,5 +1,4 @@
 //go:build apparmor
-// +build apparmor
 
 /*
 Copyright 2021 The Kubernetes Authors.
@@ -31,8 +30,8 @@ import (
 	aa "github.com/pjbgf/go-apparmor/pkg/apparmor"
 	"github.com/pjbgf/go-apparmor/pkg/hostop"
 
-	"sigs.k8s.io/security-profiles-operator/api/apparmorprofile/v1alpha1"
-	profilebasev1alpha1 "sigs.k8s.io/security-profiles-operator/api/profilebase/v1alpha1"
+	apparmorprofileapi "sigs.k8s.io/security-profiles-operator/api/apparmorprofile/v1"
+	profilebaseapi "sigs.k8s.io/security-profiles-operator/api/profilebase/v1"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/daemon/apparmorprofile/crd2armor"
 )
 
@@ -46,6 +45,7 @@ const (
 	targetProfileDir       string = "/etc/apparmor.d/"
 
 	errInvalidCustomResourceType string = "invalid CRD kind"
+	errProfileExists             string = "profile exists"
 )
 
 func (a *aaProfileManager) Enabled() bool {
@@ -68,8 +68,8 @@ func (a *aaProfileManager) Enabled() bool {
 	return hostSupportsAppArmor
 }
 
-func (a *aaProfileManager) RemoveProfile(bp profilebasev1alpha1.StatusBaseUser) error {
-	profile, ok := bp.(*v1alpha1.AppArmorProfile)
+func (a *aaProfileManager) RemoveProfile(bp profilebaseapi.StatusBaseUser) error {
+	profile, ok := bp.(*apparmorprofileapi.AppArmorProfile)
 	if !ok {
 		return errors.New(errInvalidCustomResourceType)
 	}
@@ -77,13 +77,21 @@ func (a *aaProfileManager) RemoveProfile(bp profilebasev1alpha1.StatusBaseUser) 
 	return a.removeProfile(a.logger, profile.GetProfileName())
 }
 
-func (a *aaProfileManager) InstallProfile(bp profilebasev1alpha1.StatusBaseUser) (bool, error) {
-	profile, ok := bp.(*v1alpha1.AppArmorProfile)
+func (a *aaProfileManager) InstallProfile(bp profilebaseapi.StatusBaseUser) (bool, error) {
+	profile, ok := bp.(*apparmorprofileapi.AppArmorProfile)
 	if !ok {
 		return false, errors.New(errInvalidCustomResourceType)
 	}
 
-	policy, err := crd2armor.GenerateProfile(profile.GetProfileName(), profile.Spec.ComplainMode, &profile.Spec.Abstract)
+	// Avoid overwriting an existing profile first time when a new profile is installed.
+	// We check if already a profile with the same name already exists, and if so we bail
+	// out. This is to prevent an attack vector when someone wants to overwrite a well-known
+	// profile existing into a cluster node.
+	if profile.Generation == 1 && a.checkProfileExist(a.logger, profile.GetProfileName()) {
+		return false, errors.New(errProfileExists)
+	}
+
+	policy, err := crd2armor.GenerateProfile(profile.GetProfileName(), profile.Spec.Mode, &profile.Spec.Abstract)
 	if err != nil {
 		return false, fmt.Errorf("generating raw apparmor profile: %w", err)
 	}
@@ -97,6 +105,25 @@ func (a *aaProfileManager) CustomResourceTypeName() string {
 
 func profileFilename(profileName string) string {
 	return strings.Trim(strings.ReplaceAll(profileName, "/", "."), ".")
+}
+
+// checkProfileExists checks if an profile is already loaded into the kernel.
+func checkProfileExist(logger logr.Logger, profileName string) bool {
+	apparmor := aa.NewAppArmor(aa.WithLogger(logger))
+
+	loaded, err := apparmor.PolicyLoaded(profileName)
+	if err != nil {
+		logger.Info("cannot check policy status: assumes profile doesn't exist",
+			"profile-name", profileName)
+
+		return false
+	}
+
+	if loaded {
+		return true
+	}
+
+	return false
 }
 
 func loadProfile(logger logr.Logger, name, content string) (bool, error) {

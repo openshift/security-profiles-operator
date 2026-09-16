@@ -25,8 +25,8 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	seccompprofileapi "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1beta1"
-	spodv1alpha1 "sigs.k8s.io/security-profiles-operator/api/spod/v1alpha1"
+	seccompprofileapi "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1"
+	spodapi "sigs.k8s.io/security-profiles-operator/api/spod/v1"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/artifact"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/daemon/common"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/daemon/metrics"
@@ -37,7 +37,8 @@ type defaultImpl struct{}
 //go:generate go run github.com/maxbrunsfeld/counterfeiter/v6 -generate -header ../../../../hack/boilerplate/boilerplate.generatego.txt
 //counterfeiter:generate . impl
 type impl interface {
-	Pull(context.Context, logr.Logger, string, string, string, *v1.Platform, bool) (*artifact.PullResult, error)
+	Pull(context.Context, logr.Logger, string, string, string, *v1.Platform,
+		*artifact.PullSignatureOptions) (*artifact.PullResult, error)
 	PullResultType(*artifact.PullResult) artifact.PullResultType
 	PullResultSeccompProfile(*artifact.PullResult) *seccompprofileapi.SeccompProfile
 	ClientGetProfile(
@@ -45,7 +46,7 @@ type impl interface {
 	) (*seccompprofileapi.SeccompProfile, error)
 	IncSeccompProfileError(*metrics.Metrics, string)
 	RecordEvent(record.EventRecorder, runtime.Object, string, string, string)
-	GetSPOD(context.Context, client.Client) (*spodv1alpha1.SecurityProfilesOperatorDaemon, error)
+	GetSPOD(context.Context, client.Client) (*spodapi.SecurityProfilesOperatorDaemon, error)
 }
 
 func (*defaultImpl) Pull(
@@ -53,9 +54,9 @@ func (*defaultImpl) Pull(
 	l logr.Logger,
 	from, username, password string,
 	platform *v1.Platform,
-	disableSignatureVerification bool,
+	signOpts *artifact.PullSignatureOptions,
 ) (*artifact.PullResult, error) {
-	return artifact.New(l).Pull(ctx, from, username, password, platform, disableSignatureVerification)
+	return artifact.New(l).Pull(ctx, from, username, password, platform, signOpts)
 }
 
 func (*defaultImpl) PullResultType(res *artifact.PullResult) artifact.PullResultType {
@@ -87,6 +88,6 @@ func (*defaultImpl) RecordEvent(
 
 func (*defaultImpl) GetSPOD(
 	ctx context.Context, cli client.Client,
-) (*spodv1alpha1.SecurityProfilesOperatorDaemon, error) {
+) (*spodapi.SecurityProfilesOperatorDaemon, error) {
 	return common.GetSPOD(ctx, cli)
 }

@@ -29,7 +29,7 @@ import (
 
 // ServiceMonitor returns the default ServiceMonitor for automatic metrics
 // retrieval via the prometheus operator.
-func ServiceMonitor(caInjectType CAInjectType) *v1.ServiceMonitor {
+func ServiceMonitor(caInjectType CAInjectType, enableInsecureMetricsAccess bool) *v1.ServiceMonitor {
 	return &v1.ServiceMonitor{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "security-profiles-operator-monitor",
@@ -37,8 +37,8 @@ func ServiceMonitor(caInjectType CAInjectType) *v1.ServiceMonitor {
 		},
 		Spec: v1.ServiceMonitorSpec{
 			Endpoints: []v1.Endpoint{
-				endpointFor("/metrics", caInjectType),
-				endpointFor("/metrics-spod", caInjectType),
+				endpointFor("/metrics", caInjectType, enableInsecureMetricsAccess),
+				endpointFor("/metrics-spod", caInjectType, enableInsecureMetricsAccess),
 			},
 			Selector: metav1.LabelSelector{
 				MatchExpressions: []metav1.LabelSelectorRequirement{
@@ -54,20 +54,47 @@ func ServiceMonitor(caInjectType CAInjectType) *v1.ServiceMonitor {
 }
 
 // endpointFor provides a standard endpoint for the given URL path.
-func endpointFor(path string, caInjectType CAInjectType) v1.Endpoint {
+func endpointFor(path string, caInjectType CAInjectType, enableInsecureMetricsAccess bool) v1.Endpoint {
 	serverName := fmt.Sprintf("metrics.%s.svc", config.GetOperatorNamespace())
+	scheme := v1.Scheme("https")
+	port := "https"
+
+	if enableInsecureMetricsAccess {
+		scheme = v1.Scheme("http")
+		port = "http"
+	}
+
 	ep := v1.Endpoint{
 		Path:     path,
 		Interval: "10s",
-		Port:     "https",
-		Scheme:   "https",
-		BearerTokenSecret: &corev1.SecretKeySelector{
+		Port:     port,
+		Scheme:   &scheme,
+	}
+
+	if enableInsecureMetricsAccess {
+		return ep
+	}
+
+	ep.Authorization = &v1.SafeAuthorization{
+		Credentials: &corev1.SecretKeySelector{
 			LocalObjectReference: corev1.LocalObjectReference{
 				Name: "metrics-token",
 			},
 			Key: "token",
 		},
-		TLSConfig: &v1.TLSConfig{
+	}
+
+	if isOpenShiftSystemInstalled(caInjectType) {
+		ep.TLSConfig = &v1.TLSConfig{
+			TLSFilesConfig: v1.TLSFilesConfig{
+				CAFile: "/etc/prometheus/configmaps/serving-certs-ca-bundle/service-ca.crt",
+			},
+			SafeTLSConfig: v1.SafeTLSConfig{
+				ServerName: &serverName,
+			},
+		}
+	} else {
+		ep.TLSConfig = &v1.TLSConfig{
 			SafeTLSConfig: v1.SafeTLSConfig{
 				ServerName: &serverName,
 				CA: v1.SecretOrConfigMap{
@@ -78,15 +105,6 @@ func endpointFor(path string, caInjectType CAInjectType) v1.Endpoint {
 						Key: "tls.crt",
 					},
 				},
-			},
-		},
-	}
-
-	if isOpenShiftSystemInstalled(caInjectType) {
-		ep.TLSConfig = &v1.TLSConfig{
-			CAFile: "/etc/prometheus/configmaps/serving-certs-ca-bundle/service-ca.crt",
-			SafeTLSConfig: v1.SafeTLSConfig{
-				ServerName: &serverName,
 			},
 		}
 	}

@@ -1,5 +1,4 @@
 //go:build linux
-// +build linux
 
 /*
 Copyright 2021 The Kubernetes Authors.
@@ -113,7 +112,7 @@ func TestRun(t *testing.T) {
 			runAsync: false,
 			prepare: func(mock *enricherfakes.FakeImpl, lineChan chan *types.AuditLine) {
 				mock.GetenvReturns(node)
-				mock.DialReturns(nil, nil, errTest)
+				mock.DialReturns(nil, errTest)
 			},
 			assert: func(mock *enricherfakes.FakeImpl, lineChan chan *types.AuditLine, err error) {
 				require.Error(t, err)
@@ -124,7 +123,7 @@ func TestRun(t *testing.T) {
 			runAsync: false,
 			prepare: func(mock *enricherfakes.FakeImpl, lineChan chan *types.AuditLine) {
 				mock.GetenvReturns(node)
-				mock.DialReturns(nil, func() {}, errTest)
+				mock.DialReturns(nil, errTest)
 				mock.AuditIncReturns(nil, errTest)
 			},
 			assert: func(mock *enricherfakes.FakeImpl, lineChan chan *types.AuditLine, err error) {
@@ -136,7 +135,7 @@ func TestRun(t *testing.T) {
 			runAsync: false,
 			prepare: func(mock *enricherfakes.FakeImpl, lineChan chan *types.AuditLine) {
 				mock.GetenvReturns(node)
-				mock.DialReturns(nil, func() {}, errTest)
+				mock.DialReturns(nil, errTest)
 				mock.StartTailReturns(nil, errTest)
 			},
 			assert: func(mock *enricherfakes.FakeImpl, lineChan chan *types.AuditLine, err error) {
@@ -147,7 +146,7 @@ func TestRun(t *testing.T) {
 			runAsync: false,
 			prepare: func(mock *enricherfakes.FakeImpl, lineChan chan *types.AuditLine) {
 				mock.GetenvReturns(node)
-				mock.DialReturns(nil, func() {}, errTest)
+				mock.DialReturns(nil, errTest)
 				mock.ListenReturns(nil, errTest)
 			},
 			assert: func(mock *enricherfakes.FakeImpl, lineChan chan *types.AuditLine, err error) {
@@ -159,7 +158,7 @@ func TestRun(t *testing.T) {
 			runAsync: false,
 			prepare: func(mock *enricherfakes.FakeImpl, lineChan chan *types.AuditLine) {
 				mock.GetenvReturns(node)
-				mock.DialReturns(nil, func() {}, errTest)
+				mock.DialReturns(nil, errTest)
 				mock.ChownReturns(errTest)
 			},
 			assert: func(mock *enricherfakes.FakeImpl, lineChan chan *types.AuditLine, err error) {
@@ -170,7 +169,7 @@ func TestRun(t *testing.T) {
 			runAsync: false,
 			prepare: func(mock *enricherfakes.FakeImpl, lineChan chan *types.AuditLine) {
 				mock.GetenvReturns(node)
-				mock.DialReturns(nil, func() {}, errTest)
+				mock.DialReturns(nil, errTest)
 				close(lineChan)
 				mock.StartTailReturns(lineChan, nil)
 				mock.TailErrReturns(errTest)
@@ -243,6 +242,7 @@ func TestRun(t *testing.T) {
 						},
 					}}}, nil)
 				}
+
 				mock.ListPodsReturnsOnCall(i, &v1.PodList{Items: []v1.Pod{{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      pod,
@@ -306,8 +306,10 @@ func TestRun(t *testing.T) {
 
 				for mock.SendMetricCallCount() != 2 {
 				}
+
 				_, firstSysCall := mock.SendMetricArgsForCall(0)
 				require.NotNil(t, firstSysCall.GetSelinuxReq())
+
 				_, secondSysCall := mock.SendMetricArgsForCall(1)
 				require.NotNil(t, secondSysCall.GetSeccompReq())
 

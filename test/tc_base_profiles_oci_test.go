@@ -29,7 +29,7 @@ func (e *e2e) testCaseBaseProfileOCI([]string) {
 
 	e.kubectlOperatorNS(
 		"patch", "spod", "spod",
-		"-p", `{"spec":{"disableOciArtifactSignatureVerification": true}}`,
+		"-p", `{"spec":{"security":{"disableOciArtifactSignatureVerification": true}}}`,
 		"--type=merge",
 	)
 
@@ -44,7 +44,7 @@ func (e *e2e) testCaseBaseProfileOCI([]string) {
 	namespace := e.getCurrentContextNamespace(defaultNamespace)
 	profileName := fmt.Sprintf("profile-%v", time.Now().Unix())
 	profileYAML := fmt.Sprintf(`
-apiVersion: security-profiles-operator.x-k8s.io/v1beta1
+apiVersion: security-profiles-operator.x-k8s.io/v1
 kind: SeccompProfile
 metadata:
   name: %s
@@ -80,14 +80,14 @@ spec:
 	e.logf("Creating profile")
 
 	profileFile, err := os.CreateTemp("", "profile-*.yaml")
-	e.Nil(err)
+	e.Require().NoError(err)
 
 	defer os.Remove(profileFile.Name())
 
 	_, err = profileFile.WriteString(profileYAML)
-	e.Nil(err)
+	e.Require().NoError(err)
 	err = profileFile.Close()
-	e.Nil(err)
+	e.Require().NoError(err)
 	e.kubectl("create", "-f", profileFile.Name())
 
 	defer e.kubectl("delete", "-f", profileFile.Name())
@@ -98,14 +98,14 @@ spec:
 	e.logf("Creating pod")
 
 	podFile, err := os.CreateTemp("", "pod-*.yaml")
-	e.Nil(err)
+	e.Require().NoError(err)
 
 	defer os.Remove(podFile.Name())
 
 	_, err = podFile.WriteString(podYAML)
-	e.Nil(err)
+	e.Require().NoError(err)
 	err = podFile.Close()
-	e.Nil(err)
+	e.Require().NoError(err)
 	e.kubectl("create", "-f", podFile.Name())
 
 	defer e.kubectl("delete", "pod", podName)

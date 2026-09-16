@@ -129,6 +129,12 @@ func (p *Parser) next() (pos scanner.Position, tok token, lit string) {
 
 // pre: first single quote has been read
 func (p *Parser) nextSingleQuotedString() (pos scanner.Position, tok token, lit string) {
+	// Save current scanner mode and temporarily disable comment scanning
+	// to prevent // inside single quotes from being treated as comments
+	savedMode := p.scanner.Mode
+	p.scanner.Mode = scanner.ScanIdents | scanner.ScanFloats | scanner.ScanStrings | scanner.ScanRawStrings
+	defer func() { p.scanner.Mode = savedMode }()
+
 	var ch rune
 	p.ignoreErrorsWhile(func() { ch = p.scanner.Scan() })
 	if ch == scanner.EOF {
@@ -265,16 +271,17 @@ func (p *Parser) nextIdent(keywordStartAllowed bool) (pos scanner.Position, tok 
 	// see if identifier is namespaced
 	for {
 		r := p.peekNonWhitespace()
-		if '.' != r {
+		if r != '.' {
 			break
 		}
 		p.next() // consume dot
+		fullLit += "."
 		pos, tok, lit := p.next()
 		if tIDENT != tok && !isKeyword(tok) {
 			p.nextPut(pos, tok, lit)
 			break
 		}
-		fullLit = fmt.Sprintf("%s.%s", fullLit, lit)
+		fullLit += lit
 	}
 	return startPos, tIDENT, fullLit
 }
@@ -290,4 +297,31 @@ func (p *Parser) peekNonWhitespace() rune {
 		return p.peekNonWhitespace()
 	}
 	return r
+}
+
+// https://protobuf.dev/reference/protobuf/proto3-spec/
+func (p *Parser) nextFullIdent(keywordStartAllowed bool) (pos scanner.Position, tok token, lit string) {
+	pos, tok, lit = p.next()
+	if tIDENT != tok {
+		// can be keyword
+		if !(isKeyword(tok) && keywordStartAllowed) {
+			return
+		}
+		// proceed with keyword as first literal
+	}
+	fullIdent := lit
+	for {
+		r := p.peekNonWhitespace()
+		if r != '.' {
+			break
+		}
+		p.next() // consume dot
+		pos, tok, lit = p.nextFullIdent(true)
+		if tok != tIDENT {
+			p.nextPut(pos, tok, lit)
+			break
+		}
+		fullIdent = fmt.Sprintf("%s.%s", fullIdent, lit)
+	}
+	return pos, tIDENT, fullIdent
 }

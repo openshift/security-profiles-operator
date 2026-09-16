@@ -4,11 +4,14 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"maps"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
 
+	"cuelang.org/go/cue/ast"
 	"cuelang.org/go/internal/mod/modimports"
 	"cuelang.org/go/internal/mod/modrequirements"
 	"cuelang.org/go/internal/par"
@@ -19,7 +22,19 @@ import (
 type Registry interface {
 	// Fetch returns the location of the contents for the given module
 	// version, downloading it if necessary.
+	// It returns an error that satisfies [errors.Is]([modregistry.ErrNotFound]) if the
+	// module is not present in the store at this version.
 	Fetch(ctx context.Context, m module.Version) (module.SourceLoc, error)
+}
+
+// CachedRegistry is optionally implemented by a registry that
+// implements a cache.
+type CachedRegistry interface {
+	// FetchFromCache looks up the given module in the cache.
+	// It returns an error that satisfies [errors.Is]([modregistry.ErrNotFound]) if the
+	// module is not present in the cache at this version or if there
+	// is no cache.
+	FetchFromCache(mv module.Version) (module.SourceLoc, error)
 }
 
 // Flags is a set of flags tracking metadata about a package.
@@ -95,13 +110,14 @@ type Package struct {
 	flags atomicLoadPkgFlags
 
 	// Populated by [loader.load].
-	mod          module.Version     // module providing package
+	mod          module.Version   // module providing package
+	modRoot      module.SourceLoc // root location of module
+	files        []modimports.ModuleFile
 	locs         []module.SourceLoc // location of source code directories
 	err          error              // error loading package
 	imports      []*Package         // packages imported by this one
 	inStd        bool
 	fromExternal bool
-	altMods      []module.Version // modules that could have contained the package but did not
 
 	// Populated by postprocessing in [Packages.buildStacks]:
 	stack *Package // package importing this one in minimal import stack for this pkg
@@ -115,8 +131,16 @@ func (pkg *Package) FromExternalModule() bool {
 	return pkg.fromExternal
 }
 
+func (pkg *Package) IsStdlibPackage() bool {
+	return pkg.inStd
+}
+
 func (pkg *Package) Locations() []module.SourceLoc {
 	return pkg.locs
+}
+
+func (pkg *Package) Files() []modimports.ModuleFile {
+	return pkg.files
 }
 
 func (pkg *Package) Error() error {
@@ -143,6 +167,10 @@ func (pkg *Package) Mod() module.Version {
 	return pkg.mod
 }
 
+func (pkg *Package) ModRoot() module.SourceLoc {
+	return pkg.modRoot
+}
+
 // LoadPackages loads information about all the given packages and the
 // packages they import, recursively, using modules from the given
 // requirements to determine which modules they might be obtained from,
@@ -164,6 +192,9 @@ func LoadPackages(
 	rootPkgPaths []string,
 	shouldIncludePkgFile func(pkgPath string, mod module.Version, fsys fs.FS, mf modimports.ModuleFile) bool,
 ) *Packages {
+	if shouldIncludePkgFile == nil {
+		shouldIncludePkgFile = func(pkgPath string, mod module.Version, fsys fs.FS, mf modimports.ModuleFile) bool { return true }
+	}
 	pkgs := &Packages{
 		mainModuleVersion:    module.MustNewVersion(mainModulePath, ""),
 		mainModuleLoc:        mainModuleLoc,
@@ -248,15 +279,15 @@ func (pkgs *Packages) load(ctx context.Context, pkg *Package) {
 		pkg.inStd = true
 		return
 	}
-	pkg.fromExternal = pkg.mod != pkgs.mainModuleVersion
-	pkg.mod, pkg.locs, pkg.altMods, pkg.err = pkgs.importFromModules(ctx, pkg.path)
+	pkg.mod, pkg.modRoot, pkg.locs, pkg.err = pkgs.importFromModules(ctx, pkg.path)
 	if pkg.err != nil {
 		return
 	}
+	pkg.fromExternal = pkg.mod != pkgs.mainModuleVersion
 	if pkgs.mainModuleVersion.Path() == pkg.mod.Path() {
 		pkgs.applyPkgFlags(pkg, PkgInAll)
 	}
-	ip := module.ParseImportPath(pkg.path)
+	ip := ast.ParseImportPath(pkg.path)
 	pkgQual := ip.Qualifier
 	switch pkgQual {
 	case "":
@@ -274,6 +305,7 @@ func (pkgs *Packages) load(ctx context.Context, pkg *Package) {
 	importsMap := make(map[string]bool)
 	foundPackageFile := false
 	excludedPackageFiles := 0
+	var files []modimports.ModuleFile
 	for _, loc := range pkg.locs {
 		// Layer an iterator whose yield function keeps track of whether we have seen
 		// a single valid CUE file in the package directory.
@@ -290,6 +322,7 @@ func (pkgs *Packages) load(ctx context.Context, pkg *Package) {
 					return true
 				}
 				foundPackageFile = true
+				files = append(files, mf)
 				return yield(mf, err)
 			})
 		}
@@ -310,11 +343,9 @@ func (pkgs *Packages) load(ctx context.Context, pkg *Package) {
 		}
 		return
 	}
-	imports := make([]string, 0, len(importsMap))
-	for imp := range importsMap {
-		imports = append(imports, imp)
-	}
-	slices.Sort(imports) // Make the algorithm deterministic for tests.
+	pkg.files = files
+	// Make the algorithm deterministic for tests.
+	imports := slices.Sorted(maps.Keys(importsMap))
 
 	pkg.imports = make([]*Package, 0, len(imports))
 	var importFlags Flags
@@ -399,4 +430,38 @@ func (af *atomicLoadPkgFlags) has(cond Flags) bool {
 func IsStdlibPackage(pkgPath string) bool {
 	firstElem, _, _ := strings.Cut(pkgPath, "/")
 	return !strings.Contains(firstElem, ".")
+}
+
+// InsideCueMod reports whether absDir is inside a cue.mod directory,
+// excluding the legacy directories cue.mod/{pkg,usr,gen},
+// which are still supported for placing package dependencies.
+//
+// For example, /foo/cue.mod and /foo/cue.mod/bar are inside cue.mod,
+// but /foo, /foo/cue.modx, and /foo/cue.mod/pkg/example.com are not.
+//
+// absDir must be an absolute system path that is clean; see [filepath.Clean].
+func InsideCueMod(absDir string) bool {
+	lastPart := ""
+	for {
+		dir, base, found := cutLast(absDir, string(filepath.Separator))
+		if base == "cue.mod" {
+			switch lastPart {
+			case "pkg", "usr", "gen":
+				return false
+			}
+			return true
+		}
+		if !found {
+			return false
+		}
+		absDir = dir
+		lastPart = base
+	}
+}
+
+func cutLast(s, sep string) (before, after string, found bool) {
+	if i := strings.LastIndex(s, sep); i >= 0 {
+		return s[:i], s[i+len(sep):], true
+	}
+	return "", s, false
 }

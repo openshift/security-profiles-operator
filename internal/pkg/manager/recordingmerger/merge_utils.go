@@ -20,32 +20,33 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	apparmorprofileapi "sigs.k8s.io/security-profiles-operator/api/apparmorprofile/v1alpha1"
-	profilebase "sigs.k8s.io/security-profiles-operator/api/profilebase/v1alpha1"
-	profilerecording1alpha1 "sigs.k8s.io/security-profiles-operator/api/profilerecording/v1alpha1"
-	seccompprofile "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1beta1"
-	selinuxprofileapi "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1alpha2"
+	apparmorprofileapi "sigs.k8s.io/security-profiles-operator/api/apparmorprofile/v1"
+	profilebase "sigs.k8s.io/security-profiles-operator/api/profilebase/v1"
+	profilerecordingapi "sigs.k8s.io/security-profiles-operator/api/profilerecording/v1"
+	seccompprofile "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1"
+	selinuxprofileapi "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/util"
 )
 
 func mergedObjectMeta(profileName, recordingName, namespace string) *metav1.ObjectMeta {
 	return &metav1.ObjectMeta{
-		Name:      profileName,
-		Namespace: namespace,
+		Name: profileName,
 		Labels: map[string]string{
-			profilerecording1alpha1.ProfileToRecordingLabel: recordingName,
+			profilerecordingapi.ProfileToRecordingLabel:          recordingName,
+			profilerecordingapi.ProfileToRecordingNamespaceLabel: namespace,
 		},
 	}
 }
 
 func mergedProfileName(recordingName string, prf metav1.Object) string {
-	suffix := prf.GetLabels()[profilerecording1alpha1.ProfileToContainerLabel]
+	suffix := prf.GetLabels()[profilerecordingapi.ProfileToContainerLabel]
 	if suffix == "" {
 		suffix = prf.GetName()
 	}
@@ -80,15 +81,15 @@ func listPartialProfiles(
 	ctx context.Context,
 	cli client.Client,
 	list client.ObjectList,
-	recording *profilerecording1alpha1.ProfileRecording,
+	recording *profilerecordingapi.ProfileRecording,
 ) (perContainerMergeableProfiles, error) {
 	if err := cli.List(
 		ctx,
 		list,
-		client.InNamespace(recording.Namespace),
 		client.MatchingLabels{
-			profilerecording1alpha1.ProfileToRecordingLabel: recording.Name,
-			profilebase.ProfilePartialLabel:                 "true",
+			profilerecordingapi.ProfileToRecordingLabel:          recording.Name,
+			profilerecordingapi.ProfileToRecordingNamespaceLabel: recording.Namespace,
+			profilebase.ProfilePartialLabel:                      "true",
 		}); err != nil {
 		return nil, fmt.Errorf("listing partial profiles for %s: %w", recording.Name, err)
 	}
@@ -111,6 +112,7 @@ func listPartialProfiles(
 			// todo: log
 			return nil
 		}
+
 		partialProfiles[containerID] = append(partialProfiles[containerID], partialPrf)
 
 		return nil
@@ -143,28 +145,73 @@ func MergeProfiles(
 	return merged.getProfile(), nil
 }
 
+// NormalizeProfile normalizes a profile's internal representation to match
+// the format produced by the merger library. For SeccompProfiles, this
+// converts multi-name syscall entries to single-name-per-entry format.
+// For AppArmorProfiles, string slices are sorted alphabetically.
+func NormalizeProfile(obj client.Object) error {
+	switch p := obj.(type) {
+	case *seccompprofile.SeccompProfile:
+		return normalizeSeccompProfile(p)
+	case *apparmorprofileapi.AppArmorProfile:
+		normalizeAppArmorProfile(p)
+	}
+
+	return nil
+}
+
+func normalizeSeccompProfile(sp *seccompprofile.SeccompProfile) error {
+	normalized, err := util.UnionSyscalls(sp.Spec.Syscalls, nil)
+	if err != nil {
+		return fmt.Errorf("normalize syscalls: %w", err)
+	}
+
+	sp.Spec.Syscalls = normalized
+
+	return nil
+}
+
+func normalizeAppArmorProfile(ap *apparmorprofileapi.AppArmorProfile) {
+	a := &ap.Spec.Abstract
+
+	if a.Executable != nil {
+		slices.Sort(a.Executable.AllowedExecutables)
+		slices.Sort(a.Executable.AllowedLibraries)
+	}
+
+	if a.Filesystem != nil {
+		slices.Sort(a.Filesystem.ReadOnlyPaths)
+		slices.Sort(a.Filesystem.WriteOnlyPaths)
+		slices.Sort(a.Filesystem.ReadWritePaths)
+	}
+
+	if a.Capability != nil {
+		slices.Sort(a.Capability.AllowedCapabilities)
+	}
+}
+
 func getContainerID(prf client.Object) string {
 	labels := prf.GetLabels()
 	if labels == nil {
 		return ""
 	}
 
-	return labels[profilerecording1alpha1.ProfileToContainerLabel]
+	return labels[profilerecordingapi.ProfileToContainerLabel]
 }
 
 func deletePartialProfiles(
 	ctx context.Context,
 	cli client.Client,
 	prf client.Object,
-	recording *profilerecording1alpha1.ProfileRecording,
+	recording *profilerecordingapi.ProfileRecording,
 ) error {
 	return cli.DeleteAllOf(
 		ctx,
 		prf,
-		client.InNamespace(recording.Namespace),
 		client.MatchingLabels{
-			profilerecording1alpha1.ProfileToRecordingLabel: recording.Name,
-			profilebase.ProfilePartialLabel:                 "true",
+			profilerecordingapi.ProfileToRecordingLabel:          recording.Name,
+			profilerecordingapi.ProfileToRecordingNamespaceLabel: recording.Namespace,
+			profilebase.ProfilePartialLabel:                      "true",
 		})
 }
 
@@ -254,4 +301,19 @@ func addAllow(union, additional selinuxprofileapi.Allow) selinuxprofileapi.Allow
 	}
 
 	return union
+}
+
+// setMergedLabels ensures that a merged profile carries the recording labels
+// and is not marked as partial. The merged profile can reuse the name of a
+// partial profile recorded by a previous operator version, in which case the
+// partial label would otherwise stick and the profile would never be
+// reconciled.
+func setMergedLabels(objectMeta *metav1.ObjectMeta, recording *profilerecordingapi.ProfileRecording) {
+	if objectMeta.Labels == nil {
+		objectMeta.Labels = map[string]string{}
+	}
+
+	objectMeta.Labels[profilerecordingapi.ProfileToRecordingLabel] = recording.Name
+	objectMeta.Labels[profilerecordingapi.ProfileToRecordingNamespaceLabel] = recording.Namespace
+	delete(objectMeta.Labels, profilebase.ProfilePartialLabel)
 }
