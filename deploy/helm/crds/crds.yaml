@@ -965,6 +965,10 @@ spec:
                 - SCMP_ACT_LOG
                 - SCMP_ACT_NOTIFY
                 type: string
+              disabled:
+                description: Whether the profile is disabled and should be skipped
+                  during reconciliation.
+                type: boolean
               flags:
                 description: flags is a list of flags to use with seccomp(2).
                 items:
@@ -985,15 +989,6 @@ spec:
                   listenerPath is the path of UNIX domain socket to contact a seccomp
                   agent for SCMP_ACT_NOTIFY.
                 pattern: ^/var/run/security-profiles-operator/[a-zA-Z0-9_\-\.]+$
-                type: string
-              state:
-                default: Enabled
-                description: |-
-                  state controls whether the profile is enabled or disabled for
-                  reconciliation. A disabled profile will be skipped.
-                enum:
-                - Enabled
-                - Disabled
                 type: string
               syscalls:
                 description: |-
@@ -4570,19 +4565,14 @@ spec:
           spec:
             description: spec defines the desired state of the RawSelinuxProfile.
             properties:
+              disabled:
+                description: Whether the profile is disabled and should be skipped
+                  during reconciliation.
+                type: boolean
               policy:
                 description: policy is the raw SELinux policy module content.
                 maxLength: 500000
                 minLength: 1
-                type: string
-              state:
-                default: Enabled
-                description: |-
-                  state controls whether the profile is enabled or disabled for
-                  reconciliation. A disabled profile will be skipped.
-                enum:
-                - Enabled
-                - Disabled
                 type: string
             type: object
           status:
@@ -4931,6 +4921,10 @@ spec:
                   type: object
                 description: allow defines the allow policy for the profile.
                 type: object
+              disabled:
+                description: Whether the profile is disabled and should be skipped
+                  during reconciliation.
+                type: boolean
               inherit:
                 default:
                 - kind: System
@@ -4962,25 +4956,12 @@ spec:
                   type: object
                 type: array
                 x-kubernetes-list-type: atomic
-              mode:
-                default: Enforcing
+              permissive:
+                default: false
                 description: |-
-                  mode controls the enforcement mode for the SELinux profile.
-                  In "Permissive" mode, violations are logged but allowed.
-                  In "Enforcing" mode (the default), violations are denied.
-                enum:
-                - Enforcing
-                - Permissive
-                type: string
-              state:
-                default: Enabled
-                description: |-
-                  state controls whether the profile is enabled or disabled for
-                  reconciliation. A disabled profile will be skipped.
-                enum:
-                - Enabled
-                - Disabled
-                type: string
+                  Permissive, when true will cause the SELinux profile to only
+                  log violations instead of enforcing them.
+                type: boolean
             type: object
           status:
             description: status contains the observed state of the SelinuxProfile.
@@ -5413,25 +5394,16 @@ spec:
                         type: object
                     type: object
                 type: object
-              mode:
-                default: Enforce
+              complainMode:
                 description: |-
-                  mode controls the enforcement mode for the AppArmor profile.
-                  In "Complain" mode, violations are logged but allowed.
-                  In "Enforce" mode (the default), violations are denied.
-                enum:
-                - Enforce
-                - Complain
-                type: string
-              state:
-                default: Enabled
-                description: |-
-                  state controls whether the profile is enabled or disabled for
-                  reconciliation. A disabled profile will be skipped.
-                enum:
-                - Enabled
-                - Disabled
-                type: string
+                  ComplainMode places the apparmor profile into "complain" mode, by default is placed in "enforce" mode.
+                  In complain mode, if a given action is not allowed, it will be allowed, but this violation will be
+                  logged with a tag of access being "ALLOWED unconfined".
+                type: boolean
+              disabled:
+                description: Whether the profile is disabled and should be skipped
+                  during reconciliation.
+                type: boolean
             type: object
           status:
             description: status contains the observed state of the AppArmor profile.

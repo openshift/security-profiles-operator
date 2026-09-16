@@ -252,6 +252,10 @@ spec:
                   type: object
                 description: allow defines the allow policy for the profile.
                 type: object
+              disabled:
+                description: Whether the profile is disabled and should be skipped
+                  during reconciliation.
+                type: boolean
               inherit:
                 default:
                 - kind: System
@@ -283,25 +287,12 @@ spec:
                   type: object
                 type: array
                 x-kubernetes-list-type: atomic
-              mode:
-                default: Enforcing
+              permissive:
+                default: false
                 description: |-
-                  mode controls the enforcement mode for the SELinux profile.
-                  In "Permissive" mode, violations are logged but allowed.
-                  In "Enforcing" mode (the default), violations are denied.
-                enum:
-                - Enforcing
-                - Permissive
-                type: string
-              state:
-                default: Enabled
-                description: |-
-                  state controls whether the profile is enabled or disabled for
-                  reconciliation. A disabled profile will be skipped.
-                enum:
-                - Enabled
-                - Disabled
-                type: string
+                  Permissive, when true will cause the SELinux profile to only
+                  log violations instead of enforcing them.
+                type: boolean
             type: object
           status:
             description: status contains the observed state of the SelinuxProfile.
