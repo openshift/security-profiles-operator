@@ -19,68 +19,53 @@ package bindata
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/config"
 )
 
-// WebhookImageBootstrapper is a manager runnable which aligns the image of the
-// operator managed webhook deployment with the image of the running operator
-// before any controller starts to reconcile.
+var (
+	// webhookBootstrapInterval is the retry interval of EnsureWebhookImageWithRetry.
+	webhookBootstrapInterval = 5 * time.Second
+	// webhookBootstrapTimeout is the overall timeout of EnsureWebhookImageWithRetry.
+	webhookBootstrapTimeout = 2 * time.Minute
+)
+
+// EnsureWebhookImageWithRetry calls EnsureWebhookImage until it succeeds or
+// the bootstrap timeout expires.
 //
-// The CRD conversion webhook (/convert) is served by the webhook deployment
-// only. During an upgrade the CRDs are replaced first, so the new operator
-// needs a working conversion webhook to read resources which are still
-// stored in a previous API version (for example the SPOD configuration).
-// The webhook deployment is normally updated by the SPOD controller, which in
-// turn needs to read the SPOD configuration. Without this bootstrap the old
-// webhook deployment would stay in place forever and the operator would be
-// stuck on conversion errors.
+// The CRD conversion webhook (/convert) is served by the operator managed
+// webhook deployment only. During an upgrade the CRDs are replaced first,
+// so the new operator needs a working conversion webhook before its caches
+// can sync: the field indexers register informers for the profile APIs
+// before the manager starts, and listing them requires converting objects
+// which are still stored in a previous API version. The webhook deployment
+// is normally updated by the SPOD controller, which only runs after the
+// caches synced. Without this bootstrap the old webhook deployment would
+// stay in place forever and the manager would never start.
 //
-// The bootstrap only uses core and apps/v1 resources so it never depends on a
-// conversion webhook itself.
-type WebhookImageBootstrapper struct {
-	log       logr.Logger
-	reader    client.Reader
-	writer    client.Writer
-	namespace string
-}
+// This has to run before the manager is started and must only use core and
+// apps/v1 resources so that it never depends on a conversion webhook itself.
+func EnsureWebhookImageWithRetry(
+	ctx context.Context, log logr.Logger, c client.Client, namespace string,
+) error {
+	return wait.PollUntilContextTimeout(ctx, webhookBootstrapInterval, webhookBootstrapTimeout, true,
+		func(ctx context.Context) (bool, error) {
+			if err := EnsureWebhookImage(ctx, log, c, c, namespace); err != nil {
+				log.Info("Retrying to bootstrap the webhook deployment image", "error", err.Error())
 
-// NewWebhookImageBootstrapper creates a new WebhookImageBootstrapper. The
-// reader should not depend on a synced cache (for example the manager API
-// reader).
-func NewWebhookImageBootstrapper(
-	log logr.Logger, reader client.Reader, writer client.Writer, namespace string,
-) *WebhookImageBootstrapper {
-	return &WebhookImageBootstrapper{
-		log:       log,
-		reader:    reader,
-		writer:    writer,
-		namespace: namespace,
-	}
-}
+				return false, nil
+			}
 
-// Start implements manager.Runnable. It returns after the bootstrap has been
-// executed once.
-func (b *WebhookImageBootstrapper) Start(ctx context.Context) error {
-	if err := EnsureWebhookImage(ctx, b.log, b.reader, b.writer, b.namespace); err != nil {
-		// Do not fail the manager, the SPOD controller will retry to
-		// reconcile the webhook anyway.
-		b.log.Error(err, "Unable to bootstrap the webhook deployment image")
-	}
-
-	return nil
-}
-
-// NeedLeaderElection implements manager.LeaderElectionRunnable so that only
-// the leading operator instance mutates the webhook deployment.
-func (b *WebhookImageBootstrapper) NeedLeaderElection() bool {
-	return true
+			return true, nil
+		})
 }
 
 // EnsureWebhookImage updates the container images of the webhook deployment
