@@ -302,3 +302,18 @@ func addAllow(union, additional selinuxprofileapi.Allow) selinuxprofileapi.Allow
 
 	return union
 }
+
+// setMergedLabels ensures that a merged profile carries the recording labels
+// and is not marked as partial. The merged profile can reuse the name of a
+// partial profile recorded by a previous operator version, in which case the
+// partial label would otherwise stick and the profile would never be
+// reconciled.
+func setMergedLabels(objectMeta *metav1.ObjectMeta, recording *profilerecordingapi.ProfileRecording) {
+	if objectMeta.Labels == nil {
+		objectMeta.Labels = map[string]string{}
+	}
+
+	objectMeta.Labels[profilerecordingapi.ProfileToRecordingLabel] = recording.Name
+	objectMeta.Labels[profilerecordingapi.ProfileToRecordingNamespaceLabel] = recording.Namespace
+	delete(objectMeta.Labels, profilebase.ProfilePartialLabel)
+}

@@ -334,6 +334,7 @@ func createUpdateProfile(
 		return controllerutil.CreateOrUpdate(ctx, cl, mergedSp,
 			func() error {
 				mergedSp.Spec = *mergedSpec
+				setMergedLabels(&mergedSp.ObjectMeta, profileRecording)
 
 				setSyscallCoverageAnnotation(mergedSp, coverageAnnotation)
 
@@ -357,6 +358,7 @@ func createUpdateProfile(
 		return controllerutil.CreateOrUpdate(ctx, cl, mergedSp,
 			func() error {
 				mergedSp.Spec = *mergedSpec
+				setMergedLabels(&mergedSp.ObjectMeta, profileRecording)
 
 				return nil
 			},
@@ -377,6 +379,7 @@ func createUpdateProfile(
 		return controllerutil.CreateOrUpdate(ctx, cl, mergedSp,
 			func() error {
 				mergedSp.Spec = *mergedSpec
+				setMergedLabels(&mergedSp.ObjectMeta, profileRecording)
 
 				return nil
 			},
