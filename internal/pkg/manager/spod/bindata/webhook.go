@@ -606,8 +606,12 @@ func getValidatingWebhookConfig() *admissionregv1.ValidatingWebhookConfiguration
 							"CREATE", "UPDATE",
 						},
 						Rule: admissionregv1.Rule{
-							APIGroups:   []string{"security-profiles-operator.x-k8s.io"},
-							APIVersions: []string{"v1", "v1alpha2"},
+							APIGroups: []string{"security-profiles-operator.x-k8s.io"},
+							// Only list the hub version: with the Equivalent match
+							// policy the API server converts requests for the
+							// previous versions to v1 before calling the webhook,
+							// which decodes v1 objects only.
+							APIVersions: []string{"v1"},
 							Resources:   []string{"rawselinuxprofiles"},
 						},
 					},
