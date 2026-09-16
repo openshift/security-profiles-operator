@@ -158,3 +158,14 @@ func TestValidatePolicy(t *testing.T) {
 		})
 	}
 }
+
+func TestValidatePolicyAllowsBlockInherit(t *testing.T) {
+	t.Parallel()
+
+	sp := &RawSelinuxProfile{}
+	sp.Spec.Policy = "(blockinherit container)\n(allow process var_log_t ( dir ( open read )))\n"
+	require.NoError(t, sp.ValidatePolicy())
+
+	sp.Spec.Policy = "(block escape\n(blockinherit container)\n)"
+	require.Error(t, sp.ValidatePolicy())
+}
