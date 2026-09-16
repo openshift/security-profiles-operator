@@ -471,6 +471,17 @@ func namespaceSelectorUnequalForLabel(label string, existing, configured *metav1
 func (w *Webhook) Update(ctx context.Context, c client.Client) error {
 	for k, o := range w.objectMap() {
 		if err := c.Patch(ctx, o, client.Merge); err != nil {
+			if errors.IsNotFound(err) {
+				// Objects introduced in a newer operator version, for
+				// example the validating webhook configuration, do not
+				// exist yet after an upgrade.
+				if err := c.Create(ctx, o); err != nil {
+					return fmt.Errorf("creating %s: %w", k, err)
+				}
+
+				continue
+			}
+
 			return fmt.Errorf("updating %s: %w", k, err)
 		}
 	}
