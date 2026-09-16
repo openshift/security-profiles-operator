@@ -32,9 +32,11 @@ import (
 
 // restrictedDirectives contains CIL statements that alter global node state
 // or should not be allowed within a namespace-scoped container profile.
+// blockinherit is intentionally not restricted: raw policies are wrapped
+// into their own block by the daemon and inheriting a system profile such as
+// "container" is the documented way to write a RawSelinuxProfile.
 var restrictedDirectives = map[string]struct{}{
 	"block":            {},
-	"blockinherit":     {},
 	"blockstart":       {},
 	"booleanif":        {},
 	"category":         {},
