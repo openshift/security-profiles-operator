@@ -18,7 +18,10 @@ package bindata
 
 import (
 	"context"
+	"errors"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
@@ -60,6 +63,16 @@ func newFakeClient(t *testing.T, objs ...client.Object) client.Client {
 	require.NoError(t, corev1.AddToScheme(scheme))
 
 	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+}
+
+func webhookImage(t *testing.T, c client.Client) string {
+	t.Helper()
+
+	webhook := &appsv1.Deployment{}
+	require.NoError(t, c.Get(context.Background(),
+		types.NamespacedName{Name: webhookName, Namespace: testNamespace}, webhook))
+
+	return webhook.Spec.Template.Spec.Containers[0].Image
 }
 
 func TestEnsureWebhookImageUpdatesOutdatedImage(t *testing.T) {
@@ -113,27 +126,51 @@ func TestEnsureWebhookImageNoopWhenOperatorMissing(t *testing.T) {
 	c := newFakeClient(t, deployment(webhookName, "operator:old"))
 
 	require.NoError(t, EnsureWebhookImage(context.Background(), logr.Discard(), c, c, testNamespace))
-
-	webhook := &appsv1.Deployment{}
-	require.NoError(t, c.Get(context.Background(),
-		types.NamespacedName{Name: webhookName, Namespace: testNamespace}, webhook))
-	require.Equal(t, "operator:old", webhook.Spec.Template.Spec.Containers[0].Image)
+	require.Equal(t, "operator:old", webhookImage(t, c))
 }
 
-func TestWebhookImageBootstrapperRunnable(t *testing.T) {
-	t.Parallel()
+// flakyClient fails the first reads and succeeds afterwards.
+type flakyClient struct {
+	client.Client
 
-	c := newFakeClient(t,
+	failures atomic.Int32
+}
+
+func (f *flakyClient) Get(
+	ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption,
+) error {
+	if f.failures.Add(-1) >= 0 {
+		return errors.New("transient error")
+	}
+
+	return f.Client.Get(ctx, key, obj, opts...)
+}
+
+//nolint:paralleltest // mutates the package level bootstrap timeouts
+func TestEnsureWebhookImageWithRetryRecovers(t *testing.T) {
+	webhookBootstrapInterval = 10 * time.Millisecond
+	webhookBootstrapTimeout = 2 * time.Second
+
+	c := &flakyClient{Client: newFakeClient(t,
 		deployment(config.OperatorName, "operator:new"),
 		deployment(webhookName, "operator:old"),
-	)
+	)}
+	c.failures.Store(2)
 
-	b := NewWebhookImageBootstrapper(logr.Discard(), c, c, testNamespace)
-	require.True(t, b.NeedLeaderElection())
-	require.NoError(t, b.Start(context.Background()))
+	require.NoError(t, EnsureWebhookImageWithRetry(context.Background(), logr.Discard(), c, testNamespace))
+	require.Equal(t, "operator:new", webhookImage(t, c.Client))
+}
 
-	webhook := &appsv1.Deployment{}
-	require.NoError(t, c.Get(context.Background(),
-		types.NamespacedName{Name: webhookName, Namespace: testNamespace}, webhook))
-	require.Equal(t, "operator:new", webhook.Spec.Template.Spec.Containers[0].Image)
+//nolint:paralleltest // mutates the package level bootstrap timeouts
+func TestEnsureWebhookImageWithRetryTimesOut(t *testing.T) {
+	webhookBootstrapInterval = 10 * time.Millisecond
+	webhookBootstrapTimeout = 100 * time.Millisecond
+
+	c := &flakyClient{Client: newFakeClient(t,
+		deployment(config.OperatorName, "operator:new"),
+		deployment(webhookName, "operator:old"),
+	)}
+	c.failures.Store(1000)
+
+	require.Error(t, EnsureWebhookImageWithRetry(context.Background(), logr.Discard(), c, testNamespace))
 }

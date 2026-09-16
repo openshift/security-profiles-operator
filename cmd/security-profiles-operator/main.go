@@ -576,15 +576,21 @@ func runManager(ctx *cli.Context, info *version.Info) error {
 
 	if manageWebhook(ctx) {
 		// Align the operator managed webhook deployment with the running
-		// operator image as soon as we become leader. The conversion
-		// webhook for the CRDs is served by the webhook deployment, so
-		// after an upgrade the SPOD controller cannot read its own
-		// configuration (stored in a previous API version) until the
-		// webhook deployment runs the new image.
-		if err := mgr.Add(bindata.NewWebhookImageBootstrapper(
-			setupLog, mgr.GetAPIReader(), mgr.GetClient(), config.GetOperatorNamespace(),
-		)); err != nil {
-			return fmt.Errorf("add webhook image bootstrapper: %w", err)
+		// operator image before the manager starts. The conversion webhook
+		// for the CRDs is served by the webhook deployment, so after an
+		// upgrade the caches of this manager cannot sync (and the SPOD
+		// controller cannot update the webhook) until the webhook
+		// deployment runs the new image. This uses a direct client because
+		// the manager cache is not started yet.
+		bootstrapClient, err := client.New(cfg, client.Options{Scheme: mgr.GetScheme()})
+		if err != nil {
+			return fmt.Errorf("create webhook bootstrap client: %w", err)
+		}
+
+		if err := bindata.EnsureWebhookImageWithRetry(
+			ctx.Context, setupLog, bootstrapClient, config.GetOperatorNamespace(),
+		); err != nil {
+			setupLog.Error(err, "Unable to bootstrap the webhook deployment image")
 		}
 	}
 
