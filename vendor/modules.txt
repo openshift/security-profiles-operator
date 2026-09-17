@@ -497,11 +497,11 @@ github.com/cyphar/filepath-securejoin
 # github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
 ## explicit
 github.com/davecgh/go-spew/spew
-# github.com/digitorus/pkcs7 v0.0.0-20230818184609-3a137a874352
-## explicit; go 1.13
+# github.com/digitorus/pkcs7 v0.0.0-20260914070511-d678ea5ea03f
+## explicit; go 1.27
 github.com/digitorus/pkcs7
-# github.com/digitorus/timestamp v0.0.0-20231217203849-220c5c2851b7
-## explicit; go 1.16
+# github.com/digitorus/timestamp v0.0.0-20260914073129-b4b58b92aa51
+## explicit; go 1.27
 github.com/digitorus/timestamp
 # github.com/dimchansky/utfbom v1.1.1
 ## explicit
