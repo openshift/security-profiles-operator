@@ -36,7 +36,7 @@ jobs:
       - name: Install dependencies
         run: sudo hack/install-packages
       - run: make test-unit
-      - uses: codecov/codecov-action@1e68e06f1dbfde0e4cefc87efeba9e4643565303 # v5.1.2
+      - uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7.1.0
         with:
           files: build/coverage.out
           flags: unittests
