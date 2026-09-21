@@ -4,11 +4,10 @@ package ecr
 
 import (
 	"context"
-	"fmt"
-	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
+	"github.com/aws/aws-sdk-go-v2/service/ecr/schemas"
 	"github.com/aws/aws-sdk-go-v2/service/ecr/types"
+	smithy "github.com/aws/smithy-go"
 	"github.com/aws/smithy-go/middleware"
-	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"time"
 )
 
@@ -37,6 +36,9 @@ type CreatePullThroughCacheRuleInput struct {
 
 	// The repository name prefix to use when caching images from the source registry.
 	//
+	// There is always an assumed / applied to the end of the prefix. If you specify
+	// ecr-public as the prefix, Amazon ECR treats that as ecr-public/ .
+	//
 	// This member is required.
 	EcrRepositoryPrefix *string
 
@@ -44,18 +46,23 @@ type CreatePullThroughCacheRuleInput struct {
 	// pull through cache rule. The following is the syntax to use for each supported
 	// upstream registry.
 	//
-	//   - Amazon ECR Public ( ecr-public ) - public.ecr.aws
+	//   - Amazon ECR ( ecr ) – .dkr.ecr..amazonaws.com
 	//
-	//   - Docker Hub ( docker-hub ) - registry-1.docker.io
+	//   - Amazon ECR Public ( ecr-public ) – public.ecr.aws
 	//
-	//   - Quay ( quay ) - quay.io
+	//   - Docker Hub ( docker-hub ) – registry-1.docker.io
 	//
-	//   - Kubernetes ( k8s ) - registry.k8s.io
+	//   - GitHub Container Registry ( github-container-registry ) – ghcr.io
 	//
-	//   - GitHub Container Registry ( github-container-registry ) - ghcr.io
+	//   - GitLab Container Registry ( gitlab-container-registry ) –
+	//   registry.gitlab.com
 	//
-	//   - Microsoft Azure Container Registry ( azure-container-registry ) -
+	//   - Kubernetes ( k8s ) – registry.k8s.io
+	//
+	//   - Microsoft Azure Container Registry ( azure-container-registry ) –
 	//   .azurecr.io
+	//
+	//   - Quay ( quay ) – quay.io
 	//
 	// This member is required.
 	UpstreamRegistryUrl *string
@@ -63,6 +70,11 @@ type CreatePullThroughCacheRuleInput struct {
 	// The Amazon Resource Name (ARN) of the Amazon Web Services Secrets Manager
 	// secret that identifies the credentials to authenticate to the upstream registry.
 	CredentialArn *string
+
+	// Amazon Resource Name (ARN) of the IAM role to be assumed by Amazon ECR to
+	// authenticate to the ECR upstream registry. This role must be in the same account
+	// as the registry that you are configuring.
+	CustomRoleArn *string
 
 	// The Amazon Web Services account ID associated with the registry to create the
 	// pull through cache rule for. If you do not specify a registry, the default
@@ -72,7 +84,41 @@ type CreatePullThroughCacheRuleInput struct {
 	// The name of the upstream registry.
 	UpstreamRegistry types.UpstreamRegistry
 
+	// The repository name prefix of the upstream registry to match with the upstream
+	// repository name. When this field isn't specified, Amazon ECR will use the ROOT .
+	UpstreamRepositoryPrefix *string
+
 	noSmithyDocumentSerde
+}
+
+func (v *CreatePullThroughCacheRuleInput) Serialize(s smithy.ShapeSerializer) {
+	s.WriteStruct(schemas.CreatePullThroughCacheRuleRequest)
+	v.SerializeMembers(s)
+	s.CloseStruct()
+}
+
+func (v *CreatePullThroughCacheRuleInput) SerializeMembers(s smithy.ShapeSerializer) {
+	if v.CredentialArn != nil {
+		s.WriteString(schemas.CreatePullThroughCacheRuleRequest_credentialArn, *v.CredentialArn)
+	}
+	if v.CustomRoleArn != nil {
+		s.WriteString(schemas.CreatePullThroughCacheRuleRequest_customRoleArn, *v.CustomRoleArn)
+	}
+	if v.EcrRepositoryPrefix != nil {
+		s.WriteString(schemas.CreatePullThroughCacheRuleRequest_ecrRepositoryPrefix, *v.EcrRepositoryPrefix)
+	}
+	if v.RegistryId != nil {
+		s.WriteString(schemas.CreatePullThroughCacheRuleRequest_registryId, *v.RegistryId)
+	}
+	if v.UpstreamRegistry != "" {
+		s.WriteString(schemas.CreatePullThroughCacheRuleRequest_upstreamRegistry, string(v.UpstreamRegistry))
+	}
+	if v.UpstreamRegistryUrl != nil {
+		s.WriteString(schemas.CreatePullThroughCacheRuleRequest_upstreamRegistryUrl, *v.UpstreamRegistryUrl)
+	}
+	if v.UpstreamRepositoryPrefix != nil {
+		s.WriteString(schemas.CreatePullThroughCacheRuleRequest_upstreamRepositoryPrefix, *v.UpstreamRepositoryPrefix)
+	}
 }
 
 type CreatePullThroughCacheRuleOutput struct {
@@ -84,6 +130,9 @@ type CreatePullThroughCacheRuleOutput struct {
 	// The Amazon Resource Name (ARN) of the Amazon Web Services Secrets Manager
 	// secret associated with the pull through cache rule.
 	CredentialArn *string
+
+	// The ARN of the IAM role associated with the pull through cache rule.
+	CustomRoleArn *string
 
 	// The Amazon ECR repository prefix associated with the pull through cache rule.
 	EcrRepositoryPrefix *string
@@ -97,83 +146,103 @@ type CreatePullThroughCacheRuleOutput struct {
 	// The upstream registry URL associated with the pull through cache rule.
 	UpstreamRegistryUrl *string
 
+	// The upstream repository prefix associated with the pull through cache rule.
+	UpstreamRepositoryPrefix *string
+
 	// Metadata pertaining to the operation's result.
 	ResultMetadata middleware.Metadata
 
 	noSmithyDocumentSerde
 }
 
+func (v *CreatePullThroughCacheRuleOutput) Serialize(s smithy.ShapeSerializer) {
+	s.WriteStruct(schemas.CreatePullThroughCacheRuleResponse)
+	v.SerializeMembers(s)
+	s.CloseStruct()
+}
+
+func (v *CreatePullThroughCacheRuleOutput) SerializeMembers(s smithy.ShapeSerializer) {
+	if v.CreatedAt != nil {
+		s.WriteTime(schemas.CreatePullThroughCacheRuleResponse_createdAt, *v.CreatedAt)
+	}
+	if v.CredentialArn != nil {
+		s.WriteString(schemas.CreatePullThroughCacheRuleResponse_credentialArn, *v.CredentialArn)
+	}
+	if v.CustomRoleArn != nil {
+		s.WriteString(schemas.CreatePullThroughCacheRuleResponse_customRoleArn, *v.CustomRoleArn)
+	}
+	if v.EcrRepositoryPrefix != nil {
+		s.WriteString(schemas.CreatePullThroughCacheRuleResponse_ecrRepositoryPrefix, *v.EcrRepositoryPrefix)
+	}
+	if v.RegistryId != nil {
+		s.WriteString(schemas.CreatePullThroughCacheRuleResponse_registryId, *v.RegistryId)
+	}
+	if v.UpstreamRegistry != "" {
+		s.WriteString(schemas.CreatePullThroughCacheRuleResponse_upstreamRegistry, string(v.UpstreamRegistry))
+	}
+	if v.UpstreamRegistryUrl != nil {
+		s.WriteString(schemas.CreatePullThroughCacheRuleResponse_upstreamRegistryUrl, *v.UpstreamRegistryUrl)
+	}
+	if v.UpstreamRepositoryPrefix != nil {
+		s.WriteString(schemas.CreatePullThroughCacheRuleResponse_upstreamRepositoryPrefix, *v.UpstreamRepositoryPrefix)
+	}
+}
+func (v *CreatePullThroughCacheRuleOutput) Deserialize(d smithy.ShapeDeserializer) error {
+	return smithy.ReadStruct(d, schemas.CreatePullThroughCacheRuleResponse, func(s *smithy.Schema) error {
+		switch s {
+		case schemas.CreatePullThroughCacheRuleResponse_createdAt:
+			v.CreatedAt = new(time.Time)
+			return d.ReadTime(schemas.CreatePullThroughCacheRuleResponse_createdAt, v.CreatedAt)
+		case schemas.CreatePullThroughCacheRuleResponse_credentialArn:
+			v.CredentialArn = new(string)
+			return d.ReadString(schemas.CreatePullThroughCacheRuleResponse_credentialArn, v.CredentialArn)
+		case schemas.CreatePullThroughCacheRuleResponse_customRoleArn:
+			v.CustomRoleArn = new(string)
+			return d.ReadString(schemas.CreatePullThroughCacheRuleResponse_customRoleArn, v.CustomRoleArn)
+		case schemas.CreatePullThroughCacheRuleResponse_ecrRepositoryPrefix:
+			v.EcrRepositoryPrefix = new(string)
+			return d.ReadString(schemas.CreatePullThroughCacheRuleResponse_ecrRepositoryPrefix, v.EcrRepositoryPrefix)
+		case schemas.CreatePullThroughCacheRuleResponse_registryId:
+			v.RegistryId = new(string)
+			return d.ReadString(schemas.CreatePullThroughCacheRuleResponse_registryId, v.RegistryId)
+		case schemas.CreatePullThroughCacheRuleResponse_upstreamRegistry:
+			var ev string
+			if err := d.ReadString(schemas.CreatePullThroughCacheRuleResponse_upstreamRegistry, &ev); err != nil {
+				return err
+			}
+			v.UpstreamRegistry = types.UpstreamRegistry(ev)
+			return nil
+		case schemas.CreatePullThroughCacheRuleResponse_upstreamRegistryUrl:
+			v.UpstreamRegistryUrl = new(string)
+			return d.ReadString(schemas.CreatePullThroughCacheRuleResponse_upstreamRegistryUrl, v.UpstreamRegistryUrl)
+		case schemas.CreatePullThroughCacheRuleResponse_upstreamRepositoryPrefix:
+			v.UpstreamRepositoryPrefix = new(string)
+			return d.ReadString(schemas.CreatePullThroughCacheRuleResponse_upstreamRepositoryPrefix, v.UpstreamRepositoryPrefix)
+		}
+		return nil
+	})
+}
 func (c *Client) addOperationCreatePullThroughCacheRuleMiddlewares(stack *middleware.Stack, options Options) (err error) {
-	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+	if err := stack.Serialize.Add(&serializeRequestMiddleware{options: &options, operationSchema: smithy.NewOperationSchema(schemas.CreatePullThroughCacheRule, schemas.CreatePullThroughCacheRuleRequest, schemas.CreatePullThroughCacheRuleResponse)}, middleware.After); err != nil {
 		return err
 	}
-	err = stack.Serialize.Add(&awsAwsjson11_serializeOpCreatePullThroughCacheRule{}, middleware.After)
-	if err != nil {
+	if err := stack.Deserialize.Add(&deserializeResponseMiddleware{options: &options, operationSchema: smithy.NewOperationSchema(schemas.CreatePullThroughCacheRule, schemas.CreatePullThroughCacheRuleRequest, schemas.CreatePullThroughCacheRuleResponse), output: &CreatePullThroughCacheRuleOutput{}}, middleware.After); err != nil {
 		return err
-	}
-	err = stack.Deserialize.Add(&awsAwsjson11_deserializeOpCreatePullThroughCacheRule{}, middleware.After)
-	if err != nil {
-		return err
-	}
-	if err := addProtocolFinalizerMiddlewares(stack, options, "CreatePullThroughCacheRule"); err != nil {
-		return fmt.Errorf("add protocol finalizers: %v", err)
 	}
 
-	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
-		return err
-	}
-	if err = addSetLoggerMiddleware(stack, options); err != nil {
-		return err
-	}
-	if err = addClientRequestID(stack); err != nil {
-		return err
-	}
-	if err = addComputeContentLength(stack); err != nil {
-		return err
-	}
 	if err = addResolveEndpointMiddleware(stack, options); err != nil {
 		return err
 	}
 	if err = addComputePayloadSHA256(stack); err != nil {
 		return err
 	}
-	if err = addRetry(stack, options); err != nil {
+	if err = addRecordResponseTiming(stack, options); err != nil {
 		return err
 	}
-	if err = addRawResponseToMetadata(stack); err != nil {
-		return err
-	}
-	if err = addRecordResponseTiming(stack); err != nil {
-		return err
-	}
-	if err = addSpanRetryLoop(stack, options); err != nil {
-		return err
-	}
-	if err = addClientUserAgent(stack, options); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
-		return err
-	}
-	if err = addTimeOffsetBuild(stack, c); err != nil {
-		return err
-	}
-	if err = addUserAgentRetryMode(stack, options); err != nil {
+	if err = addCredentialSource(stack, options); err != nil {
 		return err
 	}
 	if err = addOpCreatePullThroughCacheRuleValidationMiddleware(stack); err != nil {
-		return err
-	}
-	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opCreatePullThroughCacheRule(options.Region), middleware.Before); err != nil {
-		return err
-	}
-	if err = addRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -188,25 +257,8 @@ func (c *Client) addOperationCreatePullThroughCacheRuleMiddlewares(stack *middle
 	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
-	if err = addSpanInitializeStart(stack); err != nil {
-		return err
-	}
-	if err = addSpanInitializeEnd(stack); err != nil {
-		return err
-	}
-	if err = addSpanBuildRequestStart(stack); err != nil {
-		return err
-	}
-	if err = addSpanBuildRequestEnd(stack); err != nil {
+	if err = addInterceptors(stack, options); err != nil {
 		return err
 	}
 	return nil
-}
-
-func newServiceMetadataMiddleware_opCreatePullThroughCacheRule(region string) *awsmiddleware.RegisterServiceMetadata {
-	return &awsmiddleware.RegisterServiceMetadata{
-		Region:        region,
-		ServiceID:     ServiceID,
-		OperationName: "CreatePullThroughCacheRule",
-	}
 }
