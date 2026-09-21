@@ -2,9 +2,8 @@ package rules
 
 import (
 	"github.com/vektah/gqlparser/v2/ast"
-
 	//nolint:staticcheck // Validator rules each use dot imports for convenience.
-	. "github.com/vektah/gqlparser/v2/validator"
+	. "github.com/vektah/gqlparser/v2/validator/core"
 )
 
 var KnownFragmentNamesRule = Rule{
@@ -19,8 +18,4 @@ var KnownFragmentNamesRule = Rule{
 			}
 		})
 	},
-}
-
-func init() {
-	AddRule(KnownFragmentNamesRule.Name, KnownFragmentNamesRule.RuleFunc)
 }
