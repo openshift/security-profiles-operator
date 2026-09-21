@@ -35,6 +35,7 @@ linters:
     - goconst
     - gocritic
     - gocyclo
+    - godoclint
     - godot
     - godox
     - goheader
@@ -48,11 +49,14 @@ linters:
     - importas
     - ineffassign
     - intrange
+    - iotamixing
+    - kubeapilinter
     - lll
     - loggercheck
     - makezero
     - mirror
     - misspell
+    - modernize
     - musttag
     - nakedret
     - nestif
@@ -84,6 +88,7 @@ linters:
     - tparallel
     - unconvert
     - unparam
+    - unqueryvet
     - unused
     - usestdlibvars
     - usetesting
@@ -113,6 +118,15 @@ linters:
     # - varnamelen
     # - wrapcheck
   settings:
+    custom:
+      kubeapilinter:
+        type: module
+        description: Kube API Linter lints Kube like APIs based on API conventions and best practices.
+        settings:
+          linters:
+            disable:
+              - nomaps
+              - optionalfields
     errcheck:
       check-type-assertions: true
       check-blank: true
@@ -133,6 +147,10 @@ linters:
     gosec:
       excludes:
         - G115
+        - G602
+        - G702
+        - G703
+        - G704
     nestif:
       min-complexity: 15
     revive:
@@ -154,6 +172,23 @@ linters:
       - linters:
           - lll
         path: internal/pkg/daemon/bpfrecorder/generated.go
+      - linters:
+          - godoclint
+        path: api/
+      - linters:
+          - staticcheck
+        text: "SA1019: scheme.Builder is deprecated"
+      - linters:
+          - kubeapilinter
+        path-except: api/
+      # The v1alpha1 SPOD and node status APIs intentionally keep the wire
+      # format of v0.10 so that persisted objects can be converted to v1.
+      - linters:
+          - kubeapilinter
+        path: api/(spod|secprofnodestatus|apparmorprofile|profilebase)/v1alpha1/.*\.go
+      - linters:
+          - kubeapilinter
+        path: api/selinuxprofile/v1alpha2/.*\.go
     paths:
       - third_party$
       - builtin$

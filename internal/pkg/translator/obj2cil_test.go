@@ -22,7 +22,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	selxv1alpha2 "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1alpha2"
+	selinuxprofileapi "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1"
 )
 
 func TestObject2CIL(t *testing.T) {
@@ -30,25 +30,27 @@ func TestObject2CIL(t *testing.T) {
 
 	tests := []struct {
 		name        string
-		profile     *selxv1alpha2.SelinuxProfile
+		profile     *selinuxprofileapi.SelinuxProfile
+		options     *Options
 		wantMatches []string
 		doNotMatch  []string
 		inheritsys  []string
-		inheritobjs []selxv1alpha2.SelinuxProfileObject
+		inheritobjs []selinuxprofileapi.SelinuxProfileObject
+		wantErr     bool
 	}{
 		{
 			name: "Test errorlogger translation with system inheritance",
-			profile: &selxv1alpha2.SelinuxProfile{
+			profile: &selinuxprofileapi.SelinuxProfile{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "foo-bar",
 				},
-				Spec: selxv1alpha2.SelinuxProfileSpec{
-					Inherit: []selxv1alpha2.PolicyRef{
+				Spec: selinuxprofileapi.SelinuxProfileSpec{
+					Inherit: []selinuxprofileapi.PolicyRef{
 						{
 							Name: "container",
 						},
 					},
-					Allow: selxv1alpha2.Allow{
+					Allow: selinuxprofileapi.Allow{
 						"var_log_t": {
 							"dir": []string{
 								"open",
@@ -104,18 +106,18 @@ func TestObject2CIL(t *testing.T) {
 		},
 		{
 			name: "Test translation with @self",
-			profile: &selxv1alpha2.SelinuxProfile{
+			profile: &selinuxprofileapi.SelinuxProfile{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-selinux-recording-nginx",
 				},
-				Spec: selxv1alpha2.SelinuxProfileSpec{
-					Inherit: []selxv1alpha2.PolicyRef{
+				Spec: selinuxprofileapi.SelinuxProfileSpec{
+					Inherit: []selinuxprofileapi.PolicyRef{
 						{
-							Kind: selxv1alpha2.SystemPolicyKind,
+							Kind: selinuxprofileapi.SystemPolicyKind,
 							Name: "container",
 						},
 					},
-					Allow: selxv1alpha2.Allow{
+					Allow: selinuxprofileapi.Allow{
 						"http_port_t": {
 							"tcp_socket": []string{
 								"name_bind",
@@ -155,18 +157,18 @@ func TestObject2CIL(t *testing.T) {
 		},
 		{
 			name: "Test successful inherit reference",
-			profile: &selxv1alpha2.SelinuxProfile{
+			profile: &selinuxprofileapi.SelinuxProfile{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-selinux-recording-nginx",
 				},
-				Spec: selxv1alpha2.SelinuxProfileSpec{
-					Inherit: []selxv1alpha2.PolicyRef{
+				Spec: selinuxprofileapi.SelinuxProfileSpec{
+					Inherit: []selinuxprofileapi.PolicyRef{
 						{
 							Kind: "SelinuxPolicy",
 							Name: "foo",
 						},
 					},
-					Allow: selxv1alpha2.Allow{
+					Allow: selinuxprofileapi.Allow{
 						"http_port_t": {
 							"tcp_socket": []string{
 								"name_bind",
@@ -183,8 +185,8 @@ func TestObject2CIL(t *testing.T) {
 			doNotMatch: []string{
 				"\\(blockinherit container\\)",
 			},
-			inheritobjs: []selxv1alpha2.SelinuxProfileObject{
-				&selxv1alpha2.SelinuxProfile{
+			inheritobjs: []selinuxprofileapi.SelinuxProfileObject{
+				&selinuxprofileapi.SelinuxProfile{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "foo",
 					},
@@ -193,18 +195,18 @@ func TestObject2CIL(t *testing.T) {
 		},
 		{
 			name: "Test errorlogger translation with permissive mode",
-			profile: &selxv1alpha2.SelinuxProfile{
+			profile: &selinuxprofileapi.SelinuxProfile{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "foo-permissive-bar",
 				},
-				Spec: selxv1alpha2.SelinuxProfileSpec{
-					Permissive: true,
-					Inherit: []selxv1alpha2.PolicyRef{
+				Spec: selinuxprofileapi.SelinuxProfileSpec{
+					Mode: selinuxprofileapi.SelinuxModePermissive,
+					Inherit: []selinuxprofileapi.PolicyRef{
 						{
 							Name: "container",
 						},
 					},
-					Allow: selxv1alpha2.Allow{
+					Allow: selinuxprofileapi.Allow{
 						"var_log_t": {
 							"dir": []string{
 								"open",
@@ -260,18 +262,52 @@ func TestObject2CIL(t *testing.T) {
 			},
 		},
 		{
+			name: "Test errorlogger translation with explicit enforcing mode",
+			profile: &selinuxprofileapi.SelinuxProfile{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "foo-enforcing-bar",
+				},
+				Spec: selinuxprofileapi.SelinuxProfileSpec{
+					Mode: selinuxprofileapi.SelinuxModeEnforcing,
+					Inherit: []selinuxprofileapi.PolicyRef{
+						{
+							Name: "container",
+						},
+					},
+					Allow: selinuxprofileapi.Allow{
+						"var_log_t": {
+							"dir": []string{
+								"open",
+							},
+						},
+					},
+				},
+			},
+			wantMatches: []string{
+				"\\(block foo-enforcing-bar",
+				"\\(blockinherit container\\)",
+				"\\(allow process var_log_t \\( dir \\(.*open.*\\)\\)\\)\n",
+			},
+			doNotMatch: []string{
+				"\\(typepermissive process\\)",
+			},
+			inheritsys: []string{
+				"container",
+			},
+		},
+		{
 			name: "Test translation with another template than container",
-			profile: &selxv1alpha2.SelinuxProfile{
+			profile: &selinuxprofileapi.SelinuxProfile{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "foo-bar",
 				},
-				Spec: selxv1alpha2.SelinuxProfileSpec{
-					Inherit: []selxv1alpha2.PolicyRef{
+				Spec: selinuxprofileapi.SelinuxProfileSpec{
+					Inherit: []selinuxprofileapi.PolicyRef{
 						{
 							Name: "net_container",
 						},
 					},
-					Allow: selxv1alpha2.Allow{
+					Allow: selinuxprofileapi.Allow{
 						"var_log_t": {
 							"dir": []string{
 								"open",
@@ -300,12 +336,337 @@ func TestObject2CIL(t *testing.T) {
 				"net_container",
 			},
 		},
+		{
+			name: "Test translation with forbidden type",
+			profile: &selinuxprofileapi.SelinuxProfile{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "foo-bar",
+				},
+				Spec: selinuxprofileapi.SelinuxProfileSpec{
+					Inherit: []selinuxprofileapi.PolicyRef{
+						{
+							Name: "container",
+						},
+					},
+					Allow: selinuxprofileapi.Allow{
+						"kernel_t": {
+							"dir": []string{
+								"open",
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			inheritsys: []string{
+				"container",
+			},
+		},
+		{
+			name: "Test translation with forbidden class",
+			profile: &selinuxprofileapi.SelinuxProfile{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "foo-bar",
+				},
+				Spec: selinuxprofileapi.SelinuxProfileSpec{
+					Inherit: []selinuxprofileapi.PolicyRef{
+						{
+							Name: "container",
+						},
+					},
+					Allow: selinuxprofileapi.Allow{
+						"var_log_t": {
+							"security": []string{
+								"open",
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			inheritsys: []string{
+				"container",
+			},
+		},
+		{
+			name: "Test translation with forbidden permission",
+			profile: &selinuxprofileapi.SelinuxProfile{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "foo-bar",
+				},
+				Spec: selinuxprofileapi.SelinuxProfileSpec{
+					Inherit: []selinuxprofileapi.PolicyRef{
+						{
+							Name: "container",
+						},
+					},
+					Allow: selinuxprofileapi.Allow{
+						"var_log_t": {
+							"dir": []string{
+								"load_policy",
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			inheritsys: []string{
+				"container",
+			},
+		},
+		{
+			name: "Test translation without denied options",
+			profile: &selinuxprofileapi.SelinuxProfile{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "foo-bar",
+				},
+				Spec: selinuxprofileapi.SelinuxProfileSpec{
+					Inherit: []selinuxprofileapi.PolicyRef{
+						{
+							Name: "container",
+						},
+					},
+					Allow: selinuxprofileapi.Allow{
+						"var_log_t": {
+							"dir": []string{
+								"open",
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+			inheritsys: []string{
+				"container",
+			},
+		},
+		{
+			name: "Test translation with denied type",
+			profile: &selinuxprofileapi.SelinuxProfile{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "foo-bar",
+				},
+				Spec: selinuxprofileapi.SelinuxProfileSpec{
+					Inherit: []selinuxprofileapi.PolicyRef{
+						{
+							Name: "container",
+						},
+					},
+					Allow: selinuxprofileapi.Allow{
+						"var_log_t": {
+							"dir": []string{
+								"open",
+							},
+						},
+					},
+				},
+			},
+			options: &Options{
+				DeniedTypes: []string{"var_log_t"},
+			},
+			wantErr: true,
+			inheritsys: []string{
+				"container",
+			},
+		},
+		{
+			name: "Test translation with denied class",
+			profile: &selinuxprofileapi.SelinuxProfile{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "foo-bar",
+				},
+				Spec: selinuxprofileapi.SelinuxProfileSpec{
+					Inherit: []selinuxprofileapi.PolicyRef{
+						{
+							Name: "container",
+						},
+					},
+					Allow: selinuxprofileapi.Allow{
+						"var_log_t": {
+							"dir": []string{
+								"open",
+							},
+						},
+					},
+				},
+			},
+			options: &Options{
+				DeniedClasses: []string{"dir"},
+			},
+			wantErr: true,
+			inheritsys: []string{
+				"container",
+			},
+		},
+		{
+			name: "Test translation with denied permission",
+			profile: &selinuxprofileapi.SelinuxProfile{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "foo-bar",
+				},
+				Spec: selinuxprofileapi.SelinuxProfileSpec{
+					Inherit: []selinuxprofileapi.PolicyRef{
+						{
+							Name: "container",
+						},
+					},
+					Allow: selinuxprofileapi.Allow{
+						"var_log_t": {
+							"dir": []string{
+								"open",
+							},
+						},
+					},
+				},
+			},
+			options: &Options{
+				DeniedPermissions: []string{"open"},
+			},
+			wantErr: true,
+			inheritsys: []string{
+				"container",
+			},
+		},
+		{
+			name: "Test translation allowing a built-in denied type",
+			profile: &selinuxprofileapi.SelinuxProfile{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "foo-bar",
+				},
+				Spec: selinuxprofileapi.SelinuxProfileSpec{
+					Inherit: []selinuxprofileapi.PolicyRef{
+						{
+							Name: "container",
+						},
+					},
+					Allow: selinuxprofileapi.Allow{
+						"kernel_t": {
+							"file": []string{
+								"open",
+							},
+						},
+					},
+				},
+			},
+			options: &Options{
+				AllowedTypes: []string{"kernel_t"},
+			},
+			wantErr: false,
+			wantMatches: []string{
+				"\\(allow process kernel_t \\( file \\( open \\)\\)\\)\n",
+			},
+			inheritsys: []string{
+				"container",
+			},
+		},
+		{
+			name: "Test translation allowing a built-in denied class",
+			profile: &selinuxprofileapi.SelinuxProfile{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "foo-bar",
+				},
+				Spec: selinuxprofileapi.SelinuxProfileSpec{
+					Inherit: []selinuxprofileapi.PolicyRef{
+						{
+							Name: "container",
+						},
+					},
+					Allow: selinuxprofileapi.Allow{
+						"var_log_t": {
+							"capability": []string{
+								"net_admin",
+							},
+						},
+					},
+				},
+			},
+			options: &Options{
+				AllowedClasses: []string{"capability"},
+			},
+			wantErr: false,
+			wantMatches: []string{
+				"\\(allow process var_log_t \\( capability \\( net_admin \\)\\)\\)\n",
+			},
+			inheritsys: []string{
+				"container",
+			},
+		},
+		{
+			name: "Test translation allowing a built-in denied permission",
+			profile: &selinuxprofileapi.SelinuxProfile{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "foo-bar",
+				},
+				Spec: selinuxprofileapi.SelinuxProfileSpec{
+					Inherit: []selinuxprofileapi.PolicyRef{
+						{
+							Name: "container",
+						},
+					},
+					Allow: selinuxprofileapi.Allow{
+						"var_log_t": {
+							"file": []string{
+								"mounton",
+							},
+						},
+					},
+				},
+			},
+			options: &Options{
+				AllowedPermissions: []string{"mounton"},
+			},
+			wantErr: false,
+			wantMatches: []string{
+				"\\(allow process var_log_t \\( file \\( mounton \\)\\)\\)\n",
+			},
+			inheritsys: []string{
+				"container",
+			},
+		},
+		{
+			name: "Test translation with a type both denied (higher precedence) and allowed",
+			profile: &selinuxprofileapi.SelinuxProfile{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "foo-bar",
+				},
+				Spec: selinuxprofileapi.SelinuxProfileSpec{
+					Inherit: []selinuxprofileapi.PolicyRef{
+						{
+							Name: "container",
+						},
+					},
+					Allow: selinuxprofileapi.Allow{
+						"kernel_t": {
+							"file": []string{
+								"open",
+							},
+						},
+					},
+				},
+			},
+			// A user-specified deny takes precedence over an allow for the same
+			// entry, so translation is rejected.
+			options: &Options{
+				DeniedTypes:  []string{"kernel_t"},
+				AllowedTypes: []string{"kernel_t"},
+			},
+			wantErr: true,
+			inheritsys: []string{
+				"container",
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := Object2CIL(tt.inheritsys, tt.inheritobjs, tt.profile)
+			got, err := Object2CIL(tt.inheritsys, tt.inheritobjs, tt.profile, tt.options)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Object2CIL() error = %v, wantErr %v", err, tt.wantErr)
+
+				return
+			}
+
 			for _, wantMatch := range tt.wantMatches {
 				matched, err := regexp.MatchString(wantMatch, got)
 				if err != nil {

@@ -1,4 +1,4 @@
-apiVersion: security-profiles-operator.x-k8s.io/v1alpha1
+apiVersion: security-profiles-operator.x-k8s.io/v1
 kind: AppArmorProfile
 metadata:
   labels:
@@ -33,8 +33,9 @@ spec:
       readWritePaths:
       - "ptrace (read),\n# ugly template injection hack"
       - /var/run/grpc/bpf-recorder.sock
+      - /var/run/grpc/metrics.sock
     network:
       allowedProtocols:
         allowTcp: true
         allowUdp: true
-  disabled: false
+  state: Enabled

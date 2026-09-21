@@ -77,8 +77,6 @@ type envComprehension struct {
 
 	// runtime-related fields
 
-	err *Bottom
-
 	// envs holds all the environments that define a single "yield" result in
 	// combination with the comprehension struct.
 	envs []*Environment // nil: unprocessed, non-nil: done.
@@ -87,6 +85,12 @@ type envComprehension struct {
 	// StructLits to Init (activate for closedness check)
 	// when at least one value is yielded.
 	structs []*StructLit
+}
+
+// addEnv is used as a [YieldFunc] so that we don't need to create a new func
+// value for each comprehension.
+func (e *envComprehension) addEnv(env *Environment) {
+	e.envs = append(e.envs, env)
 }
 
 // envYield defines a comprehension for a specific field within a comprehension
@@ -98,8 +102,6 @@ type envYield struct {
 
 	// Values specific to the field corresponding to this envYield
 
-	// This envYield was added to selfComprehensions
-	self bool
 	// This envYield was successfully executed and the resulting conjuncts were
 	// added.
 	inserted bool
@@ -143,29 +145,19 @@ func (n *nodeContext) insertComprehension(
 		ec = &envComprehension{
 			comp:   c,
 			vertex: n.node,
-
-			err:  nil,   // shut up linter
-			envs: nil,   // shut up linter
-			done: false, // shut up linter
 		}
-	}
-
-	if ec.done && len(ec.envs) == 0 {
-		n.decComprehension(c)
-		return
 	}
 
 	x := c.Value
 
-	if !n.ctx.isDevVersion() {
-		ci = ci.SpawnEmbed(c)
-		ci.closeInfo.span |= ComprehensionSpan
-		ci.decl = c
-	}
+	node := n.node.DerefDisjunct()
 
 	var decls []Decl
 	switch v := ToExpr(x).(type) {
 	case *StructLit:
+		ci = n.splitStruct(v, ci)
+
+		kind := TopKind
 		numFixed := 0
 		var fields []Decl
 		for _, d := range v.Decls {
@@ -173,28 +165,27 @@ func (n *nodeContext) insertComprehension(
 			case *Field:
 				numFixed++
 
+				if f.Label.IsInt() {
+					kind &= ListKind
+				} else if f.Label.IsString() {
+					kind &= StructKind
+				}
+
 				// Create partial comprehension
-				c := &Comprehension{
+				partialComp := &Comprehension{
 					Syntax:  c.Syntax,
 					Clauses: c.Clauses,
 					Value:   f,
 					arcType: f.ArcType, // TODO: can be derived, remove this field.
-					cc:      ci.cc,
 
 					comp:   ec,
 					parent: c,
-					arc:    n.node,
+					arc:    node,
 				}
 
-				conjunct := MakeConjunct(env, c, ci)
-				if n.ctx.isDevVersion() {
-					n.assertInitialized()
-					_, c.arcCC = n.insertArcCC(f.Label, ArcPending, conjunct, conjunct.CloseInfo, false)
-					c.cc = ci.cc
-					ci.cc.incDependent(n.ctx, COMP, c.arcCC)
-				} else {
-					n.insertFieldUnchecked(f.Label, ArcPending, conjunct)
-				}
+				conjunct := MakeConjunct(env, partialComp, ci)
+				n.assertInitialized()
+				n.insertArc(f.Label, ArcPending, conjunct, conjunct.CloseInfo, false)
 
 				fields = append(fields, f)
 
@@ -204,24 +195,20 @@ func (n *nodeContext) insertComprehension(
 				numFixed++
 
 				// Create partial comprehension
-				c := &Comprehension{
+				partialComp := &Comprehension{
 					Syntax:  c.Syntax,
 					Clauses: c.Clauses,
 					Value:   f,
 
 					comp:   ec,
 					parent: c,
-					arc:    n.node,
+					arc:    node,
 				}
 
-				conjunct := MakeConjunct(env, c, ci)
+				conjunct := MakeConjunct(env, partialComp, ci)
 				n.assertInitialized()
 				arc := n.insertFieldUnchecked(f.Label, ArcMember, conjunct)
-				if n.ctx.isDevVersion() {
-					arc.MultiLet = true
-				} else {
-					arc.MultiLet = f.IsMulti
-				}
+				arc.MultiLet = true // NOTE: v2 was f.IsMulti
 
 				fields = append(fields, f)
 
@@ -240,18 +227,24 @@ func (n *nodeContext) insertComprehension(
 			st := v
 			if len(fields) < len(v.Decls) {
 				st = &StructLit{
-					Src:   v.Src,
-					Decls: fields,
+					Src:             v.Src,
+					Decls:           fields,
+					isComprehension: true,
 				}
 			}
-			n.node.AddStruct(st, env, ci)
+			node.AddStruct(st)
 			switch {
 			case !ec.done:
 				ec.structs = append(ec.structs, st)
 			case len(ec.envs) > 0:
 				st.Init(n.ctx)
+				if kind == StructKind || kind == ListKind {
+					n.updateNodeType(kind, st, ci)
+				}
 			}
 		}
+
+		c.kind = kind
 
 		switch numFixed {
 		case 0:
@@ -259,28 +252,36 @@ func (n *nodeContext) insertComprehension(
 
 		case len(v.Decls):
 			// No comprehension to add at this level.
-			return
+			// The should be considered a struct if it has only non-regular
+			// fields (like definitions), and no embeddings.
+			if kind == TopKind {
+				c.kind = StructKind
+			}
+			// If there's an else clause, we still need to schedule a task
+			// to handle the fallback case when comprehension yields zero values.
+			if c.Fallback == nil {
+				return
+			}
+			// Use an empty struct as the main value since all fields were
+			// handled at field level. The else clause will be embedded if
+			// the comprehension yields zero values.
+			x = &StructLit{
+				isComprehension: true,
+			}
 
 		default:
 			// Create a new StructLit with only the fields that need to be
 			// added at this level.
-			x = &StructLit{Decls: decls}
+			x = &StructLit{
+				Decls:           decls,
+				isComprehension: true,
+			}
 		}
 	}
 
-	if n.ctx.isDevVersion() {
-		t := n.scheduleTask(handleComprehension, env, x, ci)
-		t.comp = ec
-		t.leaf = c
-	} else {
-		n.comprehensions = append(n.comprehensions, envYield{
-			envComprehension: ec,
-			leaf:             c,
-			env:              env,
-			id:               ci,
-			expr:             x,
-		})
-	}
+	t := n.scheduleTask(handleComprehension, env, x, ci)
+	t.comp = ec
+	t.leaf = c
 }
 
 type compState struct {
@@ -297,14 +298,14 @@ func (c *OpContext) yield(
 	node *Vertex, // errors are associated with this node
 	env *Environment, // env for field for which this yield is called
 	comp *Comprehension,
-	state combinedFlags,
+	state Flags,
 	f YieldFunc, // called for every result
 ) *Bottom {
 	s := &compState{
 		ctx:   c,
 		comp:  comp,
 		f:     f,
-		state: state.vertexStatus(),
+		state: state.status,
 	}
 	y := comp.Clauses[0]
 
@@ -340,106 +341,19 @@ func (s *compState) yield(env *Environment) (ok bool) {
 	return !c.HasErr()
 }
 
-// injectComprehension evaluates and inserts embeddings. It first evaluates all
-// embeddings before inserting the results to ensure that the order of
-// evaluation does not matter.
-func (n *nodeContext) injectComprehensions(state vertexStatus) (progress bool) {
-	unreachableForDev(n.ctx)
-
-	workRemaining := false
-
-	// We use variables, instead of range, as the list may grow dynamically.
-	for i := 0; i < len(n.comprehensions); i++ {
-		d := &n.comprehensions[i]
-		if d.self || d.inserted {
-			continue
-		}
-		if err := n.processComprehension(d, state); err != nil {
-			// TODO:  Detect that the nodes are actually equal
-			if err.ForCycle && err.Value == n.node {
-				n.selfComprehensions = append(n.selfComprehensions, *d)
-				progress = true
-				d.self = true
-				return
-			}
-
-			d.err = err
-			workRemaining = true
-
-			continue
-
-			// TODO: add this when it can be done without breaking other
-			// things.
-			//
-			// // Add comprehension to ensure incomplete error is inserted.
-			// // This ensures that the error is reported in the Vertex
-			// // where the comprehension was defined, and not just in the
-			// // node below. This, in turn, is necessary to support
-			// // certain logic, like export, that expects to be able to
-			// // detect an "incomplete" error at the first level where it
-			// // is necessary.
-			// n := d.node.getNodeContext(ctx)
-			// n.addBottom(err)
-
-		}
-		progress = true
-	}
-
-	if !workRemaining {
-		n.comprehensions = n.comprehensions[:0] // Signal that all work is done.
-	}
-
-	return progress
-}
-
-// injectSelfComprehensions processes comprehensions that were earlier marked
-// as iterating over the node in which they are defined. Such comprehensions
-// are legal as long as they do not modify the arc set of the node.
-func (n *nodeContext) injectSelfComprehensions(state vertexStatus) {
-	unreachableForDev(n.ctx)
-
-	// We use variables, instead of range, as the list may grow dynamically.
-	for i := 0; i < len(n.selfComprehensions); i++ {
-		n.processComprehension(&n.selfComprehensions[i], state)
-	}
-	n.selfComprehensions = n.selfComprehensions[:0] // Signal that all work is done.
-}
-
 // processComprehension processes a single Comprehension conjunct.
 // It returns an incomplete error if there was one. Fatal errors are
 // processed as a "successfully" completed computation.
 func (n *nodeContext) processComprehension(d *envYield, state vertexStatus) *Bottom {
-	err := n.processComprehensionInner(d, state)
-
-	// NOTE: we cannot move this to defer in processComprehensionInner, as we
-	// use panics to implement "yielding" (and possibly coroutines in the
-	// future).
-	n.decComprehension(d.leaf)
-
-	return err
-}
-
-func (n *nodeContext) decComprehension(p *Comprehension) {
-	for ; p != nil; p = p.parent {
-		cc := p.cc
-		if cc != nil {
-			cc.decDependent(n.ctx, COMP, p.arcCC)
-		}
-		p.cc = nil
-	}
-}
-
-func (n *nodeContext) processComprehensionInner(d *envYield, state vertexStatus) *Bottom {
 	ctx := n.ctx
 
 	// Compute environments, if needed.
 	if !d.done {
-		var envs []*Environment
-		f := func(env *Environment) {
-			envs = append(envs, env)
-		}
-
-		if err := ctx.yield(d.vertex, d.env, d.comp, oldOnly(state), f); err != nil {
+		if err := ctx.yield(d.vertex, d.env, d.comp, Flags{
+			status:    state,
+			condition: allKnown,
+			mode:      ignore,
+		}, d.addEnv); err != nil {
 			if err.IsIncomplete() {
 				return err
 			}
@@ -454,8 +368,6 @@ func (n *nodeContext) processComprehensionInner(d *envYield, state vertexStatus)
 			return nil
 		}
 
-		d.envs = envs
-
 		if len(d.envs) > 0 {
 			for _, s := range d.structs {
 				s.Init(n.ctx)
@@ -468,21 +380,22 @@ func (n *nodeContext) processComprehensionInner(d *envYield, state vertexStatus)
 	d.inserted = true
 
 	if len(d.envs) == 0 {
-		c := d.leaf.arcCC
-		// because the parent referrer will reach a zero count before this
-		// node will reach a zero count, we need to propagate the arcType.
-		c.updateArcType(ctx, ArcNotPresent)
+		// If there's an else clause, use it instead of marking arc as not present.
+		if d.leaf.Fallback != nil {
+			// Evaluate the else clause in the outer environment.
+			// We use linkChildren to properly chain the environment, similar to
+			// normal comprehension yield processing.
+			env := linkChildren(d.env, d.leaf)
+			n.scheduleConjunct(Conjunct{env, d.leaf.Fallback, d.id}, d.id)
+			return nil
+		}
+		n.node.updateArcType(ArcNotPresent)
 		return nil
 	}
 
 	v := n.node
 	for c := d.leaf; c.parent != nil; c = c.parent {
-		// because the parent referrer will reach a zero count before this
-		// node will reach a zero count, we need to propagate the arcType.
-		if p := c.arcCC; p != nil {
-			p.src.updateArcType(c.arcType)
-			p.updateArcType(ctx, c.arcType)
-		}
+		v = n.ctx.deref(v)
 		v.updateArcType(c.arcType)
 		if v.ArcType == ArcNotPresent {
 			parent := v.Parent
@@ -491,6 +404,12 @@ func (n *nodeContext) processComprehensionInner(d *envYield, state vertexStatus)
 			ctx.current().err = b
 			ctx.current().state = taskFAILED
 			return nil
+		}
+		if k := c.kind; k == StructKind || k == ListKind {
+			v := v.DerefDisjunct()
+			if s := v.getBareState(n.ctx); s != nil {
+				s.updateNodeType(k, ToExpr(c.Value), d.id)
+			}
 		}
 		v = c.arc
 	}
@@ -510,11 +429,7 @@ func (n *nodeContext) processComprehensionInner(d *envYield, state vertexStatus)
 
 		env = linkChildren(env, d.leaf)
 
-		if ctx.isDevVersion() {
-			n.scheduleConjunct(Conjunct{env, d.expr, id}, id)
-		} else {
-			n.addExprConjunct(Conjunct{env, d.expr, id}, state)
-		}
+		n.scheduleConjunct(Conjunct{env, d.expr, id}, id)
 	}
 
 	return nil

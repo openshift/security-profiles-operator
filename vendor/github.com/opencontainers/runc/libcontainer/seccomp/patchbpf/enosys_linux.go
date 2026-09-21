@@ -51,11 +51,24 @@ const uintptr_t C_FILTER_FLAG_SPEC_ALLOW = SECCOMP_FILTER_FLAG_SPEC_ALLOW;
 #endif
 const uintptr_t C_FILTER_FLAG_NEW_LISTENER = SECCOMP_FILTER_FLAG_NEW_LISTENER;
 
+#ifndef SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV
+#	define SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV (1UL << 5)
+#endif
+const uintptr_t C_FILTER_FLAG_WAIT_KILLABLE_RECV = SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV;
+
 #ifndef AUDIT_ARCH_RISCV64
 #ifndef EM_RISCV
 #define EM_RISCV		243
 #endif
 #define AUDIT_ARCH_RISCV64	(EM_RISCV|__AUDIT_ARCH_64BIT|__AUDIT_ARCH_LE)
+#endif
+
+// TODO: If loongarch support is not fully merged, at some point we will want to remove this.
+#ifndef AUDIT_ARCH_LOONGARCH64
+#ifndef EM_LOONGARCH
+#define EM_LOONGARCH		258
+#endif
+#define AUDIT_ARCH_LOONGARCH64	(EM_LOONGARCH|__AUDIT_ARCH_64BIT|__AUDIT_ARCH_LE)
 #endif
 
 // We use the AUDIT_ARCH_* values because those are the ones used by the kernel
@@ -78,6 +91,7 @@ const uint32_t C_AUDIT_ARCH_PPC64LE      = AUDIT_ARCH_PPC64LE;
 const uint32_t C_AUDIT_ARCH_S390         = AUDIT_ARCH_S390;
 const uint32_t C_AUDIT_ARCH_S390X        = AUDIT_ARCH_S390X;
 const uint32_t C_AUDIT_ARCH_RISCV64      = AUDIT_ARCH_RISCV64;
+const uint32_t C_AUDIT_ARCH_LOONGARCH64  = AUDIT_ARCH_LOONGARCH64; //nolint:godot // C code, not Go comment.
 */
 import "C"
 
@@ -217,6 +231,8 @@ func scmpArchToAuditArch(arch libseccomp.ScmpArch) (linuxAuditArch, error) {
 		return linuxAuditArch(C.C_AUDIT_ARCH_S390X), nil
 	case libseccomp.ArchRISCV64:
 		return linuxAuditArch(C.C_AUDIT_ARCH_RISCV64), nil
+	case libseccomp.ArchLOONGARCH64:
+		return linuxAuditArch(C.C_AUDIT_ARCH_LOONGARCH64), nil
 	default:
 		return invalidArch, fmt.Errorf("unknown architecture: %v", arch)
 	}
@@ -656,6 +672,13 @@ func filterFlags(config *configs.Seccomp, filter *libseccomp.ScmpFilter) (flags 
 			flags |= uint(C.C_FILTER_FLAG_SPEC_ALLOW)
 		}
 	}
+	if apiLevel >= 7 {
+		if waitKill, err := filter.GetWaitKill(); err != nil && !errors.Is(err, unix.EINVAL) {
+			return 0, false, fmt.Errorf("unable to fetch SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV bit: %w", err)
+		} else if waitKill {
+			flags |= uint(C.C_FILTER_FLAG_WAIT_KILLABLE_RECV)
+		}
+	}
 	// XXX: add newly supported filter flags above this line.
 
 	for _, call := range config.Syscalls {
@@ -665,7 +688,7 @@ func filterFlags(config *configs.Seccomp, filter *libseccomp.ScmpFilter) (flags 
 		}
 	}
 
-	return
+	return flags, noNewPrivs, err
 }
 
 func sysSeccompSetFilter(flags uint, filter []unix.SockFilter) (fd int, err error) {
@@ -695,7 +718,7 @@ func sysSeccompSetFilter(flags uint, filter []unix.SockFilter) (fd int, err erro
 	}
 	runtime.KeepAlive(filter)
 	runtime.KeepAlive(fprog)
-	return
+	return fd, err
 }
 
 // PatchAndLoad takes a seccomp configuration and a libseccomp filter which has

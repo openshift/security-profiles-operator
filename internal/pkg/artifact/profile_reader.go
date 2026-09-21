@@ -22,17 +22,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
-	apparmorprofileapi "sigs.k8s.io/security-profiles-operator/api/apparmorprofile/v1alpha1"
-	seccompprofileapi "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1beta1"
-	selinuxprofileapi "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1alpha2"
+	apparmorprofileapi "sigs.k8s.io/security-profiles-operator/api/apparmorprofile/v1"
+	seccompprofileapi "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1"
+	selinuxprofileapi "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1"
 )
 
-// Unmarshal a raw security profile YAML byte slice into a SeccompProfile, SelinuxProfile,
+// ReadProfile unmarshals a raw security profile YAML byte slice into a SeccompProfile, SelinuxProfile,
 // or AppArmorProfile struct. The caller can then use `switch obj := profile.(type) { ... `.
 func ReadProfile(content []byte) (client.Object, error) {
 	// yaml.Unmarshal happily takes YAML for a SELinux profile and unmarshals
 	// it into SeccompProfile. We need to check the YAML kind!
-	var genericCRD map[string]interface{}
+	var genericCRD map[string]any
 
 	err := yaml.Unmarshal(content, &genericCRD)
 	if err != nil {

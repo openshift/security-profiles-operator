@@ -35,13 +35,14 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	bpfrecorderapi "sigs.k8s.io/security-profiles-operator/api/grpc/bpfrecorder"
 	enricherapi "sigs.k8s.io/security-profiles-operator/api/grpc/enricher"
-	recordingapi "sigs.k8s.io/security-profiles-operator/api/profilerecording/v1alpha1"
-	spodapi "sigs.k8s.io/security-profiles-operator/api/spod/v1alpha1"
+	recordingapi "sigs.k8s.io/security-profiles-operator/api/profilerecording/v1"
+	spodapi "sigs.k8s.io/security-profiles-operator/api/spod/v1"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/config"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/daemon/bpfrecorder"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/daemon/profilerecorder/profilerecorderfakes"
@@ -49,11 +50,123 @@ import (
 
 var errTest = errors.New("error")
 
+func ptrTrue() *bool {
+	b := true
+
+	return &b
+}
+
 func TestName(t *testing.T) {
 	t.Parallel()
 
 	sut := NewController()
 	assert.Equal(t, "recorder-spod", sut.Name())
+}
+
+func TestCollectBpfProfilesProfileName(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name          string
+		mergeStrategy recordingapi.ProfileMergeStrategy
+		podName       string
+		replicaSuffix string
+		expected      string
+	}{
+		{
+			name:          "fixed pod with containers merge",
+			mergeStrategy: recordingapi.ProfileMergeContainers,
+			podName:       "fixed-pod",
+			expected:      "recording-container-fixed-pod",
+		},
+		{
+			name:          "fixed pod without merge",
+			mergeStrategy: recordingapi.ProfileMergeNone,
+			podName:       "fixed-pod",
+			expected:      "recording-container",
+		},
+		{
+			name:          "generated pod keeps replica suffix",
+			mergeStrategy: recordingapi.ProfileMergeContainers,
+			podName:       "generated-abcde",
+			replicaSuffix: "abcde",
+			expected:      "recording-container-abcde",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			recording := &recordingapi.ProfileRecording{
+				ObjectMeta: metav1.ObjectMeta{Name: "recording", Namespace: "recording-ns"},
+				Spec: recordingapi.ProfileRecordingSpec{
+					MergeStrategy: tc.mergeStrategy,
+				},
+			}
+			scheme := apiruntime.NewScheme()
+			require.NoError(t, recordingapi.AddToScheme(scheme))
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(recording).Build()
+
+			mock := &profilerecorderfakes.FakeImpl{}
+			mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
+				Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableBpfRecorder: ptrTrue()}},
+			}, nil)
+			mock.DialBpfRecorderReturns(nil, nil)
+			mock.SyscallsForProfileReturns(&bpfrecorderapi.SyscallsResponse{
+				Syscalls: []string{"read"},
+				GoArch:   runtime.GOARCH,
+			}, nil)
+			mock.ClientGetCalls(func(
+				_ context.Context,
+				_ client.Client,
+				key types.NamespacedName,
+				obj client.Object,
+			) error {
+				switch recordingResult := obj.(type) {
+				case *recordingapi.ProfileRecording:
+					require.Equal(t, client.ObjectKeyFromObject(recording), key)
+					recording.DeepCopyInto(recordingResult)
+
+					return nil
+				default:
+					t.Fatalf("unexpected ClientGet for %T", obj)
+
+					return nil
+				}
+			})
+			mock.GetRecordingReturns(recording, nil)
+
+			createdName := ""
+
+			mock.CreateOrUpdateCalls(func(
+				_ context.Context,
+				_ client.Client,
+				obj client.Object,
+				mutate controllerutil.MutateFn,
+			) (controllerutil.OperationResult, error) {
+				createdName = obj.GetName()
+
+				return controllerutil.OperationResultCreated, mutate()
+			})
+
+			sut := &RecorderReconciler{
+				impl:   mock,
+				client: kubeClient,
+				log:    logr.Discard(),
+				record: record.NewFakeRecorder(10),
+			}
+			err := sut.collectBpfProfiles(
+				t.Context(),
+				tc.replicaSuffix,
+				types.NamespacedName{Name: tc.podName, Namespace: recording.Namespace},
+				[]profileToCollect{{
+					kind: recordingapi.ProfileRecordingKindSeccompProfile,
+					name: "recording_container_nonce_timestamp",
+				}},
+			)
+			require.NoError(t, err)
+			require.Equal(t, tc.expected, createdName)
+		})
+	}
 }
 
 func TestSchemeBuilder(t *testing.T) {
@@ -80,6 +193,7 @@ func TestSetup(t *testing.T) {
 				) error {
 					node, ok := obj.(*corev1.Node)
 					assert.True(t, ok)
+
 					node.Status = corev1.NodeStatus{
 						Addresses: []corev1.NodeAddress{
 							{Type: corev1.NodeInternalIP, Address: "127.0.0.1"},
@@ -178,12 +292,13 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableBpfRecorder: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableBpfRecorder: ptrTrue()}},
 				}, nil)
-				mock.DialBpfRecorderReturns(nil, func() {}, nil)
+				mock.DialBpfRecorderReturns(nil, nil)
 			},
 			assert: func(sut *RecorderReconciler, err error) {
 				require.NoError(t, err)
+
 				v, ok := sut.podsToWatch.Load(testRequest.String())
 				assert.True(t, ok)
 				pod, ok := v.(podToWatch)
@@ -220,9 +335,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableBpfRecorder: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableBpfRecorder: ptrTrue()}},
 				}, nil)
-				mock.DialBpfRecorderReturns(nil, func() {}, nil)
+				mock.DialBpfRecorderReturns(nil, nil)
 				mock.SyscallsForProfileReturns(
 					&bpfrecorderapi.SyscallsResponse{
 						Syscalls: []string{"prctl", "mkdir"},
@@ -274,9 +389,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableBpfRecorder: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableBpfRecorder: ptrTrue()}},
 				}, nil)
-				mock.DialBpfRecorderReturns(nil, func() {}, nil)
+				mock.DialBpfRecorderReturns(nil, nil)
 				mock.SyscallsForProfileReturns(
 					&bpfrecorderapi.SyscallsResponse{
 						Syscalls: []string{"prctl", "mkdir"},
@@ -313,9 +428,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableBpfRecorder: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableBpfRecorder: ptrTrue()}},
 				}, nil)
-				mock.DialBpfRecorderReturns(nil, func() {}, nil)
+				mock.DialBpfRecorderReturns(nil, nil)
 				mock.SyscallsForProfileReturns(
 					&bpfrecorderapi.SyscallsResponse{
 						Syscalls: []string{"prctl", "mkdir"},
@@ -352,9 +467,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableBpfRecorder: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableBpfRecorder: ptrTrue()}},
 				}, nil)
-				mock.DialBpfRecorderReturns(nil, func() {}, errTest)
+				mock.DialBpfRecorderReturns(nil, errTest)
 			},
 			assert: func(sut *RecorderReconciler, err error) {
 				assert.Error(t, err)
@@ -383,16 +498,16 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableBpfRecorder: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableBpfRecorder: ptrTrue()}},
 				}, nil)
-				mock.DialBpfRecorderReturns(nil, func() {}, nil)
+				mock.DialBpfRecorderReturns(nil, nil)
 				mock.SyscallsForProfileReturns(
 					&bpfrecorderapi.SyscallsResponse{
 						Syscalls: []string{"prctl", "mkdir"},
 						GoArch:   runtime.GOARCH,
 					}, nil,
 				)
-				mock.DialBpfRecorderReturns(nil, func() {}, nil)
+				mock.DialBpfRecorderReturns(nil, nil)
 				mock.StopBpfRecorderReturns(errTest)
 			},
 			assert: func(sut *RecorderReconciler, err error) {
@@ -402,6 +517,7 @@ func TestReconcile(t *testing.T) {
 		{ // seccomp BPF invalid profile name
 			prepare: func(sut *RecorderReconciler, mock *profilerecorderfakes.FakeImpl) {
 				const profileName = "invalid"
+
 				value := podToWatch{
 					recorder: recordingapi.ProfileRecorderBpf,
 					profiles: []profileToCollect{
@@ -422,9 +538,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableBpfRecorder: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableBpfRecorder: ptrTrue()}},
 				}, nil)
-				mock.DialBpfRecorderReturns(nil, func() {}, nil)
+				mock.DialBpfRecorderReturns(nil, nil)
 				mock.SyscallsForProfileReturns(
 					&bpfrecorderapi.SyscallsResponse{
 						Syscalls: []string{"prctl", "mkdir"},
@@ -460,9 +576,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableBpfRecorder: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableBpfRecorder: ptrTrue()}},
 				}, nil)
-				mock.DialBpfRecorderReturns(nil, func() {}, nil)
+				mock.DialBpfRecorderReturns(nil, nil)
 				mock.SyscallsForProfileReturns(nil, bpfrecorder.ErrNotFound)
 				mock.StopBpfRecorderReturns(nil)
 			},
@@ -494,9 +610,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableBpfRecorder: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableBpfRecorder: ptrTrue()}},
 				}, nil)
-				mock.DialBpfRecorderReturns(nil, func() {}, nil)
+				mock.DialBpfRecorderReturns(nil, nil)
 				mock.SyscallsForProfileReturns(nil, errTest)
 			},
 			assert: func(sut *RecorderReconciler, err error) {
@@ -514,9 +630,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableBpfRecorder: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableBpfRecorder: ptrTrue()}},
 				}, nil)
-				mock.DialBpfRecorderReturns(nil, func() {}, errTest)
+				mock.DialBpfRecorderReturns(nil, errTest)
 			},
 			assert: func(sut *RecorderReconciler, err error) {
 				assert.Error(t, err)
@@ -533,9 +649,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableBpfRecorder: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableBpfRecorder: ptrTrue()}},
 				}, nil)
-				mock.DialBpfRecorderReturns(nil, func() {}, nil)
+				mock.DialBpfRecorderReturns(nil, nil)
 				mock.StartBpfRecorderReturns(errTest)
 			},
 			assert: func(sut *RecorderReconciler, err error) {
@@ -569,7 +685,25 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableBpfRecorder: false},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableBpfRecorder: new(bool)}},
+				}, nil)
+			},
+			assert: func(sut *RecorderReconciler, err error) {
+				assert.Error(t, err)
+			},
+		},
+		{ // seccomp BPF nil (defaults to disabled)
+			prepare: func(sut *RecorderReconciler, mock *profilerecorderfakes.FakeImpl) {
+				mock.GetPodReturns(&corev1.Pod{
+					Status: corev1.PodStatus{Phase: corev1.PodPending},
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{
+							config.SeccompProfileRecordBpfAnnotationKey: "profile",
+						},
+					},
+				}, nil)
+				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{}},
 				}, nil)
 			},
 			assert: func(sut *RecorderReconciler, err error) {
@@ -588,12 +722,13 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableBpfRecorder: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableBpfRecorder: ptrTrue()}},
 				}, nil)
-				mock.DialBpfRecorderReturns(nil, func() {}, nil)
+				mock.DialBpfRecorderReturns(nil, nil)
 			},
 			assert: func(sut *RecorderReconciler, err error) {
 				require.NoError(t, err)
+
 				v, ok := sut.podsToWatch.Load(testRequest.String())
 				assert.True(t, ok)
 				pod, ok := v.(podToWatch)
@@ -630,9 +765,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableBpfRecorder: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableBpfRecorder: ptrTrue()}},
 				}, nil)
-				mock.DialBpfRecorderReturns(nil, func() {}, nil)
+				mock.DialBpfRecorderReturns(nil, nil)
 				mock.ApparmorForProfileReturns(
 					&bpfrecorderapi.ApparmorResponse{
 						Files: &bpfrecorderapi.ApparmorResponse_Files{
@@ -688,9 +823,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableBpfRecorder: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableBpfRecorder: ptrTrue()}},
 				}, nil)
-				mock.DialBpfRecorderReturns(nil, func() {}, nil)
+				mock.DialBpfRecorderReturns(nil, nil)
 				mock.ApparmorForProfileReturns(
 					&bpfrecorderapi.ApparmorResponse{
 						Files: &bpfrecorderapi.ApparmorResponse_Files{
@@ -732,9 +867,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableBpfRecorder: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableBpfRecorder: ptrTrue()}},
 				}, nil)
-				mock.DialBpfRecorderReturns(nil, func() {}, errTest)
+				mock.DialBpfRecorderReturns(nil, errTest)
 			},
 			assert: func(sut *RecorderReconciler, err error) {
 				assert.Error(t, err)
@@ -763,9 +898,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableBpfRecorder: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableBpfRecorder: ptrTrue()}},
 				}, nil)
-				mock.DialBpfRecorderReturns(nil, func() {}, nil)
+				mock.DialBpfRecorderReturns(nil, nil)
 				mock.ApparmorForProfileReturns(
 					&bpfrecorderapi.ApparmorResponse{
 						Files: &bpfrecorderapi.ApparmorResponse_Files{
@@ -777,7 +912,7 @@ func TestReconcile(t *testing.T) {
 						Capabilities: []string{"test-cap"},
 					}, nil,
 				)
-				mock.DialBpfRecorderReturns(nil, func() {}, nil)
+				mock.DialBpfRecorderReturns(nil, nil)
 				mock.StopBpfRecorderReturns(errTest)
 			},
 			assert: func(sut *RecorderReconciler, err error) {
@@ -787,6 +922,7 @@ func TestReconcile(t *testing.T) {
 		{ // apparmor BPF invalid profile name
 			prepare: func(sut *RecorderReconciler, mock *profilerecorderfakes.FakeImpl) {
 				const profileName = "invalid"
+
 				value := podToWatch{
 					recorder: recordingapi.ProfileRecorderBpf,
 					profiles: []profileToCollect{
@@ -807,9 +943,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableBpfRecorder: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableBpfRecorder: ptrTrue()}},
 				}, nil)
-				mock.DialBpfRecorderReturns(nil, func() {}, nil)
+				mock.DialBpfRecorderReturns(nil, nil)
 				mock.ApparmorForProfileReturns(
 					&bpfrecorderapi.ApparmorResponse{
 						Files: &bpfrecorderapi.ApparmorResponse_Files{
@@ -850,9 +986,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableBpfRecorder: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableBpfRecorder: ptrTrue()}},
 				}, nil)
-				mock.DialBpfRecorderReturns(nil, func() {}, nil)
+				mock.DialBpfRecorderReturns(nil, nil)
 				mock.ApparmorForProfileReturns(nil, bpfrecorder.ErrNotFound)
 				mock.StopBpfRecorderReturns(nil)
 			},
@@ -884,9 +1020,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableBpfRecorder: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableBpfRecorder: ptrTrue()}},
 				}, nil)
-				mock.DialBpfRecorderReturns(nil, func() {}, nil)
+				mock.DialBpfRecorderReturns(nil, nil)
 				mock.ApparmorForProfileReturns(nil, errTest)
 			},
 			assert: func(sut *RecorderReconciler, err error) {
@@ -904,9 +1040,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableBpfRecorder: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableBpfRecorder: ptrTrue()}},
 				}, nil)
-				mock.DialBpfRecorderReturns(nil, func() {}, errTest)
+				mock.DialBpfRecorderReturns(nil, errTest)
 			},
 			assert: func(sut *RecorderReconciler, err error) {
 				assert.Error(t, err)
@@ -923,9 +1059,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableBpfRecorder: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableBpfRecorder: ptrTrue()}},
 				}, nil)
-				mock.DialBpfRecorderReturns(nil, func() {}, nil)
+				mock.DialBpfRecorderReturns(nil, nil)
 				mock.StartBpfRecorderReturns(errTest)
 			},
 			assert: func(sut *RecorderReconciler, err error) {
@@ -959,7 +1095,25 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableBpfRecorder: false},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableBpfRecorder: new(bool)}},
+				}, nil)
+			},
+			assert: func(sut *RecorderReconciler, err error) {
+				assert.Error(t, err)
+			},
+		},
+		{ // apparmor BPF nil (defaults to disabled)
+			prepare: func(sut *RecorderReconciler, mock *profilerecorderfakes.FakeImpl) {
+				mock.GetPodReturns(&corev1.Pod{
+					Status: corev1.PodStatus{Phase: corev1.PodPending},
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{
+							config.ApparmorProfileRecordBpfAnnotationKey: "profile",
+						},
+					},
+				}, nil)
+				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{}},
 				}, nil)
 			},
 			assert: func(sut *RecorderReconciler, err error) {
@@ -1018,6 +1172,7 @@ func TestReconcile(t *testing.T) {
 			},
 			assert: func(sut *RecorderReconciler, err error) {
 				require.NoError(t, err)
+
 				v, ok := sut.podsToWatch.Load(testRequest.String())
 				assert.True(t, ok)
 				pod, ok := v.(podToWatch)
@@ -1045,6 +1200,7 @@ func TestReconcile(t *testing.T) {
 			},
 			assert: func(sut *RecorderReconciler, err error) {
 				require.NoError(t, err)
+
 				v, ok := sut.podsToWatch.Load(testRequest.String())
 				assert.True(t, ok)
 				pod, ok := v.(podToWatch)
@@ -1081,9 +1237,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableLogEnricher: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableLogEnricher: ptrTrue()}},
 				}, nil)
-				mock.DialEnricherReturns(nil, func() {}, nil)
+				mock.DialEnricherReturns(nil, nil)
 				mock.SyscallsReturns(
 					&enricherapi.SyscallsResponse{GoArch: runtime.GOARCH}, nil,
 				)
@@ -1131,9 +1287,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableLogEnricher: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableLogEnricher: ptrTrue()}},
 				}, nil)
-				mock.DialEnricherReturns(nil, func() {}, nil)
+				mock.DialEnricherReturns(nil, nil)
 				mock.SyscallsReturns(
 					&enricherapi.SyscallsResponse{GoArch: runtime.GOARCH}, nil,
 				)
@@ -1167,9 +1323,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableLogEnricher: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableLogEnricher: ptrTrue()}},
 				}, nil)
-				mock.DialEnricherReturns(nil, func() {}, nil)
+				mock.DialEnricherReturns(nil, nil)
 				mock.SyscallsReturns(
 					&enricherapi.SyscallsResponse{GoArch: runtime.GOARCH}, nil,
 				)
@@ -1203,9 +1359,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableLogEnricher: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableLogEnricher: ptrTrue()}},
 				}, nil)
-				mock.DialEnricherReturns(nil, func() {}, nil)
+				mock.DialEnricherReturns(nil, nil)
 				mock.SyscallsReturns(
 					&enricherapi.SyscallsResponse{GoArch: runtime.GOARCH}, nil,
 				)
@@ -1239,9 +1395,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableLogEnricher: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableLogEnricher: ptrTrue()}},
 				}, nil)
-				mock.DialEnricherReturns(nil, func() {}, nil)
+				mock.DialEnricherReturns(nil, nil)
 				mock.SyscallsReturns(nil, errTest)
 			},
 			assert: func(sut *RecorderReconciler, err error) {
@@ -1262,7 +1418,7 @@ func TestReconcile(t *testing.T) {
 				}
 				sut.podsToWatch.Store(testRequest.String(), value)
 
-				mock.DialEnricherReturns(nil, func() {}, nil)
+				mock.DialEnricherReturns(nil, nil)
 				mock.GetPodReturns(&corev1.Pod{
 					Status: corev1.PodStatus{Phase: corev1.PodSucceeded},
 					ObjectMeta: metav1.ObjectMeta{
@@ -1272,9 +1428,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableLogEnricher: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableLogEnricher: ptrTrue()}},
 				}, nil)
-				mock.DialEnricherReturns(nil, func() {}, nil)
+				mock.DialEnricherReturns(nil, nil)
 			},
 			assert: func(sut *RecorderReconciler, err error) {
 				assert.Error(t, err)
@@ -1283,6 +1439,7 @@ func TestReconcile(t *testing.T) {
 		{ // logs seccomp wrong profile name
 			prepare: func(sut *RecorderReconciler, mock *profilerecorderfakes.FakeImpl) {
 				const profileName = "profile"
+
 				value := podToWatch{
 					recorder: recordingapi.ProfileRecorderLogs,
 					profiles: []profileToCollect{
@@ -1303,9 +1460,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableLogEnricher: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableLogEnricher: ptrTrue()}},
 				}, nil)
-				mock.DialEnricherReturns(nil, func() {}, nil)
+				mock.DialEnricherReturns(nil, nil)
 			},
 			assert: func(sut *RecorderReconciler, err error) {
 				assert.Error(t, err)
@@ -1335,9 +1492,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableLogEnricher: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableLogEnricher: ptrTrue()}},
 				}, nil)
-				mock.DialEnricherReturns(nil, func() {}, errTest)
+				mock.DialEnricherReturns(nil, errTest)
 			},
 			assert: func(sut *RecorderReconciler, err error) {
 				assert.Error(t, err)
@@ -1366,7 +1523,37 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableLogEnricher: false},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableLogEnricher: new(bool)}},
+				}, nil)
+			},
+			assert: func(sut *RecorderReconciler, err error) {
+				assert.Error(t, err)
+			},
+		},
+		{ // logs seccomp EnableLogEnricher nil (defaults to disabled)
+			prepare: func(sut *RecorderReconciler, mock *profilerecorderfakes.FakeImpl) {
+				profileName := fmt.Sprintf("profile_replica-123_%d", time.Now().Unix())
+				value := podToWatch{
+					recorder: recordingapi.ProfileRecorderLogs,
+					profiles: []profileToCollect{
+						{
+							kind: recordingapi.ProfileRecordingKindSeccompProfile,
+							name: profileName,
+						},
+					},
+				}
+				sut.podsToWatch.Store(testRequest.String(), value)
+
+				mock.GetPodReturns(&corev1.Pod{
+					Status: corev1.PodStatus{Phase: corev1.PodSucceeded},
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{
+							config.SeccompProfileRecordLogsAnnotationKey: profileName,
+						},
+					},
+				}, nil)
+				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{}},
 				}, nil)
 			},
 			assert: func(sut *RecorderReconciler, err error) {
@@ -1424,9 +1611,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableLogEnricher: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableLogEnricher: ptrTrue()}},
 				}, nil)
-				mock.DialEnricherReturns(nil, func() {}, nil)
+				mock.DialEnricherReturns(nil, nil)
 				mock.AvcsReturns(&enricherapi.AvcResponse{
 					Avc: []*enricherapi.AvcResponse_SelinuxAvc{
 						{
@@ -1479,9 +1666,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableLogEnricher: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableLogEnricher: ptrTrue()}},
 				}, nil)
-				mock.DialEnricherReturns(nil, func() {}, nil)
+				mock.DialEnricherReturns(nil, nil)
 				mock.ResetAvcsReturns(errTest)
 			},
 			assert: func(sut *RecorderReconciler, err error) {
@@ -1511,9 +1698,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableLogEnricher: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableLogEnricher: ptrTrue()}},
 				}, nil)
-				mock.DialEnricherReturns(nil, func() {}, nil)
+				mock.DialEnricherReturns(nil, nil)
 				mock.CreateOrUpdateReturns("", errTest)
 			},
 			assert: func(sut *RecorderReconciler, err error) {
@@ -1543,9 +1730,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableLogEnricher: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableLogEnricher: ptrTrue()}},
 				}, nil)
-				mock.DialEnricherReturns(nil, func() {}, nil)
+				mock.DialEnricherReturns(nil, nil)
 				mock.AvcsReturns(&enricherapi.AvcResponse{
 					Avc: []*enricherapi.AvcResponse_SelinuxAvc{
 						{Tcontext: "wrong"},
@@ -1580,9 +1767,9 @@ func TestReconcile(t *testing.T) {
 					},
 				}, nil)
 				mock.GetSPODReturns(&spodapi.SecurityProfilesOperatorDaemon{
-					Spec: spodapi.SPODSpec{EnableLogEnricher: true},
+					Spec: spodapi.SPODSpec{Enricher: spodapi.SPODEnricherConfig{EnableLogEnricher: ptrTrue()}},
 				}, nil)
-				mock.DialEnricherReturns(nil, func() {}, nil)
+				mock.DialEnricherReturns(nil, nil)
 				mock.AvcsReturns(nil, errTest)
 			},
 			assert: func(sut *RecorderReconciler, err error) {
