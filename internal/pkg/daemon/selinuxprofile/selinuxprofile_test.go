@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -39,7 +40,12 @@ func Test_selinuxProfileHandler(t *testing.T) {
 	//nolint:usetesting // we want to set the env here
 	os.Setenv("OPERATOR_NAMESPACE", ns)
 
-	schemeInstance := scheme.Scheme
+	// Use a dedicated scheme: parallel tests must not mutate the shared
+	// client-go scheme.
+	schemeInstance := runtime.NewScheme()
+	if err := scheme.AddToScheme(schemeInstance); err != nil {
+		t.Fatalf("couldn't add client-go APIs to scheme: %v", err)
+	}
 	if err := spodv1alpha1.AddToScheme(schemeInstance); err != nil {
 		t.Fatalf("couldn't add SPOD API to scheme")
 	}

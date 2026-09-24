@@ -247,6 +247,41 @@ func (c *VerifyBlobAttestationCommand) Exec(ctx context.Context, artifactPath st
 			return err
 		}
 
+		sigContent, err := bundle.SignatureContent()
+		if err != nil {
+			return fmt.Errorf("fetching signature content: %w", err)
+		}
+
+		envContent := sigContent.EnvelopeContent()
+		if envContent == nil {
+			return fmt.Errorf("bundle does not contain a DSSE envelope")
+		}
+
+		rawEnv := envContent.RawEnvelope()
+		if rawEnv == nil {
+			return fmt.Errorf("bundle does not contain a raw DSSE envelope")
+		}
+
+		payloadBytes, err := json.Marshal(rawEnv)
+		if err != nil {
+			return fmt.Errorf("marshaling envelope: %w", err)
+		}
+
+		att, err := static.NewAttestation(payloadBytes)
+		if err != nil {
+			return fmt.Errorf("creating attestation from envelope: %w", err)
+		}
+
+		// This checks the predicate type -- if no error is returned and no payload is, then
+		// the attestation is not of the given predicate type.
+		b, gotPredicateType, err := policy.AttestationToPayloadJSON(ctx, c.PredicateType, att)
+		if err != nil {
+			return fmt.Errorf("converting to consumable policy validation: %w", err)
+		}
+		if b == nil {
+			return fmt.Errorf("invalid predicate type, expected %s got %s", c.PredicateType, gotPredicateType)
+		}
+
 		ui.Infof(ctx, "Verified OK")
 		return nil
 	}
@@ -313,32 +348,25 @@ func (c *VerifyBlobAttestationCommand) Exec(ctx context.Context, artifactPath st
 		if err != nil {
 			return err
 		}
-		// A certificate is required in the bundle unless we specified with
-		//  --key, --sk, or --certificate.
-		if b.Cert == "" && co.SigVerifier == nil && cert == nil {
-			return fmt.Errorf("bundle does not contain cert for verification, please provide public key")
-		}
-		// We have to condition on this because sign-blob may not output the signing
-		// key to the bundle when there is no tlog upload.
 		if b.Cert != "" {
-			// b.Cert can either be a certificate or public key
 			certBytes := []byte(b.Cert)
 			if isb64(certBytes) {
 				certBytes, _ = base64.StdEncoding.DecodeString(b.Cert)
 			}
 			bundleCert, err := loadCertFromPEM(certBytes)
 			if err != nil {
-				// check if cert is actually a public key
-				co.SigVerifier, err = sigs.LoadPublicKeyRaw(certBytes, crypto.SHA256)
-				if err != nil {
-					return fmt.Errorf("loading verifier from bundle: %w", err)
-				}
+				return fmt.Errorf("loading verifier certificate from bundle: %w", err)
 			}
 			// if a cert was passed in, make sure it matches the cert in the bundle
 			if cert != nil && !cert.Equal(bundleCert) {
 				return fmt.Errorf("the cert passed in does not match the cert in the provided bundle")
 			}
 			cert = bundleCert
+		}
+		// A verifier must come either from a certificate from the bundle,
+		// or provided via --key, --sk, or --certificate.
+		if co.SigVerifier == nil && cert == nil {
+			return fmt.Errorf("bundle does not contain cert for verification, please provide public key")
 		}
 
 		encodedSig, err = base64.StdEncoding.DecodeString(b.Base64Signature)
@@ -415,7 +443,11 @@ func (c *VerifyBlobAttestationCommand) Exec(ctx context.Context, artifactPath st
 
 	// This checks the predicate type -- if no error is returned and no payload is, then
 	// the attestation is not of the given predicate type.
-	if b, gotPredicateType, err := policy.AttestationToPayloadJSON(ctx, c.PredicateType, signature); b == nil && err == nil {
+	b, gotPredicateType, err := policy.AttestationToPayloadJSON(ctx, c.PredicateType, signature)
+	if err != nil {
+		return fmt.Errorf("converting to consumable policy validation: %w", err)
+	}
+	if b == nil {
 		return fmt.Errorf("invalid predicate type, expected %s got %s", c.PredicateType, gotPredicateType)
 	}
 

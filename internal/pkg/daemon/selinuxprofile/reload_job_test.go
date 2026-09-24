@@ -47,7 +47,12 @@ func TestCreatePolicyReloadJob(t *testing.T) {
 	testImage := "registry.example.com/selinuxd:test"
 	testAction := "install"
 
-	schemeInstance := scheme.Scheme
+	// Use a dedicated scheme: parallel tests must not mutate the shared
+	// client-go scheme.
+	schemeInstance := runtime.NewScheme()
+	if err := scheme.AddToScheme(schemeInstance); err != nil {
+		t.Fatalf("couldn't add client-go APIs to scheme: %v", err)
+	}
 	if err := batchv1.AddToScheme(schemeInstance); err != nil {
 		t.Fatalf("couldn't add batch API to scheme: %v", err)
 	}
@@ -178,19 +183,19 @@ func TestCreatePolicyReloadJob(t *testing.T) {
 				WithRuntimeObjects(objs...).
 				Build()
 
-		r := &ReconcileSelinux{
-			client: fakeClient,
-		}
+			r := &ReconcileSelinux{
+				client: fakeClient,
+			}
 
-		logger := logf.Log.WithName("test")
-		jobCreated, err := r.createPolicyReloadJob(context.Background(), tt.policyName, testAction, logger)
+			logger := logf.Log.WithName("test")
+			jobCreated, err := r.createPolicyReloadJob(context.Background(), tt.policyName, testAction, logger)
 
-		if tt.wantErr {
-			require.Error(t, err)
-			return
-		}
-		require.NoError(t, err)
-		require.Equal(t, tt.wantJobCreated, jobCreated)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tt.wantJobCreated, jobCreated)
 
 			// Check if job was created
 			jobs := &batchv1.JobList{}

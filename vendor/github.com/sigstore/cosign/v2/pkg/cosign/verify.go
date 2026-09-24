@@ -945,15 +945,23 @@ func keyBytes(sig oci.Signature, co *CheckOpts) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	// We have a public key.
+	var pub crypto.PublicKey
 	if co.SigVerifier != nil {
-		pub, err := co.SigVerifier.PublicKey(co.PKOpts...)
+		pub, err = co.SigVerifier.PublicKey(co.PKOpts...)
 		if err != nil {
 			return nil, err
 		}
-		return cryptoutils.MarshalPublicKeyToPEM(pub)
 	}
-	return cryptoutils.MarshalCertificateToPEM(cert)
+	if cert != nil && co.SigVerifier != nil {
+		if err := cryptoutils.EqualKeys(cert.PublicKey, pub); err != nil {
+			return nil, fmt.Errorf("both public key and certificate were provided but did not match")
+		}
+	}
+
+	if cert != nil {
+		return cryptoutils.MarshalCertificateToPEM(cert)
+	}
+	return cryptoutils.MarshalPublicKeyToPEM(pub)
 }
 
 // VerifyBlobSignature verifies a blob signature.
@@ -1620,7 +1628,7 @@ func verifyImageSignaturesExperimentalOCI(ctx context.Context, signedImgRef name
 	return verifySignatures(ctx, sigs, h, co)
 }
 
-func getBundles(_ context.Context, signedImgRef name.Reference, co *CheckOpts) ([]*sgbundle.Bundle, *v1.Hash, error) {
+func GetBundles(_ context.Context, signedImgRef name.Reference, co *CheckOpts) ([]*sgbundle.Bundle, *v1.Hash, error) {
 	// This is a carefully optimized sequence for fetching the signatures of the
 	// entity that minimizes registry requests when supplied with a digest input
 	digest, err := ociremote.ResolveDigest(signedImgRef, co.RegistryClientOpts...)
@@ -1667,7 +1675,7 @@ func getBundles(_ context.Context, signedImgRef name.Reference, co *CheckOpts) (
 
 // verifyImageAttestationsSigstoreBundle verifies attestations from attached sigstore bundles
 func verifyImageAttestationsSigstoreBundle(ctx context.Context, signedImgRef name.Reference, co *CheckOpts) (checkedAttestations []oci.Signature, atLeastOneBundleVerified bool, err error) {
-	bundles, hash, err := getBundles(ctx, signedImgRef, co)
+	bundles, hash, err := GetBundles(ctx, signedImgRef, co)
 	if err != nil {
 		return nil, false, err
 	}
