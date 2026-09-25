@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/buildkite/go-pipeline/ordered"
-	"gopkg.in/yaml.v3"
 )
 
 var _ interface {
@@ -33,10 +32,12 @@ type CommandStep struct {
 	// Fields that are meaningful specifically for command steps
 	Command   string            `yaml:"command"`
 	Plugins   Plugins           `yaml:"plugins,omitempty"`
+	Secrets   Secrets           `yaml:"secrets,omitempty"`
 	Env       map[string]string `yaml:"env,omitempty"`
 	Signature *Signature        `yaml:"signature,omitempty"`
 	Matrix    *Matrix           `yaml:"matrix,omitempty"`
 	Cache     *Cache            `yaml:"cache,omitempty"`
+	Checkout  *Checkout         `yaml:"checkout,omitempty"`
 
 	// RemainingFields stores any other top-level mapping items so they at least
 	// survive an unmarshal-marshal round-trip.
@@ -52,12 +53,11 @@ func (c *CommandStep) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON is used when unmarshalling an individual step directly, e.g.
 // from the Agent API Accept Job.
 func (c *CommandStep) UnmarshalJSON(b []byte) error {
-	// JSON is just a specific kind of YAML.
-	var n yaml.Node
-	if err := yaml.Unmarshal(b, &n); err != nil {
-		return err
+	src, err := ordered.DecodeJSON(b)
+	if err != nil {
+		return fmt.Errorf("decoding JSON for CommandStep: %w", err)
 	}
-	return ordered.Unmarshal(&n, &c)
+	return ordered.Unmarshal(src, c)
 }
 
 // UnmarshalOrdered unmarshals a command step from an ordered map.
@@ -99,7 +99,7 @@ func (c *CommandStep) InterpolateMatrixPermutation(mp MatrixPermutation) error {
 
 func (c *CommandStep) interpolate(tf stringTransformer) error {
 	// Fields that are interpolated with env vars and matrix tokens:
-	// command, plugins
+	// command, plugins, secrets
 	if err := interpolateString(tf, &c.Command); err != nil {
 		return fmt.Errorf("interpolating command: %w", err)
 	}
@@ -108,6 +108,17 @@ func (c *CommandStep) interpolate(tf stringTransformer) error {
 	}
 	if err := interpolateSlice(tf, c.Plugins); err != nil {
 		return fmt.Errorf("interpolating plugins: %w", err)
+	}
+	if err := interpolateSlice(tf, c.Secrets); err != nil {
+		return fmt.Errorf("interpolating secrets: %w", err)
+	}
+	if c.Cache != nil {
+		if _, err := interpolateAny(tf, c.Cache); err != nil {
+			return fmt.Errorf("interpolating cache: %w", err)
+		}
+	}
+	if err := c.Checkout.interpolate(tf); err != nil {
+		return fmt.Errorf("interpolating checkout: %w", err)
 	}
 
 	switch tf.(type) {
@@ -139,6 +150,26 @@ func (c *CommandStep) interpolate(tf stringTransformer) error {
 	}
 
 	return nil
+}
+
+// MergeSecretsFromPipeline merges pipeline-level secrets with this step's secrets.
+// Step-level secrets take precedence over pipeline-level secrets for deduplication.
+func (c *CommandStep) MergeSecretsFromPipeline(pipelineSecrets Secrets) {
+	c.Secrets = pipelineSecrets.MergeWith(c.Secrets)
+}
+
+// MergeCheckoutFromPipeline merges pipeline-level checkout config into this
+// step's checkout. Step-level values take precedence per leaf; an empty
+// parent is a no-op.
+//
+// The receiver's Checkout is mutated in place, so callers that share a
+// *Checkout across steps (e.g. via programmatic construction) must copy
+// first. The parse path materialises an independent Checkout per step.
+func (c *CommandStep) MergeCheckoutFromPipeline(pipelineCheckout *Checkout) {
+	if pipelineCheckout.IsEmpty() {
+		return
+	}
+	c.Checkout = c.Checkout.mergeFrom(pipelineCheckout)
 }
 
 func (CommandStep) stepTag() {}
