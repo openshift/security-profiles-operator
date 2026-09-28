@@ -90,5 +90,5 @@ spec:
   provider:
     name: Kubernetes SIGs
     url: https://github.com/kubernetes-sigs
-  replaces: security-profiles-operator.v0.9.1
+  replaces: security-profiles-operator.v0.10.0
   version: 0.0.0

@@ -1,4 +1,4 @@
-ARG SPO_VERSION="0.10.0"
+ARG SPO_VERSION="0.10.1"
 
 FROM brew.registry.redhat.io/rh-osbs/openshift-golang-builder:v1.25 as builder-runner
 # Use a new stage to enable caching of the package installations for local development
