@@ -1,16 +1,18 @@
 package api
 
 import (
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
-	"slices"
 	"strings"
 	"syscall"
+
+	"github.com/buildkite/roko"
 )
 
-var retrableErrorSuffixes = []string{
+var retriableErrorSuffixes = []string{
 	syscall.ECONNREFUSED.Error(),
 	syscall.ECONNRESET.Error(),
 	syscall.ETIMEDOUT.Error(),
@@ -18,40 +20,52 @@ var retrableErrorSuffixes = []string{
 	"remote error: handshake failure",
 	io.ErrUnexpectedEOF.Error(),
 	io.EOF.Error(),
-}
-
-var retryableStatuses = []int{
-	http.StatusTooManyRequests,     // 429
-	http.StatusInternalServerError, // 500
-	http.StatusBadGateway,          // 502
-	http.StatusServiceUnavailable,  // 503
-	http.StatusGatewayTimeout,      // 504
+	// Transient HTTP/2 transport failure when a previously pooled connection
+	// has gone away (load balancer idle timeout, server GOAWAY, etc.).
+	"http2: client connection lost",
 }
 
 // IsRetryableStatus returns true if the response's StatusCode is one that we should retry.
+// Success statuses (2xx) are not considered retryable — they are not errors.
 func IsRetryableStatus(r *Response) bool {
-	return r.StatusCode >= 400 && slices.Contains(retryableStatuses, r.StatusCode)
+	switch {
+	case r.StatusCode == http.StatusTooManyRequests:
+		return true
+	case r.StatusCode >= 500:
+		return true
+	default:
+		return false
+	}
+}
+
+// isUndecodableResponse reports whether err is (or wraps) an
+// UndecodableResponseError.
+func isUndecodableResponse(err error) bool {
+	var undecodable *UndecodableResponseError
+	return errors.As(err, &undecodable)
 }
 
 // Looks at a bunch of connection related errors, and returns true if the error
 // matches one of them.
 func IsRetryableError(err error) bool {
-	if neterr, ok := err.(net.Error); ok {
-		if neterr.Temporary() {
-			return true
-		}
-	}
-
-	if neterr, ok := err.(net.Error); ok && neterr.Timeout() {
+	// A response we couldn't decode is usually an error page from a proxy, load
+	// balancer, or CDN in front of the API, and it can arrive with any status,
+	// including a 2xx. Either way the API's real answer is lost, so the only way
+	// to get it is to ask again.
+	if isUndecodableResponse(err) {
 		return true
 	}
 
-	if urlerr, ok := err.(*url.Error); ok {
-		if strings.Contains(urlerr.Error(), "use of closed network connection") {
+	var neterr net.Error
+	if errors.As(err, &neterr) {
+		if neterr.Timeout() {
 			return true
 		}
+	}
 
-		if neturlerr, ok := urlerr.Err.(net.Error); ok && neturlerr.Timeout() {
+	var urlerr *url.Error
+	if errors.As(err, &urlerr) {
+		if strings.Contains(urlerr.Error(), "use of closed network connection") {
 			return true
 		}
 	}
@@ -61,11 +75,46 @@ func IsRetryableError(err error) bool {
 	}
 
 	s := err.Error()
-	for _, suffix := range retrableErrorSuffixes {
+	for _, suffix := range retriableErrorSuffixes {
 		if strings.HasSuffix(s, suffix) {
 			return true
 		}
 	}
 
+	return false
+}
+
+// BreakOnNonRetryable calls r.Break() if the error from an API call is not
+// worth retrying. An error is retryable if the response body could not be
+// decoded, if the response has a retryable status code (429, 5xx), or if there
+// was no response and the error is a retryable network-level error (connection
+// reset, timeout, etc.). All other errors — including all non-429 4xx status
+// codes — cause a break.
+//
+// This should be called inside roko retry callbacks after every API call.
+// If err is nil, this is a no-op.
+// BreakOnNonRetryable returns true if it called r.Break() (i.e. the error is
+// non-retryable). Callers can use this to avoid logging misleading retry
+// information when the retrier is about to give up.
+func BreakOnNonRetryable(r *roko.Retrier, resp *Response, err error) (broke bool) {
+	if err == nil {
+		return false
+	}
+	// An undecodable response is retryable whatever status it arrived with, so
+	// classify the error before the response.
+	if isUndecodableResponse(err) {
+		return false
+	}
+	if resp != nil {
+		if !IsRetryableStatus(resp) {
+			r.Break()
+			return true
+		}
+		return false
+	}
+	if !IsRetryableError(err) {
+		r.Break()
+		return true
+	}
 	return false
 }

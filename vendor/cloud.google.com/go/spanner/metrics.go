@@ -38,6 +38,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/experimental/stats"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/stats/opentelemetry"
 	"google.golang.org/grpc/status"
 
@@ -67,6 +68,10 @@ const (
 	metricLabelKeyDirectPathUsed        = "directpath_used"
 	metricLabelKeyGRPCLBPickResult      = "grpc.lb.pick_result"
 	metricLabelKeyGRPCLBDataPlaneTarget = "grpc.lb.rls.data_plane_target"
+	metricLabelKeyGRPCXDSResourceType   = "grpc.xds.resource_type"
+	metricLabelKeyGRPCLBLocality        = "grpc.lb.locality"
+	metricLabelKeyGRPCLBBackendService  = "grpc.lb.backend_service"
+	metricLabelKeyGRPCDisconnectError   = "grpc.disconnect_error"
 
 	// Metric names
 	metricNameOperationLatencies        = "operation_latencies"
@@ -81,6 +86,8 @@ const (
 	// Metric units
 	metricUnitMS    = "ms"
 	metricUnitCount = "1"
+
+	defaultClientLocation = "global"
 )
 
 // These are effectively const, but for testing purposes they are mutable
@@ -187,9 +194,13 @@ var (
 	}
 
 	detectClientLocation = func(ctx context.Context) string {
+		if emulatorAddr, found := os.LookupEnv("SPANNER_EMULATOR_HOST"); found && emulatorAddr != "" {
+			return defaultClientLocation
+		}
+
 		resource, err := gcp.NewDetector().Detect(ctx)
 		if err != nil {
-			return "global"
+			return defaultClientLocation
 		}
 		for _, attr := range resource.Attributes() {
 			if attr.Key == semconv.CloudRegionKey {
@@ -197,7 +208,7 @@ var (
 			}
 		}
 		// If region is not found, return global
-		return "global"
+		return defaultClientLocation
 	}
 
 	// GCM exporter should use the same options as Spanner client
@@ -214,11 +225,22 @@ var (
 	}
 
 	grpcMetricsToEnable = []string{
+		"grpc.client.attempt.started",
+		"grpc.subchannel.open_connections",
+		"grpc.subchannel.disconnections",
+		"grpc.subchannel.connection_attempts_succeeded",
+		"grpc.subchannel.connection_attempts_failed",
 		"grpc.lb.rls.default_target_picks",
 		"grpc.lb.rls.target_picks",
 		"grpc.xds_client.server_failure",
 		"grpc.xds_client.resource_updates_invalid",
 		"grpc.xds_client.resource_updates_valid",
+	}
+
+	grpcOptionalLabels = []string{
+		"grpc.disconnect_error",
+		"grpc.lb.backend_service",
+		"grpc.lb.locality",
 	}
 )
 
@@ -291,8 +313,9 @@ func newBuiltinMetricsTracerFactory(ctx context.Context, dbpath, compression str
 
 		if isEnableGRPCBuiltInMetrics {
 			mo := opentelemetry.MetricsOptions{
-				MeterProvider: meterProvider,
-				Metrics:       stats.NewMetrics(grpcMetricsToEnable...),
+				MeterProvider:  meterProvider,
+				Metrics:        stats.NewMetrics(grpcMetricsToEnable...),
+				OptionalLabels: grpcOptionalLabels,
 			}
 
 			// Configure gRPC dial options to enable gRPC metrics collection and static method call option.
@@ -508,8 +531,14 @@ func (o *opTracer) incrementAttemptCount() {
 }
 
 // setDirectPathUsed sets whether DirectPath was used for the attempt.
-func (a *attemptTracer) setDirectPathUsed(used bool) {
-	a.directPathUsed = used
+func (a *attemptTracer) setDirectPathUsed(ctx context.Context) {
+	peerInfo, ok := peer.FromContext(ctx)
+	if ok && peerInfo.Addr != nil {
+		remoteIP := peerInfo.Addr.String()
+		if strings.HasPrefix(remoteIP, directPathIPV4Prefix) || strings.HasPrefix(remoteIP, directPathIPV6Prefix) {
+			a.directPathUsed = true
+		}
+	}
 }
 
 func (a *attemptTracer) setServerTimingMetrics(metrics map[string]time.Duration) {
@@ -603,14 +632,8 @@ func (t *builtinMetricsTracer) recordGFEError() {
 }
 
 func (t *builtinMetricsTracer) recordAFEError() {
-	if !t.isAFEBuiltInMetricEnabled {
-		return
-	}
-	attrs, err := t.toOtelMetricAttrs(metricNameAFEConnectivityErrorCount)
-	if err != nil {
-		return
-	}
-	t.instrumentAFEErrorCount.Add(t.ctx, 1, metric.WithAttributes(attrs...))
+	// no-op: disable afe_connectivity_error_count metric as AFE header is disabled in backend currently
+	return
 }
 
 // Convert error to grpc status error
