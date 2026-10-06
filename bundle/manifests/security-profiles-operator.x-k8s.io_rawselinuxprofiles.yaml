@@ -198,19 +198,14 @@ spec:
           spec:
             description: spec defines the desired state of the RawSelinuxProfile.
             properties:
+              disabled:
+                description: Whether the profile is disabled and should be skipped
+                  during reconciliation.
+                type: boolean
               policy:
                 description: policy is the raw SELinux policy module content.
                 maxLength: 500000
                 minLength: 1
-                type: string
-              state:
-                default: Enabled
-                description: |-
-                  state controls whether the profile is enabled or disabled for
-                  reconciliation. A disabled profile will be skipped.
-                enum:
-                - Enabled
-                - Disabled
                 type: string
             type: object
           status:

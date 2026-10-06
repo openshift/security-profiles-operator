@@ -18,6 +18,7 @@ rules:
   - events
   verbs:
   - create
+  - patch
 - apiGroups:
   - ""
   resources:
@@ -350,6 +351,7 @@ rules:
   - events
   verbs:
   - create
+  - patch
 - apiGroups:
   - ""
   resources:
