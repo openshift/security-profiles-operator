@@ -2,7 +2,7 @@ ARG SPO_VERSION="1.0.1"
 # The downstream version replaced by this bundle (spec.replaces).
 ARG PREVIOUS_SPO_VERSION="0.10.0"
 
-FROM brew.registry.redhat.io/rh-osbs/openshift-golang-builder:rhel_9_golang_1.26 as builder-runner
+FROM registry.redhat.io/openshift/golang-builder:v1.26.7-202608270918.p2.gedd1cdd.assembly.stream.el9 as builder-runner
 # Use a new stage to enable caching of the package installations for local development
 FROM builder-runner as builder
 ARG SPO_VERSION
