@@ -1,0 +1,46 @@
+ARG SPO_VERSION="1.0.1"
+# The downstream version replaced by this bundle (spec.replaces).
+ARG PREVIOUS_SPO_VERSION="0.10.0"
+
+FROM registry.redhat.io/openshift/golang-builder:v1.26.7-202608270918.p2.gedd1cdd.assembly.stream.el9 as builder-runner
+# Use a new stage to enable caching of the package installations for local development
+FROM builder-runner as builder
+ARG SPO_VERSION
+ARG PREVIOUS_SPO_VERSION
+COPY . .
+WORKDIR bundle-hack
+RUN go run ./update_csv.go ../bundle/manifests ${SPO_VERSION} ${PREVIOUS_SPO_VERSION}
+RUN ./update_bundle_annotations.sh
+RUN ./update_bundle_namespace.sh
+RUN ./update_bundle_rbac.sh
+RUN ./update_crd_conversion.sh
+
+FROM scratch
+LABEL name=openshift-compliance-operator-bundle
+LABEL version=${SPO_VERSION}
+LABEL summary='OpenShift Security Profiles Operator'
+LABEL maintainer='Infrastructure Security and Compliance Team <isc-team@redhat.com>'
+LABEL io.k8s.display-name='Security Profiles Operator'
+LABEL io.k8s.description='OpenShift Security Profiles Operator'
+LABEL release=${SPO_VERSION}
+LABEL url="https://github.com/openshift/security-profiles-operator"
+LABEL vendor="Red Hat, Inc."
+LABEL distribution-scope="public"
+LABEL description='Security Profiles Operator'
+LABEL com.redhat.component=security-profiles-operator-bundle-container
+LABEL com.redhat.delivery.appregistry=false
+LABEL com.redhat.delivery.operator.bundle=true
+LABEL com.redhat.openshift.versions="v4.12"
+LABEL io.openshift.maintainer.product='OpenShift Container Platform'
+LABEL io.openshift.tags=openshift,security,selinux,seccomp
+LABEL operators.operatorframework.io.bundle.channel.default.v1=release-alpha-rhel-8
+LABEL operators.operatorframework.io.bundle.channels.v1=release-alpha-rhel-8
+LABEL operators.operatorframework.io.bundle.manifests.v1=manifests/
+LABEL operators.operatorframework.io.bundle.mediatype.v1=registry+v1
+LABEL operators.operatorframework.io.bundle.metadata.v1=metadata/
+LABEL operators.operatorframework.io.bundle.package.v1=security-profiles-operator
+LABEL License=Apache
+# Copy files to locations specified by labels.
+COPY --from=builder bundle/manifests /manifests/
+COPY --from=builder bundle/metadata /metadata/
+COPY bundle/tests/scorecard /tests/scorecard

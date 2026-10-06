@@ -2,13 +2,14 @@
 
 reviewers:
   - Vincent056
-  - ngopalak-redhat
-approvers:
-  - ccojocar
   - saschagrunert
-  - JAORMX
-  - jhrozek
-emeritus_approvers:
-  - cmurphy
-  - hasheddan
-  - pjbgf
+  - xiaojiey
+  - Vincent056
+  - rhmdnd
+  - yuumasato
+approvers:
+  - saschagrunert
+  - xiaojiey
+  - Vincent056
+  - rhmdnd
+  - yuumasato

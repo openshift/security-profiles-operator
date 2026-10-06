@@ -1,0 +1,57 @@
+FROM registry.redhat.io/openshift/golang-builder:v1.26.7-202608270918.p2.gedd1cdd.assembly.stream.el9 as builder
+
+RUN yum -y install --allowerasing git libseccomp-devel libbpf-devel elfutils-libelf elfutils-debuginfod-client && yum clean all && \
+    yum -y clean all && rm -rf /var/cache/yum
+
+WORKDIR /go/src/github.com/openshift/security-profiles-operator
+
+ENV GOFLAGS="-mod=vendor" BUILD_FLAGS="-tags strictfipsruntime"
+
+COPY . .
+
+RUN mkdir -p build
+
+ARG APPARMOR_ENABLED=0
+ARG BPF_ENABLED=1
+# OCP in FIPS mode doesn't like statically linked SPO
+ARG STATIC_LINK=no
+
+RUN make
+
+FROM registry.redhat.io/ubi9/ubi-minimal-pqc:latest
+
+RUN INSTALL_PKGS="tar libseccomp libbpf" && \
+    if [ ! -e /usr/bin/dnf ]; then ln -s /usr/bin/microdnf /usr/bin/dnf; fi && \
+    dnf install -y --setopt=tsflags=nodocs $INSTALL_PKGS && \
+    dnf clean all && rm -rf /var/cache/*
+LABEL \
+    io.k8s.display-name="Security Profiles Operator" \
+    io.k8s.description="The Security Profiles Operator makes it easier for cluster admins to manage their seccomp, or SELinux profiles and apply them to Kubernetes' workloads." \
+    io.openshift.tags="security,seccomp,selinux" \
+    com.redhat.delivery.appregistry="false" \
+    description="The Security Profiles Operator makes it easier for cluster admins to manage their seccomp, or SELinux profiles and apply them to Kubernetes' workloads." \
+    summary="Security Profiles Operator" \
+    maintainer="Red Hat ISC <isc-team@redhat.com>" \
+    License="APL 2.0" \
+    name="openshift-security-profiles-operator" \
+    cpe="cpe:/a:redhat:openshift_security_profiles_operator:1::el9" \
+    com.redhat.component="openshift-security-profiles-operator-container" \
+    io.openshift.maintainer.product="OpenShift Container Platform" \
+    io.openshift.maintainer.component="Security Profiles Operator" \
+    version=1.0.1
+#        io.openshift.build.commit.id=98271bc2812881010146f47e4587dcd449b846bd \
+#        io.openshift.build.source-location=https://github.com/openshift/file-integrity-operator.git \
+#        io.openshift.build.commit.url=https://github.com/openshift/file-integrity-operator.git/commit/98271bc2812881010146f47e4587dcd449b846bd \
+
+ENV OPERATOR=/usr/local/bin/security-profiles-operator \
+    USER_UID=65534 \
+    USER_NAME=security-profiles-operator
+
+COPY --from=builder /go/src/github.com/openshift/security-profiles-operator/build/security-profiles-operator ${OPERATOR}
+# This is required for the bundle build.
+COPY --from=builder /go/src/github.com/openshift/security-profiles-operator/bundle /bundle
+COPY --from=builder /go/src/github.com/openshift/security-profiles-operator/LICENSE /licenses/LICENSE
+
+ENTRYPOINT ["/usr/local/bin/security-profiles-operator"]
+
+USER ${USER_UID}:${USER_UID}
