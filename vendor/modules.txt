@@ -293,8 +293,8 @@ github.com/asaskevich/govalidator
 # github.com/avast/retry-go/v4 v4.6.1
 ## explicit; go 1.18
 github.com/avast/retry-go/v4
-# github.com/aws/aws-sdk-go-v2 v1.36.5
-## explicit; go 1.22
+# github.com/aws/aws-sdk-go-v2 v1.41.2
+## explicit; go 1.23
 github.com/aws/aws-sdk-go-v2/aws
 github.com/aws/aws-sdk-go-v2/aws/defaults
 github.com/aws/aws-sdk-go-v2/aws/middleware
@@ -319,64 +319,70 @@ github.com/aws/aws-sdk-go-v2/internal/shareddefaults
 github.com/aws/aws-sdk-go-v2/internal/strings
 github.com/aws/aws-sdk-go-v2/internal/sync/singleflight
 github.com/aws/aws-sdk-go-v2/internal/timeconv
-# github.com/aws/aws-sdk-go-v2/config v1.29.17
-## explicit; go 1.22
+# github.com/aws/aws-sdk-go-v2/config v1.32.10
+## explicit; go 1.23
 github.com/aws/aws-sdk-go-v2/config
-# github.com/aws/aws-sdk-go-v2/credentials v1.17.70
-## explicit; go 1.22
+# github.com/aws/aws-sdk-go-v2/credentials v1.19.10
+## explicit; go 1.23
 github.com/aws/aws-sdk-go-v2/credentials
 github.com/aws/aws-sdk-go-v2/credentials/ec2rolecreds
 github.com/aws/aws-sdk-go-v2/credentials/endpointcreds
 github.com/aws/aws-sdk-go-v2/credentials/endpointcreds/internal/client
+github.com/aws/aws-sdk-go-v2/credentials/logincreds
 github.com/aws/aws-sdk-go-v2/credentials/processcreds
 github.com/aws/aws-sdk-go-v2/credentials/ssocreds
 github.com/aws/aws-sdk-go-v2/credentials/stscreds
-# github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.16.32
-## explicit; go 1.22
+# github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.18
+## explicit; go 1.23
 github.com/aws/aws-sdk-go-v2/feature/ec2/imds
 github.com/aws/aws-sdk-go-v2/feature/ec2/imds/internal/config
-# github.com/aws/aws-sdk-go-v2/internal/configsources v1.3.36
-## explicit; go 1.22
+# github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.18
+## explicit; go 1.23
 github.com/aws/aws-sdk-go-v2/internal/configsources
-# github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.6.36
-## explicit; go 1.22
+# github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.18
+## explicit; go 1.23
 github.com/aws/aws-sdk-go-v2/internal/endpoints/v2
-# github.com/aws/aws-sdk-go-v2/internal/ini v1.8.3
-## explicit; go 1.22
+# github.com/aws/aws-sdk-go-v2/internal/ini v1.8.4
+## explicit; go 1.23
 github.com/aws/aws-sdk-go-v2/internal/ini
-# github.com/aws/aws-sdk-go-v2/service/ecr v1.40.3
-## explicit; go 1.21
+# github.com/aws/aws-sdk-go-v2/service/ecr v1.55.3
+## explicit; go 1.23
 github.com/aws/aws-sdk-go-v2/service/ecr
 github.com/aws/aws-sdk-go-v2/service/ecr/internal/endpoints
 github.com/aws/aws-sdk-go-v2/service/ecr/types
-# github.com/aws/aws-sdk-go-v2/service/ecrpublic v1.31.2
-## explicit; go 1.21
+# github.com/aws/aws-sdk-go-v2/service/ecrpublic v1.38.10
+## explicit; go 1.23
 github.com/aws/aws-sdk-go-v2/service/ecrpublic
 github.com/aws/aws-sdk-go-v2/service/ecrpublic/internal/endpoints
 github.com/aws/aws-sdk-go-v2/service/ecrpublic/types
-# github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.12.4
-## explicit; go 1.22
+# github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.5
+## explicit; go 1.23
 github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding
-# github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.12.17
-## explicit; go 1.22
+# github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.18
+## explicit; go 1.23
 github.com/aws/aws-sdk-go-v2/service/internal/presigned-url
-# github.com/aws/aws-sdk-go-v2/service/sso v1.25.5
-## explicit; go 1.22
+# github.com/aws/aws-sdk-go-v2/service/signin v1.0.6
+## explicit; go 1.23
+github.com/aws/aws-sdk-go-v2/service/signin
+github.com/aws/aws-sdk-go-v2/service/signin/internal/endpoints
+github.com/aws/aws-sdk-go-v2/service/signin/types
+# github.com/aws/aws-sdk-go-v2/service/sso v1.30.11
+## explicit; go 1.23
 github.com/aws/aws-sdk-go-v2/service/sso
 github.com/aws/aws-sdk-go-v2/service/sso/internal/endpoints
 github.com/aws/aws-sdk-go-v2/service/sso/types
-# github.com/aws/aws-sdk-go-v2/service/ssooidc v1.30.3
-## explicit; go 1.22
+# github.com/aws/aws-sdk-go-v2/service/ssooidc v1.35.15
+## explicit; go 1.23
 github.com/aws/aws-sdk-go-v2/service/ssooidc
 github.com/aws/aws-sdk-go-v2/service/ssooidc/internal/endpoints
 github.com/aws/aws-sdk-go-v2/service/ssooidc/types
-# github.com/aws/aws-sdk-go-v2/service/sts v1.34.0
-## explicit; go 1.22
+# github.com/aws/aws-sdk-go-v2/service/sts v1.41.7
+## explicit; go 1.23
 github.com/aws/aws-sdk-go-v2/service/sts
 github.com/aws/aws-sdk-go-v2/service/sts/internal/endpoints
 github.com/aws/aws-sdk-go-v2/service/sts/types
-# github.com/aws/smithy-go v1.22.4
-## explicit; go 1.22
+# github.com/aws/smithy-go v1.24.1
+## explicit; go 1.23
 github.com/aws/smithy-go
 github.com/aws/smithy-go/auth
 github.com/aws/smithy-go/auth/bearer
@@ -387,6 +393,7 @@ github.com/aws/smithy-go/encoding/httpbinding
 github.com/aws/smithy-go/encoding/json
 github.com/aws/smithy-go/encoding/xml
 github.com/aws/smithy-go/endpoints
+github.com/aws/smithy-go/endpoints/private/rulesfn
 github.com/aws/smithy-go/internal/sync/singleflight
 github.com/aws/smithy-go/io
 github.com/aws/smithy-go/logging
@@ -400,8 +407,8 @@ github.com/aws/smithy-go/tracing
 github.com/aws/smithy-go/transport/http
 github.com/aws/smithy-go/transport/http/internal/io
 github.com/aws/smithy-go/waiter
-# github.com/awslabs/amazon-ecr-credential-helper/ecr-login v0.9.1
-## explicit; go 1.22
+# github.com/awslabs/amazon-ecr-credential-helper/ecr-login v0.12.0
+## explicit; go 1.24
 github.com/awslabs/amazon-ecr-credential-helper/ecr-login
 github.com/awslabs/amazon-ecr-credential-helper/ecr-login/api
 github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cache
@@ -515,7 +522,7 @@ github.com/docker/cli/cli/config/types
 # github.com/docker/distribution v2.8.3+incompatible
 ## explicit
 github.com/docker/distribution/registry/client/auth/challenge
-# github.com/docker/docker-credential-helpers v0.9.3
+# github.com/docker/docker-credential-helpers v0.9.5
 ## explicit; go 1.21
 github.com/docker/docker-credential-helpers/client
 github.com/docker/docker-credential-helpers/credentials
@@ -1331,8 +1338,8 @@ github.com/sigstore/sigstore-go/pkg/verify
 # github.com/sigstore/timestamp-authority v1.2.8
 ## explicit; go 1.23.0
 github.com/sigstore/timestamp-authority/pkg/verification
-# github.com/sirupsen/logrus v1.9.3
-## explicit; go 1.13
+# github.com/sirupsen/logrus v1.9.4
+## explicit; go 1.17
 github.com/sirupsen/logrus
 # github.com/skratchdot/open-golang v0.0.0-20200116055534-eef842397966
 ## explicit
@@ -1383,7 +1390,7 @@ github.com/spiffe/go-spiffe/v2/workloadapi
 # github.com/stoewer/go-strcase v1.3.0
 ## explicit; go 1.11
 github.com/stoewer/go-strcase
-# github.com/stretchr/testify v1.10.0
+# github.com/stretchr/testify v1.11.1
 ## explicit; go 1.17
 github.com/stretchr/testify/assert
 github.com/stretchr/testify/assert/yaml
