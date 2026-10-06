@@ -471,17 +471,6 @@ func namespaceSelectorUnequalForLabel(label string, existing, configured *metav1
 func (w *Webhook) Update(ctx context.Context, c client.Client) error {
 	for k, o := range w.objectMap() {
 		if err := c.Patch(ctx, o, client.Merge); err != nil {
-			if errors.IsNotFound(err) {
-				// Objects introduced in a newer operator version, for
-				// example the validating webhook configuration, do not
-				// exist yet after an upgrade.
-				if err := c.Create(ctx, o); err != nil {
-					return fmt.Errorf("creating %s: %w", k, err)
-				}
-
-				continue
-			}
-
 			return fmt.Errorf("updating %s: %w", k, err)
 		}
 	}
@@ -606,12 +595,8 @@ func getValidatingWebhookConfig() *admissionregv1.ValidatingWebhookConfiguration
 							"CREATE", "UPDATE",
 						},
 						Rule: admissionregv1.Rule{
-							APIGroups: []string{"security-profiles-operator.x-k8s.io"},
-							// Only list the hub version: with the Equivalent match
-							// policy the API server converts requests for the
-							// previous versions to v1 before calling the webhook,
-							// which decodes v1 objects only.
-							APIVersions: []string{"v1"},
+							APIGroups:   []string{"security-profiles-operator.x-k8s.io"},
+							APIVersions: []string{"v1", "v1alpha2"},
 							Resources:   []string{"rawselinuxprofiles"},
 						},
 					},

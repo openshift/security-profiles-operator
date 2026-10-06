@@ -356,7 +356,6 @@ spec:
           - events
           verbs:
           - create
-          - patch
         - apiGroups:
           - ""
           resources:
@@ -536,7 +535,6 @@ spec:
           - events
           verbs:
           - create
-          - patch
         - apiGroups:
           - ""
           resources:

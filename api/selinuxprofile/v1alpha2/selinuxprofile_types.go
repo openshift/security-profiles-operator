@@ -55,6 +55,15 @@ type PolicyRef struct {
 	Name string `json:"name,omitempty"`
 }
 
+// SelinuxMode describes the enforcement mode for a SELinux profile.
+// +kubebuilder:validation:Enum=Enforcing;Permissive
+type SelinuxMode string
+
+const (
+	SelinuxModeEnforcing  SelinuxMode = "Enforcing"
+	SelinuxModePermissive SelinuxMode = "Permissive"
+)
+
 // SelinuxProfileSpec defines the desired state of SelinuxProfile.
 type SelinuxProfileSpec struct {
 	// Common spec fields for all profiles.
@@ -66,11 +75,12 @@ type SelinuxProfileSpec struct {
 	// +default=[{"kind":"System","name":"container"}]
 	// +listType=atomic
 	Inherit []PolicyRef `json:"inherit,omitempty"`
-	// Permissive, when true will cause the SELinux profile to only
-	// log violations instead of enforcing them.
+	// mode controls the enforcement mode for the SELinux profile.
+	// In "Permissive" mode, violations are logged but allowed.
+	// In "Enforcing" mode (the default), violations are denied.
 	// +optional
-	// +kubebuilder:default=false
-	Permissive bool `json:"permissive,omitempty"`
+	// +default="Enforcing"
+	Mode SelinuxMode `json:"mode,omitempty"`
 	// allow defines the allow policy for the profile.
 	// +optional
 	Allow Allow `json:"allow,omitempty"`

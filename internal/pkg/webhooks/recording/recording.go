@@ -297,7 +297,8 @@ func (p *podSeccompRecorder) updateSeccompSecurityContext(
 
 	ctr.SecurityContext.SeccompProfile.Type = corev1.SeccompProfileTypeLocalhost
 	profile := fmt.Sprintf(
-		"operator/%s.json",
+		"operator/%s/%s.json",
+		p.GetOperatorNamespace(),
 		config.LogEnricherProfile,
 	)
 	ctr.SecurityContext.SeccompProfile.LocalhostProfile = &profile

@@ -104,6 +104,15 @@ type AppArmorAbstract struct {
 	Capability *AppArmorCapabilityRules `json:"capability,omitempty"`
 }
 
+// AppArmorMode describes the enforcement mode for an AppArmor profile.
+// +kubebuilder:validation:Enum=Enforce;Complain
+type AppArmorMode string
+
+const (
+	AppArmorModeEnforce  AppArmorMode = "Enforce"
+	AppArmorModeComplain AppArmorMode = "Complain"
+)
+
 // AppArmorProfileSpec defines the desired state of AppArmorProfile.
 type AppArmorProfileSpec struct {
 	// Common spec fields for all profiles.
@@ -113,11 +122,12 @@ type AppArmorProfileSpec struct {
 	// +optional
 	Abstract AppArmorAbstract `json:"abstract,omitempty"`
 
-	// ComplainMode places the apparmor profile into "complain" mode, by default is placed in "enforce" mode.
-	// In complain mode, if a given action is not allowed, it will be allowed, but this violation will be
-	// logged with a tag of access being "ALLOWED unconfined".
+	// mode controls the enforcement mode for the AppArmor profile.
+	// In "Complain" mode, violations are logged but allowed.
+	// In "Enforce" mode (the default), violations are denied.
 	// +optional
-	ComplainMode bool `json:"complainMode,omitempty"`
+	// +default="Enforce"
+	Mode AppArmorMode `json:"mode,omitempty"`
 }
 
 // AppArmorProfileStatus defines the observed state of AppArmorProfile.

@@ -940,7 +940,7 @@ var metricsService = &corev1.Service{
 	Spec: corev1.ServiceSpec{
 		Ports: []corev1.ServicePort{
 			{
-				Name:       "https",
+				Name:       "http",
 				Port:       servicePort,
 				TargetPort: intstr.FromInt32(ContainerPort),
 			},

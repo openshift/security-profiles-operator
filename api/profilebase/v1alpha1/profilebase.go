@@ -48,7 +48,7 @@ func IsPartial(obj metav1.Object) bool {
 }
 
 func IsDisabled(prfSpec *SpecBase) bool {
-	return prfSpec.Disabled
+	return prfSpec.State == SpecStateDisabled
 }
 
 func IsReconcilable(prfBase SecurityProfileBase) bool {
@@ -109,13 +109,20 @@ type StatusBaseUser interface {
 	SetImplementationStatus()
 }
 
+// SpecState describes whether a profile is enabled or disabled for reconciliation.
+// +kubebuilder:validation:Enum=Enabled;Disabled
+type SpecState string
+
+const (
+	SpecStateEnabled  SpecState = "Enabled"
+	SpecStateDisabled SpecState = "Disabled"
+)
+
 // SpecBase contains common attributes for a profile's spec.
-//
-// This is the deprecated v1alpha1 API which keeps the wire format of the
-// v0.10.x releases (a disabled boolean) so that persisted objects can be
-// converted to v1, where it became the state enum.
 type SpecBase struct {
-	// Whether the profile is disabled and should be skipped during reconciliation.
+	// state controls whether the profile is enabled or disabled for
+	// reconciliation. A disabled profile will be skipped.
 	// +optional
-	Disabled bool `json:"disabled,omitempty"`
+	// +default="Enabled"
+	State SpecState `json:"state,omitempty"`
 }

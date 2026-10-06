@@ -574,26 +574,6 @@ func runManager(ctx *cli.Context, info *version.Info) error {
 		return fmt.Errorf("enable controllers: %w", err)
 	}
 
-	if manageWebhook(ctx) {
-		// Align the operator managed webhook deployment with the running
-		// operator image before the manager starts. The conversion webhook
-		// for the CRDs is served by the webhook deployment, so after an
-		// upgrade the caches of this manager cannot sync (and the SPOD
-		// controller cannot update the webhook) until the webhook
-		// deployment runs the new image. This uses a direct client because
-		// the manager cache is not started yet.
-		bootstrapClient, err := client.New(cfg, client.Options{Scheme: mgr.GetScheme()})
-		if err != nil {
-			return fmt.Errorf("create webhook bootstrap client: %w", err)
-		}
-
-		if err := bindata.EnsureWebhookImageWithRetry(
-			ctx.Context, setupLog, bootstrapClient, config.GetOperatorNamespace(),
-		); err != nil {
-			setupLog.Error(err, "Unable to bootstrap the webhook deployment image")
-		}
-	}
-
 	setupLog.Info("starting manager")
 
 	if err := mgr.Start(sigHandler); err != nil {
@@ -956,26 +936,6 @@ func runWebhook(ctx *cli.Context, info *version.Info) error {
 
 	if err := profilerecordingv1.AddToScheme(mgr.GetScheme()); err != nil {
 		return fmt.Errorf("add profilerecording v1 API to scheme: %w", err)
-	}
-
-	// The conversion webhook (/convert) serves all CRDs of the operator, so
-	// every API version has to be part of the scheme, including the ones not
-	// used by the admission webhooks. Otherwise SPOD and node status objects
-	// stored in a previous API version cannot be read after an upgrade.
-	if err := spodv1alpha1.AddToScheme(mgr.GetScheme()); err != nil {
-		return fmt.Errorf("add spod API to scheme: %w", err)
-	}
-
-	if err := spodv1.AddToScheme(mgr.GetScheme()); err != nil {
-		return fmt.Errorf("add spod v1 API to scheme: %w", err)
-	}
-
-	if err := secprofnodestatusv1alpha1.AddToScheme(mgr.GetScheme()); err != nil {
-		return fmt.Errorf("add per-node Status API to scheme: %w", err)
-	}
-
-	if err := secprofnodestatusv1.AddToScheme(mgr.GetScheme()); err != nil {
-		return fmt.Errorf("add per-node Status v1 API to scheme: %w", err)
 	}
 
 	setupLog.Info("registering webhooks")

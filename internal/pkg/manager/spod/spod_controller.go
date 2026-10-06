@@ -104,7 +104,7 @@ func (r *ReconcileSPOd) Healthz(*http.Request) error {
 //nolint:lll // required for kubebuilder
 //
 // Used for event generation:
-// +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=core,resources=events,verbs=create
 //
 // Operand:
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch
