@@ -21,13 +21,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-logr/logr"
-	apimeta "k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -44,22 +41,17 @@ import (
 
 const (
 	reconcileTimeout = 1 * time.Minute
-	// adoptRequeueDelay gives the cache time to show the labels set on
-	// profiles recorded before 1.0 before they get merged.
-	adoptRequeueDelay = 2 * time.Second
 
 	errGetRecording       = "cannot get profile recording"
 	errMergingRec         = "cannot recorded profiles"
 	errCannotMergeKind    = "cannot merge profiles of kind"
 	errNoPartialProfiles  = "no partial profiles to merge"
 	errEmptyMergedProfile = "merged profile is empty"
-	errAdoptingProfiles   = "cannot adopt profiles recorded before 1.0"
 
 	reasonCannotMergeKind    string = "KindNotSupportedForMerge"
 	reasonCannotCreateUpdate string = "CannotCreateUpdateMergedProfile"
 	reasonMergedEmptyProfile string = "MergedEmptyProfile"
 	reasonNoPartialProfiles  string = "NoPartialProfiles"
-	reasonAmbiguousLegacy    string = "AmbiguousLegacyProfiles"
 )
 
 // NewController returns a new empty controller instance.
@@ -70,8 +62,13 @@ func NewController() controller.Controller {
 // A PolicyMergeReconciler monitors profilerecordings and merges policies recorded by those.
 type PolicyMergeReconciler struct {
 	client client.Client
+	reader client.Reader
 	log    logr.Logger
 	record record.EventRecorder
+
+	// legacyAdoptionPending is set until the partial profiles recorded before
+	// 1.0 are adopted at startup, see legacyAdopter.
+	legacyAdoptionPending atomic.Bool
 }
 
 // Name returns the name of the controller.
@@ -116,20 +113,15 @@ func (r *PolicyMergeReconciler) Reconcile(ctx context.Context, req reconcile.Req
 	if !profileRecording.GetDeletionTimestamp().IsZero() { // object is being deleted
 		logger.Info("Is being deleted, will check if there are policies to be merged")
 
-		adopted, err := r.adoptLegacyProfiles(ctx, profileRecording)
+		hold, err := r.legacyHold(ctx, profileRecording)
 		if err != nil {
-			return reconcile.Result{}, fmt.Errorf("%s: %w", errAdoptingProfiles, err)
+			return reconcile.Result{}, fmt.Errorf("%s: %w", errMergingRec, err)
 		}
 
-		if adopted > 0 {
-			// The merge lists the profiles from the cache, which may not show
-			// the new labels yet, so merge them on the next reconcile.
-			logger.Info(
-				"Labeled profiles recorded before 1.0 with the recording namespace",
-				"profiles", adopted,
-			)
+		if hold > 0 {
+			logger.Info("Waiting for partial profiles recorded before 1.0", "requeueAfter", hold)
 
-			return reconcile.Result{RequeueAfter: adoptRequeueDelay}, nil
+			return reconcile.Result{RequeueAfter: hold}, nil
 		}
 
 		if err := r.mergeProfiles(ctx, profileRecording); err != nil {
@@ -166,122 +158,6 @@ func (r *PolicyMergeReconciler) mergeProfiles(
 	}
 
 	return err
-}
-
-// legacyProfileLists are the profile kinds whose recordings get adopted by
-// adoptLegacyProfiles: the ones the operator may list and patch.
-func legacyProfileLists() []client.ObjectList {
-	return []client.ObjectList{
-		&seccompprofile.SeccompProfileList{},
-		&selinuxprofileapi.SelinuxProfileList{},
-	}
-}
-
-// adoptLegacyProfiles labels the profiles of the recording that were recorded
-// before 1.0 with the recording namespace and returns how many it labeled.
-// Before 1.0, recorded profiles only carried the recording name, while the
-// merge and the release of the recording select them by name and namespace:
-// without the label, the partial profiles of a recording that was started
-// before an upgrade are never merged and the recording is never released.
-// Profiles are cluster-scoped, so the name alone cannot tell recordings in
-// different namespaces apart; the profiles are only adopted if a single
-// recording has this name.
-func (r *PolicyMergeReconciler) adoptLegacyProfiles(
-	ctx context.Context,
-	profileRecording *profilerecordingapi.ProfileRecording,
-) (int, error) {
-	byName, err := labels.NewRequirement(
-		profilerecordingapi.ProfileToRecordingLabel,
-		selection.Equals,
-		[]string{profileRecording.GetName()},
-	)
-	if err != nil {
-		return 0, fmt.Errorf("selecting profiles by recording name: %w", err)
-	}
-
-	withoutNamespace, err := labels.NewRequirement(
-		profilerecordingapi.ProfileToRecordingNamespaceLabel,
-		selection.DoesNotExist,
-		nil,
-	)
-	if err != nil {
-		return 0, fmt.Errorf("selecting profiles without recording namespace: %w", err)
-	}
-
-	selector := client.MatchingLabelsSelector{
-		Selector: labels.NewSelector().Add(*byName, *withoutNamespace),
-	}
-
-	var legacy []client.Object
-
-	for _, list := range legacyProfileLists() {
-		if err := r.client.List(ctx, list, selector); err != nil {
-			return 0, fmt.Errorf("listing %T: %w", list, err)
-		}
-
-		if err := apimeta.EachListItem(list, func(obj runtime.Object) error {
-			prf, ok := obj.(client.Object)
-			if !ok {
-				return fmt.Errorf("object %T is not a client.Object", obj)
-			}
-
-			legacy = append(legacy, prf)
-
-			return nil
-		}); err != nil {
-			return 0, err
-		}
-	}
-
-	if len(legacy) == 0 {
-		return 0, nil
-	}
-
-	recordings := &profilerecordingapi.ProfileRecordingList{}
-	if err := r.client.List(ctx, recordings); err != nil {
-		return 0, fmt.Errorf("listing profile recordings: %w", err)
-	}
-
-	sameName := 0
-
-	for i := range recordings.Items {
-		if recordings.Items[i].GetName() == profileRecording.GetName() {
-			sameName++
-		}
-	}
-
-	if sameName != 1 {
-		r.record.Eventf(
-			profileRecording,
-			util.EventTypeWarning,
-			reasonAmbiguousLegacy,
-			"Not merging %d profiles recorded before 1.0: %d recordings are named %s, "+
-				"and without the %s label they cannot be told apart",
-			len(legacy),
-			sameName,
-			profileRecording.GetName(),
-			profilerecordingapi.ProfileToRecordingNamespaceLabel,
-		)
-
-		return 0, nil
-	}
-
-	for _, prf := range legacy {
-		orig, ok := prf.DeepCopyObject().(client.Object)
-		if !ok {
-			return 0, fmt.Errorf("object %T is not a client.Object", prf)
-		}
-
-		prfLabels := prf.GetLabels()
-		prfLabels[profilerecordingapi.ProfileToRecordingNamespaceLabel] = profileRecording.GetNamespace()
-		prf.SetLabels(prfLabels)
-
-		if err := r.client.Patch(ctx, prf, client.MergeFrom(orig)); err != nil {
-			return 0, fmt.Errorf("labeling profile %s: %w", prf.GetName(), err)
-		}
-	}
-
-	return len(legacy), nil
 }
 
 func (r *PolicyMergeReconciler) mergeTypedProfiles(
