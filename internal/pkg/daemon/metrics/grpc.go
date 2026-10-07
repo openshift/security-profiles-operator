@@ -17,7 +17,6 @@ limitations under the License.
 package metrics
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -69,21 +68,16 @@ func (m *Metrics) ServeGRPC() error {
 
 // Dial can be used to connect to the default GRPC server by creating a new
 // client.
-func Dial() (*grpc.ClientConn, context.CancelFunc, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
-	//nolint:staticcheck // we'll use this API once we have an appropriate alternative
-	conn, err := grpc.DialContext(
-		ctx,
+func Dial() (*grpc.ClientConn, error) {
+	conn, err := grpc.NewClient(
 		"unix://"+config.GRPCServerSocketMetrics,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	if err != nil {
-		cancel()
-
-		return nil, nil, fmt.Errorf("GRPC dial: %w", err)
+		return nil, fmt.Errorf("GRPC dial: %w", err)
 	}
 
-	return conn, cancel, nil
+	return conn, nil
 }
 
 // AuditInc updates the metrics for the audit counter.
@@ -106,7 +100,6 @@ func (m *Metrics) AuditInc(
 				r.GetNamespace(),
 				r.GetPod(),
 				r.GetContainer(),
-				r.GetExecutable(),
 				r.GetSeccompReq().GetSyscall(),
 			)
 		} else if r.GetSelinuxReq() != nil {
@@ -115,7 +108,6 @@ func (m *Metrics) AuditInc(
 				r.GetNamespace(),
 				r.GetPod(),
 				r.GetContainer(),
-				r.GetExecutable(),
 				r.GetSelinuxReq().GetScontext(),
 				r.GetSelinuxReq().GetTcontext(),
 			)
@@ -125,11 +117,9 @@ func (m *Metrics) AuditInc(
 				r.GetNamespace(),
 				r.GetPod(),
 				r.GetContainer(),
-				r.GetExecutable(),
 				r.GetApparmorReq().GetProfile(),
 				r.GetApparmorReq().GetOperation(),
 				r.GetApparmorReq().GetApparmor(),
-				r.GetApparmorReq().GetName(),
 			)
 		}
 	}

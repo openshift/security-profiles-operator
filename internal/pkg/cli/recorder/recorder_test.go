@@ -1,5 +1,4 @@
 //go:build linux && !no_bpf
-// +build linux,!no_bpf
 
 /*
 Copyright 2023 The Kubernetes Authors.
@@ -24,8 +23,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/containers/common/pkg/seccomp"
 	"github.com/stretchr/testify/require"
+	"go.podman.io/common/pkg/seccomp"
 
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/cli/recorder/recorderfakes"
 )
@@ -107,6 +106,7 @@ func TestRun(t *testing.T) {
 			name: "success raw seccomp profile",
 			prepare: func(mock *recorderfakes.FakeImpl) *Options {
 				defaultMock(mock)
+
 				options := Default()
 				options.typ = TypeRawSeccomp
 
@@ -146,6 +146,7 @@ func TestRun(t *testing.T) {
 			prepare: func(mock *recorderfakes.FakeImpl) *Options {
 				defaultMock(mock)
 				mock.CreateReturns(nil, errTest)
+
 				options := Default()
 				options.typ = TypeRawSeccomp
 
@@ -160,6 +161,7 @@ func TestRun(t *testing.T) {
 			prepare: func(mock *recorderfakes.FakeImpl) *Options {
 				defaultMock(mock)
 				mock.MarshalIndentReturns(nil, errTest)
+
 				options := Default()
 				options.typ = TypeRawSeccomp
 
@@ -256,6 +258,7 @@ func TestRun(t *testing.T) {
 			prepare: func(mock *recorderfakes.FakeImpl) *Options {
 				mock.CommandRunReturns(1, nil)
 				defaultMock(mock)
+
 				options := Default()
 				options.typ = TypeAll
 
@@ -271,6 +274,7 @@ func TestRun(t *testing.T) {
 			prepare: func(mock *recorderfakes.FakeImpl) *Options {
 				defaultMock(mock)
 				mock.BPFLSMEnabledReturns(false)
+
 				options := Default()
 				options.typ = TypeApparmor
 

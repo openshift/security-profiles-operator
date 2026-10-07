@@ -23,31 +23,41 @@ import (
 type ProfileBindingKind string
 
 const (
-	ProfileBindingKindSeccompProfile ProfileBindingKind = "SeccompProfile"
-	ProfileBindingKindSelinuxProfile ProfileBindingKind = "SelinuxProfile"
-	SelectAllContainersImage         string             = "*"
+	ProfileBindingKindSeccompProfile  ProfileBindingKind = "SeccompProfile"
+	ProfileBindingKindSelinuxProfile  ProfileBindingKind = "SelinuxProfile"
+	ProfileBindingKindAppArmorProfile ProfileBindingKind = "AppArmorProfile"
+	SelectAllContainersImage          string             = "*"
 )
 
 // ProfileBindingSpec defines the desired state of ProfileBinding.
 type ProfileBindingSpec struct {
-	// ProfileRef references a SeccompProfile or other profile type in the current namespace.
-	ProfileRef ProfileRef `json:"profileRef"`
-	// Image name within pod containers to match to the profile.
+	// profileRef references a SeccompProfile or other profile type in the current namespace.
+	// +required
+	ProfileRef ProfileRef `json:"profileRef,omitzero"`
+	// image specifies the container image name within pod containers to match to the profile.
 	// Use the "*" string to bind the profile to all pods.
-	Image string `json:"image"`
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	Image string `json:"image,omitempty"`
 }
 
 // ProfileRef contains information that points to the profile being used.
 type ProfileRef struct {
-	// Kind of object to be bound.
-	// +kubebuilder:validation:Enum=SeccompProfile;SelinuxProfile
-	Kind ProfileBindingKind `json:"kind"`
-	// Name of the profile within the current namespace to which to bind the selected pods.
-	Name string `json:"name"`
+	// kind specifies the type of object to be bound.
+	// +required
+	// +kubebuilder:validation:Enum=SeccompProfile;SelinuxProfile;AppArmorProfile
+	Kind ProfileBindingKind `json:"kind,omitempty"`
+	// name is the name of the profile within the current namespace to which to bind the selected pods.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name,omitempty"`
 }
 
 // ProfileBindingStatus contains status of the Profilebinding.
 type ProfileBindingStatus struct {
+	// activeWorkloads lists the workloads currently using this binding.
+	// +optional
+	// +listType=set
 	ActiveWorkloads []string `json:"activeWorkloads,omitempty"`
 }
 
@@ -56,10 +66,16 @@ type ProfileBindingStatus struct {
 // ProfileBinding is the Schema for the profilebindings API.
 // +kubebuilder:subresource:status
 type ProfileBinding struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+	// metadata contains the object metadata.
+	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   ProfileBindingSpec   `json:"spec,omitempty"`
+	// spec defines the desired state of the ProfileBinding.
+	// +required
+	Spec ProfileBindingSpec `json:"spec,omitzero"`
+	// status contains the observed state of the ProfileBinding.
+	// +optional
 	Status ProfileBindingStatus `json:"status,omitempty"`
 }
 

@@ -22,13 +22,13 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/containers/common/pkg/seccomp"
 	"github.com/go-logr/logr"
 	grpccodes "google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
@@ -40,20 +40,21 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/scheme"
 
-	apparmorprofileapi "sigs.k8s.io/security-profiles-operator/api/apparmorprofile/v1alpha1"
+	apparmorprofileapi "sigs.k8s.io/security-profiles-operator/api/apparmorprofile/v1"
 	bpfrecorderapi "sigs.k8s.io/security-profiles-operator/api/grpc/bpfrecorder"
 	enricherapi "sigs.k8s.io/security-profiles-operator/api/grpc/enricher"
-	profilebase "sigs.k8s.io/security-profiles-operator/api/profilebase/v1alpha1"
-	profilerecording1alpha1 "sigs.k8s.io/security-profiles-operator/api/profilerecording/v1alpha1"
-	seccompprofileapi "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1beta1"
-	selxv1alpha2 "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1alpha2"
-	spodv1alpha1 "sigs.k8s.io/security-profiles-operator/api/spod/v1alpha1"
+	profilebase "sigs.k8s.io/security-profiles-operator/api/profilebase/v1"
+	profilerecordingapi "sigs.k8s.io/security-profiles-operator/api/profilerecording/v1"
+	seccompprofileapi "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1"
+	selinuxprofileapi "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1"
+	spodapi "sigs.k8s.io/security-profiles-operator/api/spod/v1"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/config"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/controller"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/daemon/bpfrecorder"
@@ -98,13 +99,13 @@ type RecorderReconciler struct {
 }
 
 type profileToCollect struct {
-	kind profilerecording1alpha1.ProfileRecordingKind
+	kind profilerecordingapi.ProfileRecordingKind
 	name string
 }
 
 type podToWatch struct {
 	baseName types.NamespacedName
-	recorder profilerecording1alpha1.ProfileRecorder
+	recorder profilerecordingapi.ProfileRecorder
 	profiles []profileToCollect
 }
 
@@ -115,7 +116,7 @@ func (r *RecorderReconciler) Name() string {
 
 // SchemeBuilder returns the API scheme of the controller.
 func (r *RecorderReconciler) SchemeBuilder() *scheme.Builder {
-	return profilerecording1alpha1.SchemeBuilder
+	return profilerecordingapi.SchemeBuilder
 }
 
 //nolint:lll // required for kubebuilder
@@ -166,7 +167,7 @@ func (r *RecorderReconciler) Setup(
 	)
 }
 
-func (r *RecorderReconciler) getSPOD(ctx context.Context) (*spodv1alpha1.SecurityProfilesOperatorDaemon, error) {
+func (r *RecorderReconciler) getSPOD(ctx context.Context) (*spodapi.SecurityProfilesOperatorDaemon, error) {
 	ctx, cancel := context.WithTimeout(ctx, reconcileTimeout)
 	defer cancel()
 
@@ -185,13 +186,7 @@ func (r *RecorderReconciler) isPodOnLocalNode(obj runtime.Object) bool {
 		return false
 	}
 
-	for _, addr := range r.nodeAddresses {
-		if p.Status.HostIP == addr {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(r.nodeAddresses, p.Status.HostIP)
 }
 
 func (r *RecorderReconciler) isPodWithTraceAnnotation(obj runtime.Object) bool {
@@ -213,6 +208,8 @@ func (r *RecorderReconciler) isPodWithTraceAnnotation(obj runtime.Object) bool {
 	return false
 }
 
+// Reconcile reconciles a pod event for profile recording.
+//
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 func (r *RecorderReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
 	logger := r.log.WithValues("pod", req.Name, "namespace", req.Namespace)
@@ -269,13 +266,13 @@ func (r *RecorderReconciler) Reconcile(ctx context.Context, req reconcile.Reques
 
 		var (
 			profiles []profileToCollect
-			recorder profilerecording1alpha1.ProfileRecorder
+			recorder profilerecordingapi.ProfileRecorder
 		)
 
 		//nolint:gocritic // should be intentionally no switch
 		if len(logProfiles) > 0 {
 			profiles = logProfiles
-			recorder = profilerecording1alpha1.ProfileRecorderLogs
+			recorder = profilerecordingapi.ProfileRecorderLogs
 		} else if len(bpfProfiles) > 0 {
 			if err := r.startBpfRecorder(ctx); err != nil {
 				logger.Error(err, "unable to start bpf recorder")
@@ -284,7 +281,7 @@ func (r *RecorderReconciler) Reconcile(ctx context.Context, req reconcile.Reques
 			}
 
 			profiles = bpfProfiles
-			recorder = profilerecording1alpha1.ProfileRecorderBpf
+			recorder = profilerecordingapi.ProfileRecorderBpf
 		} else {
 			logger.Info("No log or bpf annotations found on pod")
 
@@ -325,12 +322,12 @@ func (r *RecorderReconciler) Reconcile(ctx context.Context, req reconcile.Reques
 
 func (r *RecorderReconciler) getBpfRecorderClient(
 	ctx context.Context,
-) (bpfrecorderapi.BpfRecorderClient, context.CancelFunc, error) {
+) (bpfrecorderapi.BpfRecorderClient, error) {
 	r.log.Info("Checking if bpf recorder is enabled")
 
 	spod, err := r.getSPOD(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("getting SPOD config: %w", err)
+		return nil, fmt.Errorf("getting SPOD config: %w", err)
 	}
 
 	enableBpfRecorderEnv, err := strconv.ParseBool(os.Getenv(config.EnableBpfRecorderEnvKey))
@@ -338,30 +335,29 @@ func (r *RecorderReconciler) getBpfRecorderClient(
 		enableBpfRecorderEnv = false
 	}
 
-	if !spod.Spec.EnableBpfRecorder && !enableBpfRecorderEnv {
-		return nil, nil, errors.New("bpf recorder is not enabled")
+	if !ptr.Deref(spod.Spec.Enricher.EnableBpfRecorder, false) && !enableBpfRecorderEnv {
+		return nil, errors.New("bpf recorder is not enabled")
 	}
 
 	r.log.Info("Connecting to local GRPC bpf recorder server")
 
-	conn, cancel, err := r.DialBpfRecorder()
+	conn, err := r.DialBpfRecorder()
 	if err != nil {
-		return nil, nil, fmt.Errorf("connect to bpf recorder GRPC server: %w", err)
+		return nil, fmt.Errorf("connect to bpf recorder GRPC server: %w", err)
 	}
 
 	bpfRecorderClient := bpfrecorderapi.NewBpfRecorderClient(conn)
 
-	return bpfRecorderClient, cancel, nil
+	return bpfRecorderClient, nil
 }
 
 func (r *RecorderReconciler) startBpfRecorder(ctx context.Context) error {
-	recorderClient, cancel, err := r.getBpfRecorderClient(ctx)
+	recorderClient, err := r.getBpfRecorderClient(ctx)
 	if err != nil {
 		return fmt.Errorf("get bpf recorder client: %w", err)
 	}
-	defer cancel()
 
-	ctx, cancel = context.WithTimeout(ctx, reconcileTimeout)
+	ctx, cancel := context.WithTimeout(ctx, reconcileTimeout)
 	defer cancel()
 
 	r.log.Info("Starting BPF recorder on node")
@@ -370,14 +366,13 @@ func (r *RecorderReconciler) startBpfRecorder(ctx context.Context) error {
 }
 
 func (r *RecorderReconciler) stopBpfRecorder(ctx context.Context) error {
-	recorderClient, cancel1, err := r.getBpfRecorderClient(ctx)
+	recorderClient, err := r.getBpfRecorderClient(ctx)
 	if err != nil {
 		return fmt.Errorf("get bpf recorder client: %w", err)
 	}
-	defer cancel1()
 
-	ctx, cancel2 := context.WithTimeout(ctx, reconcileTimeout)
-	defer cancel2()
+	ctx, cancel := context.WithTimeout(ctx, reconcileTimeout)
+	defer cancel()
 
 	r.log.Info("Stopping BPF recorder on node")
 
@@ -405,7 +400,7 @@ func (r *RecorderReconciler) collectProfile(
 		replicaSuffix = strings.TrimPrefix(podName.Name, podToWatch.baseName.Name)
 	}
 
-	if podToWatch.recorder == profilerecording1alpha1.ProfileRecorderLogs {
+	if podToWatch.recorder == profilerecordingapi.ProfileRecorderLogs {
 		if err := r.collectLogProfiles(
 			ctx, replicaSuffix, podName, podToWatch.profiles,
 		); err != nil {
@@ -413,7 +408,7 @@ func (r *RecorderReconciler) collectProfile(
 		}
 	}
 
-	if podToWatch.recorder == profilerecording1alpha1.ProfileRecorderBpf {
+	if podToWatch.recorder == profilerecordingapi.ProfileRecorderBpf {
 		if err := r.collectBpfProfiles(
 			ctx, replicaSuffix, podName, podToWatch.profiles,
 		); err != nil {
@@ -444,18 +439,16 @@ func (r *RecorderReconciler) collectLogProfiles(
 		enableLogEnricherEnv = false
 	}
 
-	if !spod.Spec.EnableLogEnricher && !enableLogEnricherEnv {
+	if !ptr.Deref(spod.Spec.Enricher.EnableLogEnricher, false) && !enableLogEnricherEnv {
 		return errors.New("log enricher not enabled")
 	}
 
 	r.log.Info("Connecting to local GRPC enricher server")
 
-	conn, cancel, err := r.DialEnricher()
+	conn, err := r.DialEnricher()
 	if err != nil {
 		return fmt.Errorf("connecting to local GRPC server: %w", err)
 	}
-
-	defer cancel()
 
 	enricherClient := enricherapi.NewEnricherClient(conn)
 
@@ -465,18 +458,20 @@ func (r *RecorderReconciler) collectLogProfiles(
 			return fmt.Errorf("parse profile raw annotation: %w", err)
 		}
 
-		profileNamespacedName := createProfileName(
-			parsedProfileAnnotation.cntName, replicaSuffix,
-			podName.Namespace, parsedProfileAnnotation.profileName)
+		profileNamespacedName, err := createProfileNameForRecording(
+			ctx, r, parsedProfileAnnotation, replicaSuffix, podName)
+		if err != nil {
+			return fmt.Errorf("create profile name: %w", err)
+		}
 
 		r.log.Info("Collecting profile", "name", profileNamespacedName, "kind", prf.kind)
 
 		switch prf.kind {
-		case profilerecording1alpha1.ProfileRecordingKindSeccompProfile:
+		case profilerecordingapi.ProfileRecordingKindSeccompProfile:
 			err = r.collectLogSeccompProfile(ctx, enricherClient, parsedProfileAnnotation, profileNamespacedName, prf.name)
-		case profilerecording1alpha1.ProfileRecordingKindSelinuxProfile:
+		case profilerecordingapi.ProfileRecordingKindSelinuxProfile:
 			err = r.collectLogSelinuxProfile(ctx, enricherClient, parsedProfileAnnotation, profileNamespacedName, prf.name)
-		case profilerecording1alpha1.ProfileRecordingKindAppArmorProfile:
+		case profilerecordingapi.ProfileRecordingKindAppArmorProfile:
 			err = errors.New("log recorder doesn't support apparmor profile recording")
 		default:
 			err = fmt.Errorf("unrecognized kind %s", prf.kind)
@@ -539,11 +534,11 @@ func (r *RecorderReconciler) collectLogSeccompProfile(
 		return fmt.Errorf("get seccomp arch: %w", err)
 	}
 
-	profileSpec := seccompprofileapi.SeccompProfileSpec{
-		DefaultAction: seccomp.ActErrno,
+	profileSpec := &seccompprofileapi.SeccompProfileSpec{
+		DefaultAction: seccompprofileapi.ActErrno,
 		Architectures: []seccompprofileapi.Arch{arch},
-		Syscalls: []*seccompprofileapi.Syscall{{
-			Action: seccomp.ActAllow,
+		Syscalls: []seccompprofileapi.Syscall{{
+			Action: seccompprofileapi.ActAllow,
 			Names:  response.GetSyscalls(),
 		}},
 	}
@@ -554,7 +549,7 @@ func (r *RecorderReconciler) collectLogSeccompProfile(
 			Namespace: profileNamespacedName.Namespace,
 			Labels:    labels,
 		},
-		Spec: profileSpec,
+		Spec: *profileSpec,
 	}
 
 	if err := r.setDisabled(ctx, r.client,
@@ -568,7 +563,7 @@ func (r *RecorderReconciler) collectLogSeccompProfile(
 
 	res, err := r.CreateOrUpdate(ctx, r.client, profile,
 		func() error {
-			profile.Spec = profileSpec
+			profile.Spec = *profileSpec
 
 			return nil
 		},
@@ -635,16 +630,16 @@ func (r *RecorderReconciler) collectLogSelinuxProfile(
 		return fmt.Errorf("retrieve avcs for profile %s: %w", profileID, err)
 	}
 
-	selinuxProfileSpec := selxv1alpha2.SelinuxProfileSpec{
-		Inherit: []selxv1alpha2.PolicyRef{
+	selinuxProfileSpec := selinuxprofileapi.SelinuxProfileSpec{
+		Inherit: []selinuxprofileapi.PolicyRef{
 			{
-				Kind: selxv1alpha2.SystemPolicyKind,
+				Kind: selinuxprofileapi.SystemPolicyKind,
 				Name: "container",
 			},
 		},
 	}
 
-	profile := &selxv1alpha2.SelinuxProfile{
+	profile := &selinuxprofileapi.SelinuxProfile{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      profileNamespacedName.Name,
 			Namespace: profileNamespacedName.Namespace,
@@ -698,9 +693,9 @@ func (r *RecorderReconciler) collectLogSelinuxProfile(
 }
 
 func (r *RecorderReconciler) formatSelinuxProfile(
-	selinuxprofile *selxv1alpha2.SelinuxProfile,
+	selinuxprofile *selinuxprofileapi.SelinuxProfile,
 	avcResponse *enricherapi.AvcResponse,
-) (selxv1alpha2.Allow, error) {
+) (selinuxprofileapi.Allow, error) {
 	seBuilder := newSeProfileBuilder(selinuxprofile.GetPolicyUsage(), r.log)
 
 	if err := seBuilder.AddAvcList(avcResponse.GetAvc()); err != nil {
@@ -721,11 +716,10 @@ func (r *RecorderReconciler) collectBpfProfiles(
 	podName types.NamespacedName,
 	profiles []profileToCollect,
 ) error {
-	recorderClient, cancel, err := r.getBpfRecorderClient(ctx)
+	recorderClient, err := r.getBpfRecorderClient(ctx)
 	if err != nil {
 		return fmt.Errorf("get bpf recorder client: %w", err)
 	}
-	defer cancel()
 
 	for _, profileToCollect := range profiles {
 		ptc := profileToCollect
@@ -735,9 +729,11 @@ func (r *RecorderReconciler) collectBpfProfiles(
 			return fmt.Errorf("parse profile raw annotation: %w", err)
 		}
 
-		profileNamespacedName := createProfileName(
-			parsedProfileName.cntName, replicaSuffix,
-			podName.Namespace, parsedProfileName.profileName)
+		profileNamespacedName, err := createProfileNameForRecording(
+			ctx, r, parsedProfileName, replicaSuffix, podName)
+		if err != nil {
+			return fmt.Errorf("create profile name: %w", err)
+		}
 
 		labels, err := profileLabels(
 			ctx,
@@ -760,7 +756,7 @@ func (r *RecorderReconciler) collectBpfProfiles(
 		r.log.Info("Collecting BPF profile", "name", profileToCollect.name, "kind", profileToCollect.kind)
 
 		switch profileToCollect.kind {
-		case profilerecording1alpha1.ProfileRecordingKindSeccompProfile:
+		case profilerecordingapi.ProfileRecordingKindSeccompProfile:
 			seccompProfile, err := r.collectSeccompBpfProfile(ctx, recorderClient, &ptc, profileNamespacedName, labels)
 			if err != nil {
 				// skip empty profiles
@@ -776,7 +772,7 @@ func (r *RecorderReconciler) collectBpfProfiles(
 			if err != nil {
 				return fmt.Errorf("creating/updating seccomp profile %s: %w", profileToCollect.name, err)
 			}
-		case profilerecording1alpha1.ProfileRecordingKindAppArmorProfile:
+		case profilerecordingapi.ProfileRecordingKindAppArmorProfile:
 			apparmorProfile, err := r.collectApparmorBpfProfile(ctx, recorderClient, &ptc, profileNamespacedName, labels)
 			if err != nil {
 				// skip empty profiles
@@ -792,7 +788,7 @@ func (r *RecorderReconciler) collectBpfProfiles(
 			if err != nil {
 				return fmt.Errorf("creating/updating apparmor profile %s: %w", profileToCollect.name, err)
 			}
-		case profilerecording1alpha1.ProfileRecordingKindSelinuxProfile:
+		case profilerecordingapi.ProfileRecordingKindSelinuxProfile:
 			r.log.Info("Profile kind not supported by BPF recoder", "name", profileToCollect.name, "kind", profileToCollect.kind)
 
 			continue
@@ -836,11 +832,11 @@ func (r *RecorderReconciler) collectSeccompBpfProfile(
 		return nil, fmt.Errorf("getting seccomp arch: %w", err)
 	}
 
-	profileSpec := seccompprofileapi.SeccompProfileSpec{
-		DefaultAction: seccomp.ActErrno,
+	profileSpec := &seccompprofileapi.SeccompProfileSpec{
+		DefaultAction: seccompprofileapi.ActErrno,
 		Architectures: []seccompprofileapi.Arch{arch},
-		Syscalls: []*seccompprofileapi.Syscall{{
-			Action: seccomp.ActAllow,
+		Syscalls: []seccompprofileapi.Syscall{{
+			Action: seccompprofileapi.ActAllow,
 			Names:  response.GetSyscalls(),
 		}},
 	}
@@ -851,7 +847,7 @@ func (r *RecorderReconciler) collectSeccompBpfProfile(
 			Namespace: profileNamespacedName.Namespace,
 			Labels:    profileLabels,
 		},
-		Spec: profileSpec,
+		Spec: *profileSpec,
 	}
 
 	return profile, nil
@@ -950,14 +946,14 @@ func (r *RecorderReconciler) generateAppArmorProfileAbstract(
 			sort.Strings(response.GetFiles().GetAllowedExecutables())
 			ExecutableAllowedExecCopy := make([]string, len(response.GetFiles().GetAllowedExecutables()))
 			copy(ExecutableAllowedExecCopy, response.GetFiles().GetAllowedExecutables())
-			abstract.Executable.AllowedExecutables = &ExecutableAllowedExecCopy
+			abstract.Executable.AllowedExecutables = ExecutableAllowedExecCopy
 		}
 
 		if len(response.GetFiles().GetAllowedLibraries()) != 0 {
 			sort.Strings(response.GetFiles().GetAllowedLibraries())
 			ExecutableAllowedLibCopy := make([]string, len(response.GetFiles().GetAllowedLibraries()))
 			copy(ExecutableAllowedLibCopy, response.GetFiles().GetAllowedLibraries())
-			abstract.Executable.AllowedLibraries = &ExecutableAllowedLibCopy
+			abstract.Executable.AllowedLibraries = ExecutableAllowedLibCopy
 		}
 	}
 
@@ -970,21 +966,21 @@ func (r *RecorderReconciler) generateAppArmorProfileAbstract(
 			sort.Strings(response.GetFiles().GetReadonlyPaths())
 			FileReadOnlyCopy := make([]string, len(response.GetFiles().GetReadonlyPaths()))
 			copy(FileReadOnlyCopy, response.GetFiles().GetReadonlyPaths())
-			files.ReadOnlyPaths = &FileReadOnlyCopy
+			files.ReadOnlyPaths = FileReadOnlyCopy
 		}
 
 		if len(response.GetFiles().GetWriteonlyPaths()) != 0 {
 			sort.Strings(response.GetFiles().GetWriteonlyPaths())
 			FileWriteOnlyCopy := make([]string, len(response.GetFiles().GetWriteonlyPaths()))
 			copy(FileWriteOnlyCopy, response.GetFiles().GetWriteonlyPaths())
-			files.WriteOnlyPaths = &FileWriteOnlyCopy
+			files.WriteOnlyPaths = FileWriteOnlyCopy
 		}
 
 		if len(response.GetFiles().GetReadwritePaths()) != 0 {
 			sort.Strings(response.GetFiles().GetReadwritePaths())
 			FileReadWriteCopy := make([]string, len(response.GetFiles().GetReadwritePaths()))
 			copy(FileReadWriteCopy, response.GetFiles().GetReadwritePaths())
-			files.ReadWritePaths = &FileReadWriteCopy
+			files.ReadWritePaths = FileReadWriteCopy
 		}
 
 		abstract.Filesystem = &files
@@ -1097,6 +1093,27 @@ func createProfileName(cntName, replicaSuffix, namespace, profileName string) ty
 	}
 }
 
+func createProfileNameForRecording(
+	ctx context.Context,
+	r *RecorderReconciler,
+	profile *parsedAnnotation,
+	replicaSuffix string,
+	podName types.NamespacedName,
+) (types.NamespacedName, error) {
+	if replicaSuffix == "" {
+		partial, err := profilePartial(ctx, r, profile.profileName, podName.Namespace)
+		if err != nil {
+			return types.NamespacedName{}, fmt.Errorf("determine profile merge strategy: %w", err)
+		}
+
+		if partial {
+			replicaSuffix = podName.Name
+		}
+	}
+
+	return createProfileName(profile.cntName, replicaSuffix, podName.Namespace, profile.profileName), nil
+}
+
 // parseLogAnnotations parses the provided annotations and extracts the
 // mandatory output profiles for the log recorder.
 func parseLogAnnotations(annotations map[string]string) (res []profileToCollect, err error) {
@@ -1105,9 +1122,9 @@ func parseLogAnnotations(annotations map[string]string) (res []profileToCollect,
 
 		//nolint:gocritic
 		if strings.HasPrefix(key, config.SeccompProfileRecordLogsAnnotationKey) {
-			collectProfile.kind = profilerecording1alpha1.ProfileRecordingKindSeccompProfile
+			collectProfile.kind = profilerecordingapi.ProfileRecordingKindSeccompProfile
 		} else if strings.HasPrefix(key, config.SelinuxProfileRecordLogsAnnotationKey) {
-			collectProfile.kind = profilerecording1alpha1.ProfileRecordingKindSelinuxProfile
+			collectProfile.kind = profilerecordingapi.ProfileRecordingKindSelinuxProfile
 		} else {
 			continue
 		}
@@ -1135,9 +1152,9 @@ func parseBpfAnnotations(annotations map[string]string) (res []profileToCollect,
 
 		//nolint:gocritic
 		if strings.HasPrefix(key, config.SeccompProfileRecordBpfAnnotationKey) {
-			collectProfile.kind = profilerecording1alpha1.ProfileRecordingKindSeccompProfile
+			collectProfile.kind = profilerecordingapi.ProfileRecordingKindSeccompProfile
 		} else if strings.HasPrefix(key, config.ApparmorProfileRecordBpfAnnotationKey) {
-			collectProfile.kind = profilerecording1alpha1.ProfileRecordingKindAppArmorProfile
+			collectProfile.kind = profilerecordingapi.ProfileRecordingKindAppArmorProfile
 		} else {
 			continue
 		}
@@ -1160,7 +1177,7 @@ func parseBpfAnnotations(annotations map[string]string) (res []profileToCollect,
 type seProfileBuilder struct {
 	permMap       map[string]sets.Set[string]
 	usageCtx      string
-	policyBuilder selxv1alpha2.Allow
+	policyBuilder selinuxprofileapi.Allow
 	log           logr.Logger
 	// used to optimize sorting
 	keys []string
@@ -1170,7 +1187,7 @@ func newSeProfileBuilder(usageCtx string, log logr.Logger) *seProfileBuilder {
 	return &seProfileBuilder{
 		permMap:       make(map[string]sets.Set[string]),
 		usageCtx:      usageCtx,
-		policyBuilder: make(selxv1alpha2.Allow),
+		policyBuilder: make(selinuxprofileapi.Allow),
 		log:           log,
 		keys:          make([]string, 0),
 	}
@@ -1210,7 +1227,7 @@ func (sb *seProfileBuilder) addAvc(avc *enricherapi.AvcResponse_SelinuxAvc) erro
 	return nil
 }
 
-func (sb *seProfileBuilder) Format() (selxv1alpha2.Allow, error) {
+func (sb *seProfileBuilder) Format() (selinuxprofileapi.Allow, error) {
 	sort.Strings(sb.keys)
 
 	for _, key := range sb.keys {
@@ -1230,15 +1247,16 @@ func (sb *seProfileBuilder) writeLineFromKeyVal(key string, val sets.Set[string]
 	}
 
 	// If we haven't parsed the type, ensure we have space for it
-	_, haveType := sb.policyBuilder[selxv1alpha2.LabelKey(setype)]
+	_, haveType := sb.policyBuilder[selinuxprofileapi.LabelKey(setype)]
 	if !haveType {
-		sb.policyBuilder[selxv1alpha2.LabelKey(setype)] = make(map[selxv1alpha2.ObjectClassKey]selxv1alpha2.PermissionSet)
+		sb.policyBuilder[selinuxprofileapi.LabelKey(setype)] = make(
+			map[selinuxprofileapi.ObjectClassKey]selinuxprofileapi.PermissionSet)
 	}
 
-	typePerms := sb.policyBuilder[selxv1alpha2.LabelKey(setype)]
+	typePerms := sb.policyBuilder[selinuxprofileapi.LabelKey(setype)]
 	l := val.UnsortedList()
 	sort.Strings(l)
-	typePerms[selxv1alpha2.ObjectClassKey(tclass)] = selxv1alpha2.PermissionSet(l)
+	typePerms[selinuxprofileapi.ObjectClassKey(tclass)] = selinuxprofileapi.PermissionSet(l)
 
 	return nil
 }
@@ -1251,7 +1269,7 @@ func (sb *seProfileBuilder) targetClassCtx(key string) (tclass, tcontext string)
 	if tcontext == config.SelinuxPermissiveProfile {
 		// rewrite the context to reference itself.
 		// We replace this when writing the policy.
-		tcontext = selxv1alpha2.AllowSelf
+		tcontext = selinuxprofileapi.AllowSelf
 	}
 
 	return
@@ -1278,7 +1296,7 @@ func (r *RecorderReconciler) goArchToSeccompArch(goarch string) (seccompprofilea
 func profilePartial(
 	ctx context.Context, r *RecorderReconciler, profileName, namespace string,
 ) (bool, error) {
-	recorder := profilerecording1alpha1.ProfileRecording{}
+	recorder := profilerecordingapi.ProfileRecording{}
 
 	err := r.ClientGet(
 		ctx, r.client, client.ObjectKey{Name: profileName, Namespace: namespace}, &recorder)
@@ -1293,9 +1311,9 @@ func profilePartial(
 	var profilePartial bool
 
 	switch recorder.Spec.MergeStrategy {
-	case profilerecording1alpha1.ProfileMergeNone:
+	case profilerecordingapi.ProfileMergeNone:
 		profilePartial = false
-	case profilerecording1alpha1.ProfileMergeContainers:
+	case profilerecordingapi.ProfileMergeContainers:
 		profilePartial = true
 	}
 
@@ -1311,8 +1329,9 @@ func profileLabels(
 	}
 
 	labels := map[string]string{
-		profilerecording1alpha1.ProfileToRecordingLabel: recordingName,
-		profilerecording1alpha1.ProfileToContainerLabel: cntName,
+		profilerecordingapi.ProfileToRecordingLabel:          recordingName,
+		profilerecordingapi.ProfileToContainerLabel:          cntName,
+		profilerecordingapi.ProfileToRecordingNamespaceLabel: namespace,
 	}
 
 	partial, err := profilePartial(ctx, r, recordingName, namespace)
@@ -1338,7 +1357,9 @@ func (r *RecorderReconciler) setDisabled(
 		return fmt.Errorf("get recording: %w", err)
 	}
 
-	profileSpecBase.Disabled = recording.Spec.DisableProfileAfterRecording
+	if recording.Spec.DisableProfileAfterRecording {
+		profileSpecBase.State = profilebase.SpecStateDisabled
+	}
 
 	return nil
 }
@@ -1353,7 +1374,7 @@ func (r *RecorderReconciler) setRecordingFinalizers(
 		return nil
 	}
 
-	recording := profilerecording1alpha1.ProfileRecording{}
+	recording := profilerecordingapi.ProfileRecording{}
 	if err := r.client.Get(
 		ctx,
 		types.NamespacedName{
@@ -1364,8 +1385,8 @@ func (r *RecorderReconciler) setRecordingFinalizers(
 		return fmt.Errorf("get recording: %w", err)
 	}
 
-	if !controllerutil.ContainsFinalizer(&recording, profilerecording1alpha1.RecordingHasUnmergedProfiles) {
-		controllerutil.AddFinalizer(&recording, profilerecording1alpha1.RecordingHasUnmergedProfiles)
+	if !controllerutil.ContainsFinalizer(&recording, profilerecordingapi.RecordingHasUnmergedProfiles) {
+		controllerutil.AddFinalizer(&recording, profilerecordingapi.RecordingHasUnmergedProfiles)
 	}
 
 	if err := utils.UpdateResource(ctx, r.log, r.client, &recording, recording.Kind); err != nil {

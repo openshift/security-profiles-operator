@@ -35,12 +35,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/scheme"
 
-	apparmorapi "sigs.k8s.io/security-profiles-operator/api/apparmorprofile/v1alpha1"
-	pbv1alpha1 "sigs.k8s.io/security-profiles-operator/api/profilebase/v1alpha1"
-	seccompprofileapi "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1beta1"
-	statusv1alpha1 "sigs.k8s.io/security-profiles-operator/api/secprofnodestatus/v1alpha1"
-	selxv1alpha2 "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1alpha2"
-	spodv1alpha1 "sigs.k8s.io/security-profiles-operator/api/spod/v1alpha1"
+	apparmorapi "sigs.k8s.io/security-profiles-operator/api/apparmorprofile/v1"
+	"sigs.k8s.io/security-profiles-operator/api/common"
+	profilebaseapi "sigs.k8s.io/security-profiles-operator/api/profilebase/v1"
+	seccompprofileapi "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1"
+	secprofnodestatusapi "sigs.k8s.io/security-profiles-operator/api/secprofnodestatus/v1"
+	selinuxprofileapi "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/config"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/controller"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/util"
@@ -75,7 +75,7 @@ func (r *StatusReconciler) Name() string {
 
 // SchemeBuilder returns the API scheme of the controller.
 func (r *StatusReconciler) SchemeBuilder() *scheme.Builder {
-	return statusv1alpha1.SchemeBuilder
+	return secprofnodestatusapi.SchemeBuilder
 }
 
 // Healthz is the liveness probe endpoint of the controller.
@@ -112,7 +112,7 @@ func (r *StatusReconciler) Reconcile(ctx context.Context, req reconcile.Request)
 	logger.V(config.VerboseLevel).Info("Reconciling node status")
 
 	// get the status to be reconciled
-	instance := &statusv1alpha1.SecurityProfileNodeStatus{}
+	instance := &secprofnodestatusapi.SecurityProfileNodeStatus{}
 	if err := r.client.Get(ctx, req.NamespacedName, instance); err != nil {
 		// Expected to find a node profile, return an error and requeue
 		return reconcile.Result{}, util.IgnoreNotFound(err)
@@ -133,21 +133,21 @@ func (r *StatusReconciler) Reconcile(ctx context.Context, req reconcile.Request)
 	if prof.GetStatusBase().Status == "" {
 		lprof.Info("Initializing Profile status")
 
-		targetStatus := statusv1alpha1.ProfileStatePending
-		if instance.Status != "" {
-			targetStatus = instance.Status
+		targetStatus := secprofnodestatusapi.ProfileStatePending
+		if instance.Status.Status != "" {
+			targetStatus = instance.Status.Status
 		}
 
 		return reconcile.Result{}, r.reconcileStatus(ctx, prof, targetStatus, lprof)
 	}
 
 	// get all the other statuses
-	profLabel := instance.Labels[statusv1alpha1.StatusToProfLabel]
+	profLabel := instance.Labels[secprofnodestatusapi.StatusToProfLabel]
 	if profLabel == "" {
 		return reconcile.Result{}, errors.New("unlabeled node status")
 	}
 
-	if util.KindBasedDNSLengthName(prof) != instance.Labels[statusv1alpha1.StatusToProfLabel] {
+	if util.KindBasedDNSLengthName(prof) != instance.Labels[secprofnodestatusapi.StatusToProfLabel] {
 		return reconcile.Result{}, errors.New("status doesn't match owner")
 	}
 
@@ -213,9 +213,9 @@ func (r *StatusReconciler) Reconcile(ctx context.Context, req reconcile.Request)
 		// if nodeName is not in currentNodeNames and there isn't a mismatch in statuses/nodes, remove it from the finalizers
 		for i := range nodeStatusList.Items {
 			nodeStatus := &nodeStatusList.Items[i]
-			if !util.ContainsSubstring(currentNodeNames, nodeStatus.NodeName) { // string not in list
+			if !util.ContainsSubstring(currentNodeNames, nodeStatus.Spec.NodeName) { // string not in list
 				// Found a finalizer for a node that doesn't exist
-				finalizerNodeString := util.GetFinalizerNodeString(nodeStatus.NodeName)
+				finalizerNodeString := util.GetFinalizerNodeString(nodeStatus.Spec.NodeName)
 				if err := util.RemoveFinalizer(ctx, r.client, prof, finalizerNodeString); err != nil {
 					return reconcile.Result{}, fmt.Errorf("cannot remove finalizer: %w", err)
 				}
@@ -223,9 +223,9 @@ func (r *StatusReconciler) Reconcile(ctx context.Context, req reconcile.Request)
 		}
 	}
 
-	lowestCommonState := statusv1alpha1.LowestState
+	lowestCommonState := secprofnodestatusapi.LowestState
 	for i := range nodeStatusList.Items {
-		lowestCommonState = statusv1alpha1.LowerOfTwoStates(lowestCommonState, nodeStatusList.Items[i].Status)
+		lowestCommonState = secprofnodestatusapi.LowerOfTwoStates(lowestCommonState, nodeStatusList.Items[i].Status.Status)
 	}
 
 	logger.V(config.VerboseLevel).Info("Setting the status to", "Status", lowestCommonState)
@@ -235,10 +235,10 @@ func (r *StatusReconciler) Reconcile(ctx context.Context, req reconcile.Request)
 
 // removeStatusForDeletedNode removes the status for a node that has been deleted.
 func (r *StatusReconciler) removeStatusForDeletedNode(ctx context.Context,
-	nodeStatusList *statusv1alpha1.SecurityProfileNodeStatusList, logger logr.Logger,
+	nodeStatusList *secprofnodestatusapi.SecurityProfileNodeStatusList, logger logr.Logger,
 ) (string, error) {
 	for i := range nodeStatusList.Items {
-		nodeName := nodeStatusList.Items[i].NodeName
+		nodeName := nodeStatusList.Items[i].Spec.NodeName
 		node := &v1.Node{}
 
 		if err := r.client.Get(ctx, types.NamespacedName{Name: nodeName}, node); err != nil {
@@ -274,8 +274,8 @@ func (r *StatusReconciler) getDS(ctx context.Context, namespace string, l logr.L
 
 func (r *StatusReconciler) getProfileFromStatus(
 	ctx context.Context,
-	s *statusv1alpha1.SecurityProfileNodeStatus,
-) (pbv1alpha1.StatusBaseUser, error) {
+	s *secprofnodestatusapi.SecurityProfileNodeStatus,
+) (profilebaseapi.StatusBaseUser, error) {
 	ctrl := metav1.GetControllerOf(s)
 	if ctrl == nil {
 		return nil, fmt.Errorf("getting owner profile: %w", ErrNoOwnerProfile)
@@ -286,15 +286,15 @@ func (r *StatusReconciler) getProfileFromStatus(
 		Namespace: s.GetNamespace(),
 	}
 
-	var prof pbv1alpha1.StatusBaseUser
+	var prof profilebaseapi.StatusBaseUser
 
 	switch ctrl.Kind {
 	case "SeccompProfile":
 		prof = &seccompprofileapi.SeccompProfile{}
 	case "SelinuxProfile":
-		prof = &selxv1alpha2.SelinuxProfile{}
+		prof = &selinuxprofileapi.SelinuxProfile{}
 	case "RawSelinuxProfile":
-		prof = &selxv1alpha2.RawSelinuxProfile{}
+		prof = &selinuxprofileapi.RawSelinuxProfile{}
 	case "AppArmorProfile":
 		prof = &apparmorapi.AppArmorProfile{}
 	default:
@@ -310,8 +310,8 @@ func (r *StatusReconciler) getProfileFromStatus(
 
 func (r *StatusReconciler) reconcileStatus(
 	ctx context.Context,
-	prof pbv1alpha1.StatusBaseUser,
-	state statusv1alpha1.ProfileState,
+	prof profilebaseapi.StatusBaseUser,
+	state secprofnodestatusapi.ProfileState,
 	l logr.Logger,
 ) error {
 	pCopy := prof.DeepCopyToStatusBaseIf()
@@ -322,27 +322,27 @@ func (r *StatusReconciler) reconcileStatus(
 	outStatus := pCopy.GetStatusBase()
 
 	switch state {
-	case statusv1alpha1.ProfileStatePending, "":
-		outStatus.Status = statusv1alpha1.ProfileStatePending
-		outStatus.SetConditions(spodv1alpha1.Creating())
-	case statusv1alpha1.ProfileStateInProgress:
-		outStatus.SetConditions(spodv1alpha1.Creating())
-		outStatus.Status = statusv1alpha1.ProfileStateInProgress
-	case statusv1alpha1.ProfileStateInstalled:
-		outStatus.Status = statusv1alpha1.ProfileStateInstalled
-		outStatus.SetConditions(spodv1alpha1.Available())
-	case statusv1alpha1.ProfileStateTerminating:
-		outStatus.Status = statusv1alpha1.ProfileStateTerminating
-		outStatus.SetConditions(spodv1alpha1.Deleting())
-	case statusv1alpha1.ProfileStateError:
-		outStatus.Status = statusv1alpha1.ProfileStateError
-		outStatus.SetConditions(spodv1alpha1.Unavailable())
-	case statusv1alpha1.ProfileStatePartial:
-		outStatus.Status = statusv1alpha1.ProfileStatePartial
-		outStatus.SetConditions(spodv1alpha1.Unavailable())
-	case statusv1alpha1.ProfileStateDisabled:
-		outStatus.Status = statusv1alpha1.ProfileStateDisabled
-		outStatus.SetConditions(spodv1alpha1.Unavailable())
+	case secprofnodestatusapi.ProfileStatePending, "":
+		outStatus.Status = secprofnodestatusapi.ProfileStatePending
+		outStatus.SetConditions(common.Creating())
+	case secprofnodestatusapi.ProfileStateInProgress:
+		outStatus.SetConditions(common.Creating())
+		outStatus.Status = secprofnodestatusapi.ProfileStateInProgress
+	case secprofnodestatusapi.ProfileStateInstalled:
+		outStatus.Status = secprofnodestatusapi.ProfileStateInstalled
+		outStatus.SetConditions(common.Available())
+	case secprofnodestatusapi.ProfileStateTerminating:
+		outStatus.Status = secprofnodestatusapi.ProfileStateTerminating
+		outStatus.SetConditions(common.Deleting())
+	case secprofnodestatusapi.ProfileStateError:
+		outStatus.Status = secprofnodestatusapi.ProfileStateError
+		outStatus.SetConditions(common.Unavailable())
+	case secprofnodestatusapi.ProfileStatePartial:
+		outStatus.Status = secprofnodestatusapi.ProfileStatePartial
+		outStatus.SetConditions(common.Unavailable())
+	case secprofnodestatusapi.ProfileStateDisabled:
+		outStatus.Status = secprofnodestatusapi.ProfileStateDisabled
+		outStatus.SetConditions(common.Unavailable())
 	}
 
 	l.V(config.VerboseLevel).Info("Updating status")
@@ -365,10 +365,11 @@ func daemonSetIsUpdating(ds *appsv1.DaemonSet) bool {
 
 func listStatusesForProfile(
 	ctx context.Context, c client.Client, namespace string, labelVal string,
-) (*statusv1alpha1.SecurityProfileNodeStatusList, error) {
+) (*secprofnodestatusapi.SecurityProfileNodeStatusList, error) {
 	statusSelect := labels.NewSelector()
 
-	statusFilter, err := labels.NewRequirement(statusv1alpha1.StatusToProfLabel, selection.Equals, []string{labelVal})
+	statusFilter, err := labels.NewRequirement(
+		secprofnodestatusapi.StatusToProfLabel, selection.Equals, []string{labelVal})
 	if err != nil {
 		return nil, fmt.Errorf("cannot create node status list label: %w", err)
 	}
@@ -379,7 +380,7 @@ func listStatusesForProfile(
 		Namespace:     namespace,
 	}
 
-	statusList := statusv1alpha1.SecurityProfileNodeStatusList{}
+	statusList := secprofnodestatusapi.SecurityProfileNodeStatusList{}
 	if err := c.List(ctx, &statusList, &statusListOpts); err != nil {
 		return nil, fmt.Errorf("listing statuses: %w", err)
 	}

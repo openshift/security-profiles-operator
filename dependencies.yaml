@@ -1,9 +1,19 @@
 dependencies:
   - name: golangci-lint
-    version: 2.4.0
+    version: 2.10.1
     refPaths:
     - path: Makefile
       match: GOLANGCI_LINT_VERSION
+    - path: .custom-gcl.yml
+      match: "^version:"
+
+  - name: kube-api-linter
+    version: v0.0.0-20260518104151-5ebe05f9440b
+    refPaths:
+    - path: Makefile
+      match: KAL_VERSION
+    - path: .custom-gcl.yml
+      match: version
 
   - name: repo-infra
     version: v0.2.5
@@ -18,10 +28,16 @@ dependencies:
       match: KUSTOMIZE_VERSION
 
   - name: operator-sdk
-    version: v1.37.0
+    version: v1.42.2
     refPaths:
     - path: Makefile
       match: OPERATOR_SDK_VERSION
+
+  - name: opm
+    version: v1.65.0
+    refPaths:
+    - path: Makefile
+      match: OPM_VERSION
 
   - name: olm
     version: v0.30.0
@@ -42,13 +58,13 @@ dependencies:
       match: cert-manager/cert-manager
 
   - name: kind
-    version: 0.27.0
+    version: 0.30.0
     refPaths:
     - path: test/suite_test.go
       match: kindVersion
 
   - name: kind-image
-    version: 1.32.2
+    version: 1.34.0
     refPaths:
     - path: test/suite_test.go
       match: kindImage
@@ -56,7 +72,7 @@ dependencies:
       match: KIND_IMG_TAG
 
   - name: e2e-kubernetes
-    version: 1.33
+    version: 1.34
     refPaths:
     - path: hack/ci/Vagrantfile-fedora
       match: KUBERNETES_VERSION
@@ -96,7 +112,7 @@ dependencies:
       match: tag
 
   - name: nix
-    version: 2.30.1
+    version: 2.34.3
     refPaths:
     - path: Dockerfile.build-image
       match: NIX_VERSION
@@ -104,7 +120,7 @@ dependencies:
       match: NIX_VERSION
 
   - name: gcb-docker-gcloud
-    version: v20250116-2a05ea7e3d
+    version: v20260205-38cfa9523f
     refPaths:
     - path: cloudbuild.yaml
       match: gcr.io/k8s-staging-test-infra/gcb-docker-gcloud
@@ -128,7 +144,7 @@ dependencies:
       match: VERSION
 
   - name: crun
-    version: 1.22
+    version: 1.26
     refPaths:
     - path: examples/baseprofile-crun.yaml
       match: name
@@ -138,7 +154,7 @@ dependencies:
       match: CRUN_VERSION
 
   - name: runc
-    version: v1.3.0
+    version: v1.4.2
     refPaths:
     - path: examples/baseprofile-runc.yaml
       match: name
@@ -162,7 +178,7 @@ dependencies:
       match: BOM_VERSION
 
   - name: spo-current
-    version: 0.10.0
+    version: 1.0.1
     refPaths:
     - path: VERSION
       match: ^.*
@@ -173,13 +189,17 @@ dependencies:
     - path: deploy/helm/Chart.yaml
       match: "^version: "
 
-  - name: clang
+  - name: clang-bpf
     version: 19
     refPaths:
     - path: nix/derivation-bpf.nix
       match: llvmPackages_\d+.clang-unwrapped
     - path: nix/derivation-bpf.nix
       match: llvm_\d+
+
+  - name: clang-ci
+    version: 21
+    refPaths:
     - path: hack/pull-security-profiles-operator-verify
       match: CLANG_VERSION
 

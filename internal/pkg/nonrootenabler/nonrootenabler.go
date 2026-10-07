@@ -26,7 +26,7 @@ import (
 	"github.com/go-logr/logr"
 	"sigs.k8s.io/release-utils/helpers"
 
-	"sigs.k8s.io/security-profiles-operator/api/apparmorprofile/v1alpha1"
+	apparmorprofileapi "sigs.k8s.io/security-profiles-operator/api/apparmorprofile/v1"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/artifact"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/config"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/daemon/apparmorprofile"
@@ -91,7 +91,7 @@ func (n *NonRootEnabler) Run(logger logr.Logger, runtime, kubeletDir string, app
 		config.SeccompProfilesFolder,
 		config.OperatorProfilesFolder,
 	)
-	if _, err := n.Stat(kubeletOperatorDir); os.IsNotExist(err) {
+	if _, err := n.Lstat(kubeletOperatorDir); os.IsNotExist(err) {
 		logger.Info("Linking profiles root path")
 
 		if err := n.Symlink(
@@ -122,7 +122,7 @@ func (n *NonRootEnabler) Run(logger logr.Logger, runtime, kubeletDir string, app
 
 	logger.Info("Setting operator root user and group")
 
-	if err := n.Chown(
+	if err := n.Lchown(
 		config.OperatorRoot, config.UserRootless, config.UserRootless,
 	); err != nil {
 		return fmt.Errorf("change operator root permissions: %w", err)
@@ -156,9 +156,9 @@ func (n *NonRootEnabler) Run(logger logr.Logger, runtime, kubeletDir string, app
 type impl interface {
 	MkdirAll(dirpath string, perm os.FileMode) error
 	Chmod(name string, mode os.FileMode) error
-	Stat(name string) (os.FileInfo, error)
+	Lstat(name string) (os.FileInfo, error)
 	Symlink(oldname, newname string) error
-	Chown(name string, uid, gid int) error
+	Lchown(name string, uid, gid int) error
 	CopyDirContentsLocal(src, dst string) error
 	SaveKubeletConfig(filename string, kubeletConfig []byte, perm os.FileMode) error
 	InstallApparmor(manager apparmorprofile.ProfileManager, filename string) error
@@ -174,16 +174,16 @@ func (*defaultImpl) Chmod(name string, perm os.FileMode) error {
 	return os.Chmod(name, perm)
 }
 
-func (*defaultImpl) Stat(name string) (os.FileInfo, error) {
-	return os.Stat(name)
+func (*defaultImpl) Lstat(name string) (os.FileInfo, error) {
+	return os.Lstat(name)
 }
 
 func (*defaultImpl) Symlink(oldname, newname string) error {
 	return os.Symlink(oldname, newname)
 }
 
-func (*defaultImpl) Chown(name string, uid, gid int) error {
-	return os.Chown(name, uid, gid)
+func (*defaultImpl) Lchown(name string, uid, gid int) error {
+	return os.Lchown(name, uid, gid)
 }
 
 func (*defaultImpl) CopyDirContentsLocal(src, dst string) error {
@@ -205,7 +205,7 @@ func (*defaultImpl) InstallApparmor(manager apparmorprofile.ProfileManager, file
 		return fmt.Errorf("parsing apparmor profile: %w", err)
 	}
 
-	ap, ok := profile.(*v1alpha1.AppArmorProfile)
+	ap, ok := profile.(*apparmorprofileapi.AppArmorProfile)
 	if !ok {
 		return errors.New("failed converting apparmor profile")
 	}

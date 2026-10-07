@@ -1,4 +1,4 @@
-FROM brew.registry.redhat.io/rh-osbs/openshift-golang-builder:rhel_9_golang_1.24 as builder
+FROM registry.redhat.io/openshift/golang-builder:v1.26.7-202608270918.p2.gedd1cdd.assembly.stream.el9 as builder
 
 RUN yum -y install --allowerasing git libseccomp-devel libbpf-devel elfutils-libelf elfutils-debuginfod-client && yum clean all && \
     yum -y clean all && rm -rf /var/cache/yum
@@ -33,15 +33,13 @@ LABEL \
     summary="Security Profiles Operator" \
     maintainer="Red Hat ISC <isc-team@redhat.com>" \
     License="APL 2.0" \
-    name="openshift-security-profiles-operator" \
+    name="compliance/openshift-security-profiles-rhel8-operator" \
     cpe="cpe:/a:redhat:openshift_security_profiles_operator:1::el9" \
     com.redhat.component="openshift-security-profiles-operator-container" \
     io.openshift.maintainer.product="OpenShift Container Platform" \
     io.openshift.maintainer.component="Security Profiles Operator" \
-    version=0.8.4
+    version=1.0.1
 #        io.openshift.build.commit.id=98271bc2812881010146f47e4587dcd449b846bd \
-#        io.openshift.build.source-location=https://github.com/openshift/file-integrity-operator.git \
-#        io.openshift.build.commit.url=https://github.com/openshift/file-integrity-operator.git/commit/98271bc2812881010146f47e4587dcd449b846bd \
 
 ENV OPERATOR=/usr/local/bin/security-profiles-operator \
     USER_UID=65534 \

@@ -28,7 +28,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	selxv1alpha2 "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1alpha2"
+	selinuxprofileapi "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1"
+	spodapi "sigs.k8s.io/security-profiles-operator/api/spod/v1"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/controller"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/daemon/common"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/translator"
@@ -53,19 +54,20 @@ func NewController() controller.Controller {
 
 func selinuxProfileControllerBuild(b *ctrl.Builder, r reconcile.Reconciler) error {
 	return b.Named("selinuxprofile").
-		For(&selxv1alpha2.SelinuxProfile{}).
+		For(&selinuxprofileapi.SelinuxProfile{}).
 		Complete(r)
 }
 
 var _ SelinuxObjectHandler = &selinuxProfileHandler{}
 
 type selinuxProfileHandler struct {
-	sp                *selxv1alpha2.SelinuxProfile
+	sp                *selinuxprofileapi.SelinuxProfile
 	cli               client.Client
 	systemInherits    []string
-	objInherits       []selxv1alpha2.SelinuxProfileObject
+	objInherits       []selinuxprofileapi.SelinuxProfileObject
 	labelRegex        *regexp.Regexp
 	objClassPermRegex *regexp.Regexp
+	translatorOpts    *translator.Options
 }
 
 func (sph *selinuxProfileHandler) Init(
@@ -97,13 +99,20 @@ func (sph *selinuxProfileHandler) Init(
 	return nil
 }
 
-func (sph *selinuxProfileHandler) GetProfileObject() selxv1alpha2.SelinuxProfileObject {
+func (sph *selinuxProfileHandler) GetProfileObject() selinuxprofileapi.SelinuxProfileObject {
 	return sph.sp
 }
 
 func (sph *selinuxProfileHandler) Validate() error {
+	spod, err := common.GetSPOD(context.Background(), sph.cli)
+	if err != nil {
+		return fmt.Errorf("couldn't get spod configuration: %w", err)
+	}
+
+	sph.handleSelinuxOptions(spod)
+
 	for _, inherit := range sph.sp.Spec.Inherit {
-		err := sph.validateAndTrackInherit(inherit, sph.sp.GetNamespace())
+		err := sph.validateAndTrackInherit(spod, inherit, sph.sp.GetNamespace())
 		if err != nil {
 			return err
 		}
@@ -131,13 +140,14 @@ func (sph *selinuxProfileHandler) Validate() error {
 }
 
 func (sph *selinuxProfileHandler) validateAndTrackInherit(
-	ancestorRef selxv1alpha2.PolicyRef,
+	spod *spodapi.SecurityProfilesOperatorDaemon,
+	ancestorRef selinuxprofileapi.PolicyRef,
 	namespace string,
 ) error {
 	switch ancestorRef.Kind {
 	// We default to System if Kind is left empty
-	case selxv1alpha2.SystemPolicyKind, "":
-		return sph.handleInheritSystemPolicy(ancestorRef)
+	case selinuxprofileapi.SystemPolicyKind, "":
+		return sph.handleInheritSystemPolicy(spod, ancestorRef)
 	case "SelinuxProfile":
 		return sph.handleInheritSPOPolicy(ancestorRef, namespace)
 	}
@@ -146,7 +156,7 @@ func (sph *selinuxProfileHandler) validateAndTrackInherit(
 }
 
 func (sph *selinuxProfileHandler) validateLabelKey(
-	key selxv1alpha2.LabelKey,
+	key selinuxprofileapi.LabelKey,
 ) error {
 	if !sph.labelRegex.MatchString(string(key)) {
 		return fmt.Errorf("'%s' didn't match expected characters: %w", key, ErrInvalidLabelKey)
@@ -156,7 +166,7 @@ func (sph *selinuxProfileHandler) validateLabelKey(
 }
 
 func (sph *selinuxProfileHandler) validateObjClass(
-	key selxv1alpha2.ObjectClassKey,
+	key selinuxprofileapi.ObjectClassKey,
 ) error {
 	if !sph.objClassPermRegex.MatchString(string(key)) {
 		return fmt.Errorf("'%s' didn't match expected characters: %w", key, ErrInvalidObjClass)
@@ -176,10 +186,10 @@ func (sph *selinuxProfileHandler) validatePermission(
 }
 
 func (sph *selinuxProfileHandler) handleInheritSPOPolicy(
-	ancestorRef selxv1alpha2.PolicyRef,
+	ancestorRef selinuxprofileapi.PolicyRef,
 	namespace string,
 ) error {
-	ancestor := &selxv1alpha2.SelinuxProfile{}
+	ancestor := &selinuxprofileapi.SelinuxProfile{}
 	key := types.NamespacedName{Name: ancestorRef.Name, Namespace: namespace}
 
 	err := sph.cli.Get(context.Background(), key, ancestor)
@@ -195,16 +205,24 @@ func (sph *selinuxProfileHandler) handleInheritSPOPolicy(
 	return nil
 }
 
-func (sph *selinuxProfileHandler) handleInheritSystemPolicy(
-	ancestorRef selxv1alpha2.PolicyRef,
-) error {
-	spod, err := common.GetSPOD(context.Background(), sph.cli)
-	if err != nil {
-		return fmt.Errorf("couldn't get spod to verify system inheritance: %w", err)
+func (sph *selinuxProfileHandler) handleSelinuxOptions(
+	spod *spodapi.SecurityProfilesOperatorDaemon,
+) {
+	sph.translatorOpts = &translator.Options{
+		DeniedTypes:        spod.Spec.Selinux.Options.DeniedTypes,
+		DeniedClasses:      spod.Spec.Selinux.Options.DeniedClasses,
+		DeniedPermissions:  spod.Spec.Selinux.Options.DeniedPermissions,
+		AllowedTypes:       spod.Spec.Selinux.Options.AllowedTypes,
+		AllowedClasses:     spod.Spec.Selinux.Options.AllowedClasses,
+		AllowedPermissions: spod.Spec.Selinux.Options.AllowedPermissions,
 	}
+}
 
-	for idx := range spod.Spec.SelinuxOpts.AllowedSystemProfiles {
-		prof := spod.Spec.SelinuxOpts.AllowedSystemProfiles[idx]
+func (sph *selinuxProfileHandler) handleInheritSystemPolicy(
+	spod *spodapi.SecurityProfilesOperatorDaemon, ancestorRef selinuxprofileapi.PolicyRef,
+) error {
+	for idx := range spod.Spec.Selinux.Options.AllowedSystemProfiles {
+		prof := spod.Spec.Selinux.Options.AllowedSystemProfiles[idx]
 		if prof == ancestorRef.Name {
 			sph.systemInherits = append(sph.systemInherits, ancestorRef.Name)
 
@@ -220,10 +238,8 @@ func (sph *selinuxProfileHandler) handleInheritSystemPolicy(
 
 func (sph *selinuxProfileHandler) GetCILPolicy() (string, error) {
 	// Note that this assumes that the client and the object
-	// have been initialized already
-	// At this point, validation has happened and no errors will happen when
-	// rendering
-	return translator.Object2CIL(sph.systemInherits, sph.objInherits, sph.sp), nil
+	// have been initialized already.
+	return translator.Object2CIL(sph.systemInherits, sph.objInherits, sph.sp, sph.translatorOpts)
 }
 
 func newSelinuxProfileHandler(
@@ -232,9 +248,9 @@ func newSelinuxProfileHandler(
 	key types.NamespacedName,
 ) (SelinuxObjectHandler, error) {
 	oh := &selinuxProfileHandler{
-		sp:             &selxv1alpha2.SelinuxProfile{},
+		sp:             &selinuxprofileapi.SelinuxProfile{},
 		systemInherits: make([]string, 0),
-		objInherits:    make([]selxv1alpha2.SelinuxProfileObject, 0),
+		objInherits:    make([]selinuxprofileapi.SelinuxProfileObject, 0),
 	}
 
 	err := oh.Init(ctx, cli, key)

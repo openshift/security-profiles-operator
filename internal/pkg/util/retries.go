@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"time"
 
-	"k8s.io/apimachinery/pkg/api/errors"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
@@ -31,10 +31,10 @@ const (
 )
 
 func IsNotFoundOrConflict(err error) bool {
-	return errors.IsNotFound(err) || errors.IsConflict(err)
+	return kerrors.IsNotFound(err) || kerrors.IsConflict(err)
 }
 
-// retry attempts to execute fn up to 5 times if its failure meets retryCondition.
+// Retry attempts to execute fn up to 5 times if its failure meets retryCondition.
 func Retry(fn func() error, retryCondition func(error) bool) error {
 	backoff := wait.Backoff{
 		Duration: backoffDuration,
@@ -46,17 +46,25 @@ func Retry(fn func() error, retryCondition func(error) bool) error {
 }
 
 func RetryEx(backoff *wait.Backoff, fn func() error, retryCondition func(error) bool) error {
+	var lastRetryErr error
+
 	waitErr := wait.ExponentialBackoff(*backoff, func() (bool, error) {
 		err := fn()
 		if err == nil {
 			return true, nil
 		} else if retryCondition(err) {
+			lastRetryErr = err
+
 			return false, nil
 		}
 
 		return false, fmt.Errorf("retry function: %w", err)
 	})
 	if waitErr != nil {
+		if lastRetryErr != nil && wait.Interrupted(waitErr) {
+			return fmt.Errorf("wait on retry: %w, last retry error: %w", waitErr, lastRetryErr)
+		}
+
 		return fmt.Errorf("wait on retry: %w", waitErr)
 	}
 

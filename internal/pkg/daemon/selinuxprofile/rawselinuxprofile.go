@@ -20,15 +20,15 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"html/template"
 	"strings"
+	"text/template"
 
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	selxv1alpha2 "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1alpha2"
+	selinuxprofileapi "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/controller"
 )
 
@@ -38,7 +38,7 @@ const profileWrapper = `(block {{.Name}}_{{.Namespace}}
     {{.Policy}}
 )`
 
-// NewController returns a new empty controller instance.
+// NewRawController returns a new empty controller instance.
 func NewRawController() controller.Controller {
 	return &ReconcileSelinux{
 		controllerName:    "rawselinuxprofile",
@@ -49,14 +49,14 @@ func NewRawController() controller.Controller {
 
 func rawSelinuxProfileControllerBuild(b *ctrl.Builder, r reconcile.Reconciler) error {
 	return b.Named("rawselinuxprofile").
-		For(&selxv1alpha2.RawSelinuxProfile{}).
+		For(&selinuxprofileapi.RawSelinuxProfile{}).
 		Complete(r)
 }
 
 var _ SelinuxObjectHandler = &rawSelinuxProfileHandler{}
 
 type rawSelinuxProfileHandler struct {
-	rsp            *selxv1alpha2.RawSelinuxProfile
+	rsp            *selinuxprofileapi.RawSelinuxProfile
 	policyTemplate *template.Template
 }
 
@@ -70,12 +70,12 @@ func (sph *rawSelinuxProfileHandler) Init(
 	return err
 }
 
-func (sph *rawSelinuxProfileHandler) GetProfileObject() selxv1alpha2.SelinuxProfileObject {
+func (sph *rawSelinuxProfileHandler) GetProfileObject() selinuxprofileapi.SelinuxProfileObject {
 	return sph.rsp
 }
 
 func (sph *rawSelinuxProfileHandler) Validate() error {
-	return nil
+	return sph.rsp.ValidatePolicy()
 }
 
 func (sph *rawSelinuxProfileHandler) GetCILPolicy() (string, error) {
@@ -112,15 +112,15 @@ func newRawSelinuxProfileHandler(
 	cli client.Client,
 	key types.NamespacedName,
 ) (SelinuxObjectHandler, error) {
-	// Create template to wrap policies
-	//nolint:error // We ignore the error as the wrapper is static
+	// Create template to wrap policies.
+	// We ignore the error as the wrapper is static.
 	tmpl, tmplerr := template.New("profileWrapper").Parse(profileWrapper)
 	if tmplerr != nil {
 		return nil, tmplerr
 	}
 
 	oh := &rawSelinuxProfileHandler{
-		rsp:            &selxv1alpha2.RawSelinuxProfile{},
+		rsp:            &selinuxprofileapi.RawSelinuxProfile{},
 		policyTemplate: tmpl,
 	}
 	err := oh.Init(ctx, cli, key)

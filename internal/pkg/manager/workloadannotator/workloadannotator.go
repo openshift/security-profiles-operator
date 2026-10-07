@@ -31,8 +31,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/scheme"
 
-	seccompprofileapi "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1beta1"
-	selinuxprofileapi "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1alpha2"
+	seccompprofileapi "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1"
+	selinuxprofileapi "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/controller"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/util"
 )
@@ -148,7 +148,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req reconcile.Request) (r
 
 	// pod is being created or updated so ensure it is linked to a selinux profile
 	for _, profileIndex := range getSelinuxProfilesFromPod(ctx, r, pod) {
-		profileSuffix := "_" + ".process"
+		profileSuffix := ".process"
 		profileName := strings.TrimSuffix(profileIndex, profileSuffix)
 
 		selinuxProfile := &selinuxprofileapi.SelinuxProfile{}
@@ -240,6 +240,7 @@ func (r *PodReconciler) updatePodReferencesForSelinux(ctx context.Context, se *s
 
 	if err := util.Retry(func() error {
 		se.Status.ActiveWorkloads = podList
+
 		updateErr := r.client.Status().Update(ctx, se)
 		if updateErr != nil {
 			if err := r.client.Get(ctx, util.NamespacedName(se.GetName(), se.GetNamespace()), se); err != nil {
@@ -371,7 +372,7 @@ func isOperatorSelinuxType(ctx context.Context, r *PodReconciler, se *corev1.SEL
 		return false
 	}
 
-	suffix := "_" + ".process"
+	suffix := ".process"
 	selinuxProfileName := strings.TrimSuffix(se.Type, suffix)
 
 	if selinuxProfileName != se.Type {

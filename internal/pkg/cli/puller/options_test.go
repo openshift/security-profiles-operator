@@ -57,6 +57,21 @@ func TestFromContext(t *testing.T) {
 			},
 		},
 		{
+			name: "success with verify allowed identity and allowed oidc issuer regexp(s)",
+			prepare: func(set *flag.FlagSet) {
+				set.String(FlagAllowedIdentityRegexp, "testIdentity*", "")
+				set.String(FlagAllowedOidcIssuerRegexp, "testOidc*", "")
+				require.NoError(t, set.Set(FlagAllowedIdentityRegexp, "testIdentity*"))
+				require.NoError(t, set.Set(FlagAllowedOidcIssuerRegexp, "testOidc*"))
+				require.NoError(t, set.Parse([]string{"echo"}))
+			},
+			assert: func(opts *Options, err error) {
+				require.NoError(t, err)
+				require.Equal(t, "testIdentity*", opts.allowedIdentityRegexp)
+				require.Equal(t, "testOidc*", opts.allowedOidcIssuerRegexp)
+			},
+		},
+		{
 			name: "failure no image provided",
 			prepare: func(set *flag.FlagSet) {
 				set.String(FlagOutputFile, "", "")

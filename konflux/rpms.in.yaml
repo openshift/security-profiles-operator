@@ -1,0 +1,21 @@
+contentOrigin:
+  repofiles:
+    - ./redhat.repo
+packages:
+  - git
+  - libseccomp-devel
+  - git-core
+  - tar
+  - libseccomp
+  - libbpf-devel
+  - elfutils-libelf
+  - elfutils-debuginfod-client
+context:
+  image: registry.redhat.io/rhel9-4-els/rhel-minimal:latest
+
+arches:
+  # The list of architectures can be set in the config file. Any `--arch` option set
+  # on the command line will override this list.
+  - x86_64
+  - ppc64le
+
