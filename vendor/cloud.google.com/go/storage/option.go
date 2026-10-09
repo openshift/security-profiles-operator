@@ -39,9 +39,12 @@ func init() {
 	// initialize experimental options
 	storageinternal.WithMetricExporter = withMetricExporter
 	storageinternal.WithMetricInterval = withMetricInterval
+	storageinternal.WithMeterProvider = withMeterProvider
 	storageinternal.WithReadStallTimeout = withReadStallTimeout
-	storageinternal.WithGRPCBidiReads = withGRPCBidiReads
-	storageinternal.WithZonalBucketAPIs = withZonalBucketAPIs
+	storageinternal.WithDirectConnectivityEnforced = withDirectConnectivityEnforced
+	storageinternal.WithOtelMetrics = withOtelMetrics
+	storageinternal.WithOtelDebugMetrics = withOtelDebugMetrics
+	storageinternal.WithBufferPool = withBufferPool
 }
 
 // getDynamicReadReqIncreaseRateFromEnv returns the value set in the env variable.
@@ -79,12 +82,17 @@ type storageConfig struct {
 	useJSONforReads        bool
 	readAPIWasSet          bool
 	disableClientMetrics   bool
+	enableOtelMetrics      bool
+	enableOtelDebugMetrics bool
 	metricExporter         *metric.Exporter
 	metricInterval         time.Duration
+	meterProvider          *metric.MeterProvider
 	manualReader           *metric.ManualReader
 	readStallTimeoutConfig *experimental.ReadStallTimeoutConfig
 	grpcBidiReads          bool
 	grpcAppendableUploads  bool
+	grpcDirectPathEnforced bool
+	bufferPool             experimental.BufferPool
 }
 
 // newStorageConfig generates a new storageConfig with all the given
@@ -103,6 +111,18 @@ func newStorageConfig(opts ...option.ClientOption) storageConfig {
 type storageClientOption interface {
 	option.ClientOption
 	ApplyStorageOpt(*storageConfig)
+}
+
+func withDirectConnectivityEnforced() option.ClientOption {
+	return &withDirectPathEnforced{}
+}
+
+type withDirectPathEnforced struct {
+	internaloption.EmbeddableAdapter
+}
+
+func (w *withDirectPathEnforced) ApplyStorageOpt(c *storageConfig) {
+	c.grpcDirectPathEnforced = true
 }
 
 // WithJSONReads is an option that may be passed to [NewClient].
@@ -203,6 +223,20 @@ type withTestMetricReaderConfig struct {
 	metricReader *metric.ManualReader
 }
 
+type withMeterProviderConfig struct {
+	internaloption.EmbeddableAdapter
+	// meter provider override
+	meterProvider *metric.MeterProvider
+}
+
+func withMeterProvider(provider *metric.MeterProvider) option.ClientOption {
+	return &withMeterProviderConfig{meterProvider: provider}
+}
+
+func (w *withMeterProviderConfig) ApplyStorageOpt(c *storageConfig) {
+	c.meterProvider = w.meterProvider
+}
+
 func withTestMetricReader(ex *metric.ManualReader) option.ClientOption {
 	return &withTestMetricReaderConfig{metricReader: ex}
 }
@@ -211,20 +245,13 @@ func (w *withTestMetricReaderConfig) ApplyStorageOpt(c *storageConfig) {
 	c.manualReader = w.metricReader
 }
 
-// WithReadStallTimeout is an option that may be passed to [NewClient].
+// WithReadStallTimeout is an option that may be passed to [NewClient] or [NewGRPCClient].
 // It enables the client to retry the stalled read request, happens as part of
 // storage.Reader creation. As the name suggest, timeout is adjusted dynamically
 // based on past observed read-req latencies.
 //
-// This is only supported for the read operation and that too for http(XML) client.
-// Grpc read-operation will be supported soon.
+// This is supported for read operations on HTTP (XML) and gRPC clients (not implemented for HTTP JSON client).
 func withReadStallTimeout(rstc *experimental.ReadStallTimeoutConfig) option.ClientOption {
-	// TODO (raj-prince): To keep separate dynamicDelay instance for different BucketHandle.
-	// Currently, dynamicTimeout is kept at the client and hence shared across all the
-	// BucketHandle, which is not the ideal state. As latency depends on location of VM
-	// and Bucket, and read latency of different buckets may lie in different range.
-	// Hence having a separate dynamicTimeout instance at BucketHandle level will
-	// be better
 	if rstc.Min == time.Duration(0) {
 		rstc.Min = defaultDynamicReadReqMinTimeout
 	}
@@ -245,7 +272,15 @@ func (wrstc *withReadStallTimeoutConfig) ApplyStorageOpt(config *storageConfig) 
 	config.readStallTimeoutConfig = wrstc.readStallTimeoutConfig
 }
 
-func withGRPCBidiReads() option.ClientOption {
+// WithGRPCBidiReads provides an [option.ClientOption] that may be passed to
+// [NewGRPCClient].
+//
+// It instructs the client to use the bi-directional gRPC API for all standard object
+// downloads. Additionally, this option is strictly required to use the
+// [MultiRangeDownloader] surface.
+//
+// Note: This option is exclusively supported for gRPC clients.
+func WithGRPCBidiReads() option.ClientOption {
 	return &withGRPCBidiReadsConfig{}
 }
 
@@ -257,16 +292,61 @@ func (w *withGRPCBidiReadsConfig) ApplyStorageOpt(config *storageConfig) {
 	config.grpcBidiReads = true
 }
 
-func withZonalBucketAPIs() option.ClientOption {
-	return &withZonalBucketAPIsConfig{}
+// WithAppendableUploads provides an [option.ClientOption] that may be passed to
+// [NewGRPCClient].
+//
+// It enables the client to use appendable object semantics for uploads by default.
+//
+// Note: This option is exclusively supported for gRPC clients.
+func WithAppendableUploads() option.ClientOption {
+	return &withGRPCAppendableUploadsConfig{}
 }
 
-type withZonalBucketAPIsConfig struct {
+type withGRPCAppendableUploadsConfig struct {
 	internaloption.EmbeddableAdapter
 }
 
-func (w *withZonalBucketAPIsConfig) ApplyStorageOpt(config *storageConfig) {
-	// Use both appendable upload semantics and bidi reads.
+func (w *withGRPCAppendableUploadsConfig) ApplyStorageOpt(config *storageConfig) {
 	config.grpcAppendableUploads = true
-	config.grpcBidiReads = true
+}
+
+func withOtelMetrics() option.ClientOption {
+	return &withOtelMetricsConfig{}
+}
+
+type withOtelMetricsConfig struct {
+	internaloption.EmbeddableAdapter
+}
+
+func (w *withOtelMetricsConfig) ApplyStorageOpt(c *storageConfig) {
+	c.enableOtelMetrics = true
+}
+
+func withOtelDebugMetrics() option.ClientOption {
+	return &withOtelDebugMetricsConfig{}
+}
+
+type withOtelDebugMetricsConfig struct {
+	internaloption.EmbeddableAdapter
+}
+
+func (w *withOtelDebugMetricsConfig) ApplyStorageOpt(c *storageConfig) {
+	c.enableOtelDebugMetrics = true
+}
+
+// withBufferPool sets the buffer pool used to allocate memory for parallel
+// uploads. It backs [cloud.google.com/go/storage/experimental.WithBufferPool].
+//
+// This option is not supported at the moment.
+func withBufferPool(pool experimental.BufferPool) option.ClientOption {
+	return &withBufferPoolConfig{pool: pool}
+}
+
+type withBufferPoolConfig struct {
+	internaloption.EmbeddableAdapter
+	pool experimental.BufferPool
+}
+
+func (w *withBufferPoolConfig) ApplyStorageOpt(c *storageConfig) {
+	c.bufferPool = w.pool
 }
