@@ -41,7 +41,9 @@ type StdTransportParams struct {
 	// to which the HTTP requests are made.
 	Config Config
 
-	// HTTPClient is used to make the underlying HTTP requests.
+	// Transport is used to make the underlying HTTP requests,
+	// including those to obtain authorization tokens, so it is the place
+	// to set headers such as User-Agent on all requests.
 	// If it's nil, [http.DefaultTransport] will be used.
 	Transport http.RoundTripper
 }
@@ -329,8 +331,7 @@ func (r *registry) acquireAccessToken(ctx context.Context, requiredScope, wantSc
 	scope := requiredScope.Union(wantScope)
 	tok, err := r.acquireToken(ctx, scope)
 	if err != nil {
-		var herr ociregistry.HTTPError
-		if !errors.As(err, &herr) || herr.StatusCode() != http.StatusUnauthorized {
+		if herr, ok := errors.AsType[ociregistry.HTTPError](err); !ok || herr.StatusCode() != http.StatusUnauthorized {
 			return "", err
 		}
 		// The documentation says this:
@@ -403,8 +404,7 @@ func (r *registry) acquireToken(ctx context.Context, scope Scope) (*wireToken, e
 		if err == nil {
 			return tok, nil
 		}
-		var herr ociregistry.HTTPError
-		if !errors.As(err, &herr) || herr.StatusCode() != http.StatusNotFound {
+		if herr, ok := errors.AsType[ociregistry.HTTPError](err); !ok || herr.StatusCode() != http.StatusNotFound {
 			return tok, err
 		}
 		// The request to the endpoint returned 404 from the POST request,

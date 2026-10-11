@@ -25,6 +25,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -51,6 +52,10 @@ type Options struct {
 	// [ociauth.RequestInfo] value added, suitable for consumption
 	// by the transport created by [ociauth.NewStdTransport]. If
 	// Transport is nil, [http.DefaultTransport] will be used.
+	//
+	// Clients should use Transport to set a meaningful User-Agent header,
+	// particularly when talking to registries they do not control;
+	// see the userAgent example.
 	Transport http.RoundTripper
 
 	// Insecure specifies whether an http scheme will be used to
@@ -72,7 +77,7 @@ type Options struct {
 // it it's more than that.
 const DefaultListPageSize = 1000
 
-var debugID int32
+var debugID atomic.Int32
 
 // New returns a registry implementation that uses the OCI
 // HTTP API. A nil opts parameter is equivalent to a pointer
@@ -86,7 +91,7 @@ func New(host string, opts0 *Options) (ociregistry.Interface, error) {
 		opts = *opts0
 	}
 	if opts.DebugID == "" {
-		opts.DebugID = fmt.Sprintf("id%d", atomic.AddInt32(&debugID, 1))
+		opts.DebugID = fmt.Sprintf("id%d", debugID.Add(1))
 	}
 	if opts.Transport == nil {
 		opts.Transport = http.DefaultTransport
@@ -324,10 +329,8 @@ func (c *client) do(req *http.Request, okStatuses ...int) (*http.Response, error
 	if len(okStatuses) == 0 && resp.StatusCode == http.StatusOK {
 		return resp, nil
 	}
-	for _, status := range okStatuses {
-		if resp.StatusCode == status {
-			return resp, nil
-		}
+	if slices.Contains(okStatuses, resp.StatusCode) {
+		return resp, nil
 	}
 	defer resp.Body.Close()
 	if !isOKStatus(resp.StatusCode) {
