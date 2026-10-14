@@ -488,7 +488,7 @@ github.com/coreos/go-systemd/v22/dbus
 # github.com/cpuguy83/go-md2man/v2 v2.0.7
 ## explicit; go 1.12
 github.com/cpuguy83/go-md2man/v2/md2man
-# github.com/cyberphone/json-canonicalization v0.0.0-20241213102144-19d51d7fe467
+# github.com/cyberphone/json-canonicalization v0.0.0-20261011152517-32a48195b9b2
 ## explicit
 github.com/cyberphone/json-canonicalization/go/src/webpki.org/jsoncanonicalizer
 # github.com/cyphar/filepath-securejoin v0.4.1
