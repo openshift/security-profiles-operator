@@ -1,4 +1,4 @@
-package validator
+package core
 
 import (
 	"context"
@@ -73,9 +73,22 @@ type Walker struct {
 
 	validatedFragmentSpreads map[string]bool
 	CurrentOperation         *ast.OperationDefinition
+
+	// fragments indexes Document.Fragments by name. Every fragment spread
+	// is looked up, and walking each fragment definition on its own enters
+	// every fragment it reaches again, so a linear scan per spread made a
+	// document of fragments spreading one another cubic in their count.
+	fragments map[string]*ast.FragmentDefinition
 }
 
 func (w *Walker) walk() {
+	w.fragments = make(map[string]*ast.FragmentDefinition, len(w.Document.Fragments))
+	for _, f := range w.Document.Fragments {
+		// ForName returns the first of duplicate names; so does this.
+		if _, ok := w.fragments[f.Name]; !ok {
+			w.fragments[f.Name] = f
+		}
+	}
 	for _, child := range w.Document.Operations {
 		w.validatedFragmentSpreads = make(map[string]bool)
 		w.walkOperation(child)
@@ -142,7 +155,11 @@ func (w *Walker) walkFragment(it *ast.FragmentDefinition) {
 	}
 }
 
-func (w *Walker) walkDirectives(parentDef *ast.Definition, directives []*ast.Directive, location ast.DirectiveLocation) {
+func (w *Walker) walkDirectives(
+	parentDef *ast.Definition,
+	directives []*ast.Directive,
+	location ast.DirectiveLocation,
+) {
 	for _, dir := range directives {
 		def := w.Schema.Directives[dir.Name]
 		dir.Definition = def
@@ -182,6 +199,8 @@ func (w *Walker) walkValue(value *ast.Value) {
 				fieldDef := value.Definition.Fields.ForName(child.Name)
 				if fieldDef != nil {
 					child.Value.ExpectedType = fieldDef.Type
+					child.Value.ExpectedTypeHasDefault = fieldDef.DefaultValue != nil &&
+						fieldDef.DefaultValue.Kind != ast.NullValue
 					child.Value.Definition = w.Schema.Types[fieldDef.Type.Name()]
 				}
 			}
@@ -208,6 +227,8 @@ func (w *Walker) walkValue(value *ast.Value) {
 func (w *Walker) walkArgument(argDef *ast.ArgumentDefinition, arg *ast.Argument) {
 	if argDef != nil {
 		arg.Value.ExpectedType = argDef.Type
+		arg.Value.ExpectedTypeHasDefault = argDef.DefaultValue != nil &&
+			argDef.DefaultValue.Kind != ast.NullValue
 		arg.Value.Definition = w.Schema.Types[argDef.Type.Name()]
 	}
 
@@ -273,7 +294,7 @@ func (w *Walker) walkSelection(parentDef *ast.Definition, it ast.Selection) {
 		}
 
 	case *ast.FragmentSpread:
-		def := w.Document.Fragments.ForName(it.Name)
+		def := w.fragments[it.Name]
 		it.Definition = def
 		it.ObjectDefinition = parentDef
 
@@ -287,6 +308,7 @@ func (w *Walker) walkSelection(parentDef *ast.Definition, it ast.Selection) {
 		if def != nil && !w.validatedFragmentSpreads[def.Name] {
 			// prevent infinite recursion
 			w.validatedFragmentSpreads[def.Name] = true
+			w.walkDirectives(nextParentDef, def.Directives, ast.LocationFragmentDefinition)
 			w.walkSelectionSet(nextParentDef, def.SelectionSet)
 		}
 
