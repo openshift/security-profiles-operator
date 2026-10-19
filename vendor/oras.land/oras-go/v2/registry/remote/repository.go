@@ -24,6 +24,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -126,6 +127,18 @@ type Repository struct {
 	// Reference: https://github.com/oras-project/oras-go/issues/841
 	ReferrerListPageSize int
 
+	// TagListMaxPages limits the total number of pages fetched during tag
+	// listing, bounding server-driven pagination so a malicious or misbehaving
+	// registry cannot force unbounded requests.
+	// If zero, tag listing is unlimited.
+	TagListMaxPages int
+
+	// ReferrerListMaxPages limits the total number of pages fetched during
+	// referrer listing, bounding server-driven pagination so a malicious or
+	// misbehaving registry cannot force unbounded requests.
+	// If zero, referrer listing is unlimited.
+	ReferrerListMaxPages int
+
 	// MaxMetadataBytes specifies a limit on how many response bytes are allowed
 	// in the server's response to the metadata APIs, such as catalog list, tag
 	// list, and referrers list.
@@ -204,6 +217,8 @@ func (r *Repository) clone() *Repository {
 		ManifestMediaTypes:   slices.Clone(r.ManifestMediaTypes),
 		TagListPageSize:      r.TagListPageSize,
 		ReferrerListPageSize: r.ReferrerListPageSize,
+		TagListMaxPages:      r.TagListMaxPages,
+		ReferrerListMaxPages: r.ReferrerListMaxPages,
 		MaxMetadataBytes:     r.MaxMetadataBytes,
 		SkipReferrersGC:      r.SkipReferrersGC,
 		HandleWarning:        r.HandleWarning,
@@ -399,7 +414,10 @@ func (r *Repository) Tags(ctx context.Context, last string, fn func(tags []strin
 	ctx = auth.AppendRepositoryScope(ctx, r.Reference, auth.ActionPull)
 	url := buildRepositoryTagListURL(r.PlainHTTP, r.Reference)
 	var err error
-	for err == nil {
+	for page := 0; err == nil; page++ {
+		if r.TagListMaxPages > 0 && page >= r.TagListMaxPages {
+			return fmt.Errorf("tag listing exceeded %d pages: %w", r.TagListMaxPages, errdef.ErrTooManyPages)
+		}
 		url, err = r.tags(ctx, last, fn, url)
 		// clear `last` for subsequent pages
 		last = ""
@@ -511,7 +529,10 @@ func (r *Repository) referrersByAPI(ctx context.Context, desc ocispec.Descriptor
 
 	url := buildReferrersURL(r.PlainHTTP, ref, artifactType)
 	var err error
-	for err == nil {
+	for page := 0; err == nil; page++ {
+		if r.ReferrerListMaxPages > 0 && page >= r.ReferrerListMaxPages {
+			return fmt.Errorf("referrer listing exceeded %d pages: %w", r.ReferrerListMaxPages, errdef.ErrTooManyPages)
+		}
 		url, err = r.referrersPageByAPI(ctx, artifactType, fn, url)
 	}
 	if err == errNoLink {
@@ -598,7 +619,7 @@ func (r *Repository) referrersByTagSchema(ctx context.Context, desc ocispec.Desc
 	if err != nil {
 		return err
 	}
-	_, referrers, err := r.referrersFromIndex(ctx, referrersTag)
+	_, referrers, err := r.referrersFromIndex(ctx, referrersTag, desc)
 	if err != nil {
 		if errors.Is(err, errdef.ErrNotFound) {
 			// no referrers to the manifest
@@ -617,12 +638,18 @@ func (r *Repository) referrersByTagSchema(ctx context.Context, desc ocispec.Desc
 // referrersFromIndex queries the referrers index using the the given referrers
 // tag. If Succeeded, returns the descriptor of referrers index and the
 // referrers list.
-func (r *Repository) referrersFromIndex(ctx context.Context, referrersTag string) (ocispec.Descriptor, []ocispec.Descriptor, error) {
+func (r *Repository) referrersFromIndex(ctx context.Context, referrersTag string, subject ocispec.Descriptor) (ocispec.Descriptor, []ocispec.Descriptor, error) {
 	desc, rc, err := r.FetchReference(ctx, referrersTag)
 	if err != nil {
 		return ocispec.Descriptor{}, nil, err
 	}
 	defer rc.Close()
+
+	// Some registries resolve the fallback tag to the subject itself. Its
+	// children are not referrers, and the tag schema requires an OCI index.
+	if desc.MediaType != ocispec.MediaTypeImageIndex || desc.Digest == subject.Digest {
+		return ocispec.Descriptor{}, nil, fmt.Errorf("invalid referrers index from referrers tag %s: %w", referrersTag, errdef.ErrNotFound)
+	}
 
 	if err := limitSize(desc, r.MaxMetadataBytes); err != nil {
 		return ocispec.Descriptor{}, nil, fmt.Errorf("failed to read referrers index from referrers tag %s: %w", referrersTag, err)
@@ -872,6 +899,25 @@ func (s *blobStore) Push(ctx context.Context, expected ocispec.Descriptor, conte
 	return s.completePushAfterInitialPost(ctx, req, resp, expected, content)
 }
 
+// sameUploadHost reports whether location and reqURL refer to the same host,
+// normalizing implicit default ports (80 for http, 443 for https) so that
+// e.g. "example.com" and "example.com:443" compare equal over HTTPS.
+func sameUploadHost(location, reqURL *url.URL) bool {
+	if location.Hostname() != reqURL.Hostname() {
+		return false
+	}
+	canonicalPort := func(u *url.URL) string {
+		if p := u.Port(); p != "" {
+			return p
+		}
+		if u.Scheme == "https" {
+			return "443"
+		}
+		return "80"
+	}
+	return canonicalPort(location) == canonicalPort(reqURL)
+}
+
 // completePushAfterInitialPost implements step 2 of the push protocol. This can be invoked either by
 // Push or by Mount when the receiving repository does not implement the
 // mount endpoint.
@@ -893,6 +939,15 @@ func (s *blobStore) completePushAfterInitialPost(ctx context.Context, req *http.
 	// if location port 443 is missing, add it back
 	if reqPort == "443" && locationHostname == reqHostname && locationPort == "" {
 		location.Host = locationHostname + ":" + reqPort
+	}
+	// Validate the Location stays on the same host to prevent credentials from
+	// being forwarded to an attacker-controlled endpoint.
+	// Reference: https://github.com/oras-project/oras-go/security/advisories/GHSA-jxpm-75mh-9fp7
+	if !sameUploadHost(location, req.URL) {
+		return fmt.Errorf("blob upload Location %q is on a different host than the registry %q", location.Host, req.URL.Host)
+	}
+	if req.URL.Scheme == "https" && location.Scheme != "https" {
+		return fmt.Errorf("blob upload Location %q downgrades scheme from https", location.Host)
 	}
 	url := location.String()
 	req, err = http.NewRequestWithContext(ctx, http.MethodPut, url, content)
@@ -1463,7 +1518,7 @@ func (s *manifestStore) updateReferrersIndex(ctx context.Context, subject ocispe
 	var oldReferrers []ocispec.Descriptor
 	prepare := func() error {
 		// 1. pull the original referrers list using the referrers tag schema
-		indexDesc, referrers, err := s.repo.referrersFromIndex(ctx, referrersTag)
+		indexDesc, referrers, err := s.repo.referrersFromIndex(ctx, referrersTag, subject)
 		if err != nil {
 			if errors.Is(err, errdef.ErrNotFound) {
 				// valid case: no old referrers index

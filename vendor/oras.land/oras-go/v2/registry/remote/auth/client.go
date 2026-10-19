@@ -23,7 +23,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 
@@ -53,6 +55,12 @@ var DefaultClient = &Client{
 // Hence, 128 KiB should be sufficient.
 // References: https://distribution.github.io/distribution/spec/auth/token/
 var maxResponseBytes int64 = 128 * 1024 // 128 KiB
+
+// defaultMaxRedirects mirrors the limit enforced by net/http when
+// http.Client.CheckRedirect is nil. Installing a CheckRedirect replaces that
+// default policy, so the CheckRedirect installed by Client.send must enforce
+// the limit itself.
+const defaultMaxRedirects = 10
 
 // defaultClientID specifies the default client ID used in OAuth2.
 // See also ClientID.
@@ -133,10 +141,85 @@ func (c *Client) client() *http.Client {
 
 // send adds headers to the request and sends the request to the remote server.
 func (c *Client) send(req *http.Request) (*http.Response, error) {
+	return c.sendRedirectSafe(req, false)
+}
+
+// sendRedirectSafe adds headers to the request and sends the request to the
+// remote server. If refuseCrossOriginBody is set, a redirect that would resend
+// the request body to another origin fails instead of being followed.
+func (c *Client) sendRedirectSafe(req *http.Request, refuseCrossOriginBody bool) (*http.Response, error) {
 	for key, values := range c.Header {
 		req.Header[key] = append(req.Header[key], values...)
 	}
-	return c.client().Do(req)
+	// Drop the Authorization header once a redirect chain has left the HTTP
+	// origin (scheme, host, or port) of its first request. The standard
+	// library only strips sensitive headers when the hostname changes, so a
+	// redirect to a different port on the same host would otherwise forward
+	// credentials to an unintended endpoint. The check is made against the
+	// first request rather than the previous hop: net/http rebuilds the
+	// headers of every redirected request from the first request, so a header
+	// deleted on one hop is restored on the next. Any caller-provided
+	// CheckRedirect is preserved.
+	// References:
+	//   - https://github.com/oras-project/oras-go/security/advisories/GHSA-vh4v-2xq2-g5cg
+	//   - https://github.com/oras-project/oras-go/security/advisories/GHSA-xc97-9f2f-9hrx
+	client := c.client()
+	clientCopy := *client
+	checkRedirect := client.CheckRedirect
+	clientCopy.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) > 0 && leftOrigin(via, req) {
+			if refuseCrossOriginBody && req.Body != nil && req.Body != http.NoBody {
+				return fmt.Errorf("%s %q: refusing to resend a token request body to another origin", req.Method, req.URL.Redacted())
+			}
+			req.Header.Del("Authorization")
+		}
+		if checkRedirect != nil {
+			return checkRedirect(req, via)
+		}
+		if len(via) >= defaultMaxRedirects {
+			return fmt.Errorf("stopped after %d redirects", defaultMaxRedirects)
+		}
+		return nil
+	}
+	return clientCopy.Do(req)
+}
+
+// leftOrigin reports whether the redirect chain via, followed by req, has left
+// the HTTP origin of its first request, which is the request the credential
+// was attached for. Once the chain leaves that origin it is treated as having
+// left for good, even if a later hop returns to it.
+func leftOrigin(via []*http.Request, req *http.Request) bool {
+	for _, r := range via[1:] {
+		if !sameHTTPOrigin(via[0].URL, r.URL) {
+			return true
+		}
+	}
+	return !sameHTTPOrigin(via[0].URL, req.URL)
+}
+
+// sameHTTPOrigin reports whether a and b share the same HTTP origin, i.e. the
+// same scheme and host. Default ports are normalized so that, for example,
+// "example.com" and "example.com:443" compare equal over https.
+func sameHTTPOrigin(a, b *url.URL) bool {
+	if !strings.EqualFold(a.Scheme, b.Scheme) {
+		return false
+	}
+	return canonicalHost(a) == canonicalHost(b)
+}
+
+// canonicalHost returns the lower-cased host of u with the default port for its
+// scheme applied when no explicit port is present.
+func canonicalHost(u *url.URL) string {
+	port := u.Port()
+	if port == "" {
+		switch strings.ToLower(u.Scheme) {
+		case "https":
+			port = "443"
+		case "http":
+			port = "80"
+		}
+	}
+	return strings.ToLower(u.Hostname()) + ":" + port
 }
 
 // credential resolves the credential for the given registry.
@@ -154,6 +237,132 @@ func (c *Client) cache() Cache {
 		return noCache{}
 	}
 	return c.Cache
+}
+
+// lookupIPAddr resolves a host name to its IP addresses. It is a variable so
+// that tests can inject a fake resolver.
+var lookupIPAddr = net.DefaultResolver.LookupIPAddr
+
+// cgnatPrefix is the shared address space for carrier-grade NAT (RFC 6598).
+// It is not covered by net.IP.IsPrivate, yet it hosts internal services such as
+// the Alibaba Cloud instance metadata service at 100.100.100.200.
+var cgnatPrefix = netip.MustParsePrefix("100.64.0.0/10")
+
+// isInternalAddr reports whether addr is a loopback, link-local, private,
+// unspecified, or carrier-grade NAT address.
+func isInternalAddr(addr netip.Addr) bool {
+	addr = addr.Unmap()
+	return addr.IsLoopback() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() ||
+		addr.IsPrivate() || addr.IsUnspecified() || cgnatPrefix.Contains(addr)
+}
+
+// validateRealm rejects bearer token realm URLs that would have the client
+// forward credentials to obviously unsafe destinations:
+//
+//   - schemes other than http or https,
+//   - http realms when the registry was contacted over https (TLS downgrade),
+//   - hosts that are, or resolve to, loopback, link-local, private,
+//     unspecified, or carrier-grade NAT (100.64.0.0/10) addresses (e.g. cloud
+//     instance metadata services such as 169.254.169.254 or
+//     100.100.100.200).
+//
+// Cross-host realms with a public hostname are permitted, because the
+// distribution spec allows a separate token endpoint (e.g. Docker Hub's
+// auth.docker.io). When the registry itself is reached at the same hostname
+// as the realm, the address check is skipped so loopback and in-cluster
+// deployments continue to work.
+//
+// A realm host that is not an IP literal is resolved with ctx, and the realm
+// is rejected if any of its A or AAAA records is an internal address. If the
+// lookup fails, the realm is allowed: behind an HTTP proxy the client may be
+// unable to resolve names that the proxy can, and a bogus name fails at dial
+// time anyway. The check does not defend against DNS rebinding, where the
+// name resolves to a public address here and to an internal address when the
+// request is dialed.
+//
+// validateRealm is also applied to every redirect hop of a token request.
+//
+// References:
+//   - https://github.com/oras-project/oras-go/security/advisories/GHSA-xf85-363p-868w
+//   - https://github.com/oras-project/oras-go/security/advisories/GHSA-mm27-wq9c-mxxr
+func validateRealm(ctx context.Context, realm string, registryURL *url.URL) error {
+	if realm == "" {
+		return nil
+	}
+	realmURL, err := url.Parse(realm)
+	if err != nil {
+		return fmt.Errorf("failed to parse bearer realm %q: %w", realm, err)
+	}
+	switch realmURL.Scheme {
+	case "https":
+		// always allowed
+	case "http":
+		if registryURL != nil && registryURL.Scheme == "https" {
+			return fmt.Errorf("bearer realm %q uses http but registry was contacted over https", realm)
+		}
+	default:
+		return fmt.Errorf("bearer realm %q uses unsupported scheme %q", realm, realmURL.Scheme)
+	}
+	host := realmURL.Hostname()
+	if registryURL != nil && strings.EqualFold(host, registryURL.Hostname()) {
+		return nil
+	}
+	if addr, err := netip.ParseAddr(host); err == nil {
+		if isInternalAddr(addr) {
+			return fmt.Errorf("bearer realm host %q is a loopback, link-local, private, unspecified, or carrier-grade NAT address", host)
+		}
+		return nil
+	}
+	addrs, err := lookupIPAddr(ctx, host)
+	if err != nil {
+		// Do not reject on lookup failure; see the function comment.
+		return nil
+	}
+	for _, ipAddr := range addrs {
+		addr, ok := netip.AddrFromSlice(ipAddr.IP)
+		if ok && isInternalAddr(addr) {
+			return fmt.Errorf("bearer realm host %q resolves to %s, a loopback, link-local, private, unspecified, or carrier-grade NAT address", host, addr.Unmap())
+		}
+	}
+	return nil
+}
+
+// realmRedirectGuard returns a shallow copy of client whose CheckRedirect
+// applies validateRealm to every redirect hop of a token request, measured
+// against registryURL, before delegating to the CheckRedirect of client. This
+// keeps a validated realm from redirecting the token request to an internal
+// address or from https to http.
+// Reference: https://github.com/oras-project/oras-go/security/advisories/GHSA-mm27-wq9c-mxxr
+func realmRedirectGuard(client *http.Client, registryURL *url.URL) *http.Client {
+	clientCopy := *client
+	checkRedirect := client.CheckRedirect
+	clientCopy.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if err := validateRealm(req.Context(), req.URL.String(), registryURL); err != nil {
+			return fmt.Errorf("redirect of token request rejected: %w", err)
+		}
+		if checkRedirect != nil {
+			return checkRedirect(req, via)
+		}
+		if len(via) >= defaultMaxRedirects {
+			return fmt.Errorf("stopped after %d redirects", defaultMaxRedirects)
+		}
+		return nil
+	}
+	return &clientCopy
+}
+
+// sendTokenRequest sends a request to a token endpoint like send, but
+// re-validates every redirect hop with validateRealm against registryURL, and
+// refuses to follow a redirect that would resend the request body to another
+// origin. On a 307 or 308 redirect net/http replays the body, which for an
+// OAuth2 token request holds the password or refresh token.
+// References:
+//   - https://github.com/oras-project/oras-go/security/advisories/GHSA-mm27-wq9c-mxxr
+//   - https://github.com/oras-project/oras-go/security/advisories/GHSA-xc97-9f2f-9hrx
+func (c *Client) sendTokenRequest(req *http.Request, registryURL *url.URL) (*http.Response, error) {
+	tokenClient := *c
+	tokenClient.Client = realmRedirectGuard(c.client(), registryURL)
+	return tokenClient.sendRedirectSafe(req, true)
 }
 
 // SetUserAgent sets the user agent for all out-going requests.
@@ -182,6 +391,9 @@ func (c *Client) Do(originalReq *http.Request) (*http.Response, error) {
 	var attemptedKey string
 	cache := c.cache()
 	host := originalReq.Host
+	if host == "" {
+		host = originalReq.URL.Host
+	}
 	scheme, err := cache.GetScheme(ctx, host)
 	if err == nil {
 		switch scheme {
@@ -205,6 +417,13 @@ func (c *Client) Do(originalReq *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusUnauthorized {
+		return resp, nil
+	}
+	// If the challenge came from a different origin than originally requested
+	// (e.g. the request was redirected to another host or port), do not resolve
+	// or send the registry credentials to that origin.
+	// Reference: https://github.com/oras-project/oras-go/security/advisories/GHSA-vh4v-2xq2-g5cg
+	if resp.Request != nil && !sameHTTPOrigin(originalReq.URL, resp.Request.URL) {
 		return resp, nil
 	}
 
@@ -257,9 +476,12 @@ func (c *Client) Do(originalReq *http.Request) (*http.Response, error) {
 
 		// attempt with credentials
 		realm := params["realm"]
+		if err := validateRealm(ctx, realm, originalReq.URL); err != nil {
+			return nil, fmt.Errorf("%s %q: %w", resp.Request.Method, resp.Request.URL, err)
+		}
 		service := params["service"]
 		token, err := cache.Set(ctx, host, SchemeBearer, key, func(ctx context.Context) (string, error) {
-			return c.fetchBearerToken(ctx, host, realm, service, scopes)
+			return c.fetchBearerToken(ctx, originalReq.URL, host, realm, service, scopes)
 		})
 		if err != nil {
 			return nil, fmt.Errorf("%s %q: %w", resp.Request.Method, resp.Request.URL, err)
@@ -294,7 +516,10 @@ func (c *Client) fetchBasicAuth(ctx context.Context, registry string) (string, e
 }
 
 // fetchBearerToken fetches an access token for the bearer challenge.
-func (c *Client) fetchBearerToken(ctx context.Context, registry, realm, service string, scopes []string) (string, error) {
+//
+// registryURL is the URL the registry was contacted at. Every redirect hop of
+// the token request is validated against it.
+func (c *Client) fetchBearerToken(ctx context.Context, registryURL *url.URL, registry, realm, service string, scopes []string) (string, error) {
 	cred, err := c.credential(ctx, registry)
 	if err != nil {
 		return "", err
@@ -303,9 +528,9 @@ func (c *Client) fetchBearerToken(ctx context.Context, registry, realm, service 
 		return cred.AccessToken, nil
 	}
 	if cred == EmptyCredential || (cred.RefreshToken == "" && !c.ForceAttemptOAuth2) {
-		return c.fetchDistributionToken(ctx, realm, service, scopes, cred.Username, cred.Password)
+		return c.fetchDistributionToken(ctx, registryURL, realm, service, scopes, cred.Username, cred.Password)
 	}
-	return c.fetchOAuth2Token(ctx, realm, service, scopes, cred)
+	return c.fetchOAuth2Token(ctx, registryURL, realm, service, scopes, cred)
 }
 
 // fetchDistributionToken fetches an access token as defined by the distribution
@@ -314,7 +539,7 @@ func (c *Client) fetchBearerToken(ctx context.Context, registry, realm, service 
 // References:
 // - https://distribution.github.io/distribution/spec/auth/jwt/
 // - https://distribution.github.io/distribution/spec/auth/token/
-func (c *Client) fetchDistributionToken(ctx context.Context, realm, service string, scopes []string, username, password string) (string, error) {
+func (c *Client) fetchDistributionToken(ctx context.Context, registryURL *url.URL, realm, service string, scopes []string, username, password string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, realm, nil)
 	if err != nil {
 		return "", err
@@ -331,7 +556,7 @@ func (c *Client) fetchDistributionToken(ctx context.Context, realm, service stri
 	}
 	req.URL.RawQuery = q.Encode()
 
-	resp, err := c.send(req)
+	resp, err := c.sendTokenRequest(req, registryURL)
 	if err != nil {
 		return "", err
 	}
@@ -362,7 +587,7 @@ func (c *Client) fetchDistributionToken(ctx context.Context, realm, service stri
 
 // fetchOAuth2Token fetches an OAuth2 access token.
 // Reference: https://distribution.github.io/distribution/spec/auth/oauth/
-func (c *Client) fetchOAuth2Token(ctx context.Context, realm, service string, scopes []string, cred Credential) (string, error) {
+func (c *Client) fetchOAuth2Token(ctx context.Context, registryURL *url.URL, realm, service string, scopes []string, cred Credential) (string, error) {
 	form := url.Values{}
 	if cred.RefreshToken != "" {
 		form.Set("grant_type", "refresh_token")
@@ -391,7 +616,7 @@ func (c *Client) fetchOAuth2Token(ctx context.Context, realm, service string, sc
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := c.send(req)
+	resp, err := c.sendTokenRequest(req, registryURL)
 	if err != nil {
 		return "", err
 	}

@@ -39,7 +39,7 @@ import (
 // bufPool is a pool of byte buffers that can be reused for copying content
 // between files.
 var bufPool = sync.Pool{
-	New: func() interface{} {
+	New: func() any {
 		// the buffer size should be larger than or equal to 128 KiB
 		// for performance considerations.
 		// we choose 1 MiB here so there will be less disk I/O.
@@ -174,7 +174,7 @@ func (s *Store) Close() error {
 	s.setClosed()
 
 	var errs []string
-	s.tmpFiles.Range(func(name, _ interface{}) bool {
+	s.tmpFiles.Range(func(name, _ any) bool {
 		if err := os.Remove(name.(string)); err != nil {
 			errs = append(errs, err.Error())
 		}
@@ -230,14 +230,22 @@ func (s *Store) Push(ctx context.Context, expected ocispec.Descriptor, content i
 	}
 
 	if err := s.push(ctx, expected, content); err != nil {
-		if errors.Is(err, errSkipUnnamed) {
-			return nil
+		if !errors.Is(err, errSkipUnnamed) {
+			return err
 		}
-		return err
+		// The unnamed node is discarded, but the named successors of a
+		// manifest that were deduped by content must still be restored. The
+		// manifest is not stored, so it is read from the pushed content.
+		if !s.ForceCAS {
+			if err := s.restoreDuplicates(ctx, readerFetcher(content), expected); err != nil {
+				return fmt.Errorf("failed to restore duplicated file: %w", err)
+			}
+		}
+		return nil
 	}
 
 	if !s.ForceCAS {
-		if err := s.restoreDuplicates(ctx, expected); err != nil {
+		if err := s.restoreDuplicates(ctx, s, expected); err != nil {
 			return fmt.Errorf("failed to restore duplicated file: %w", err)
 		}
 	}
@@ -287,10 +295,10 @@ func (s *Store) push(ctx context.Context, expected ocispec.Descriptor, content i
 }
 
 // restoreDuplicates restores successor files with same content but different
-// names.
+// names. The content of desc is fetched from fetcher.
 // See Store.ForceCAS for more info.
-func (s *Store) restoreDuplicates(ctx context.Context, desc ocispec.Descriptor) error {
-	successors, err := content.Successors(ctx, s, desc)
+func (s *Store) restoreDuplicates(ctx context.Context, fetcher content.Fetcher, desc ocispec.Descriptor) error {
+	successors, err := content.Successors(ctx, fetcher, desc)
 	if err != nil {
 		return err
 	}
@@ -327,6 +335,14 @@ func (s *Store) restoreDuplicates(ctx context.Context, desc ocispec.Descriptor) 
 		}
 	}
 	return nil
+}
+
+// readerFetcher returns a fetcher that reads the content of a node being
+// pushed from r.
+func readerFetcher(r io.Reader) content.Fetcher {
+	return content.FetcherFunc(func(context.Context, ocispec.Descriptor) (io.ReadCloser, error) {
+		return io.NopCloser(r), nil
+	})
 }
 
 // Exists returns true if the described content exists.
@@ -474,16 +490,37 @@ func (s *Store) pushFile(target string, expected ocispec.Descriptor, content io.
 		return fmt.Errorf("failed to ensure directories of the target path: %w", err)
 	}
 
-	fp, err := os.Create(target)
+	// resolveWritePath only resolves symlinks in the ancestors of target, so a
+	// symlink at target itself, e.g. one planted by an earlier unpacked layer,
+	// would redirect the write outside the working directory. Replace such a
+	// symlink with a regular file, and refuse to follow one planted after this
+	// check. (GHSA-2hhj-vj64-hx3j)
+	if err := removeSymlink(target); err != nil {
+		return err
+	}
+	fp, err := createNoFollow(target, 0666)
 	if err != nil {
 		return fmt.Errorf("failed to create file %s: %w", target, err)
 	}
 
-	return s.saveFile(fp, expected, content)
+	if err := s.saveFile(fp, expected, content); err != nil {
+		// Do not leave content that failed verification, or was only partly
+		// written, at the target path, where it looks like a pulled file.
+		if removeErr := os.Remove(target); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			return errors.Join(err, fmt.Errorf("failed to remove %s: %w", target, removeErr))
+		}
+		return err
+	}
+	return nil
 }
 
 // pushDir saves content matching the descriptor to the target directory.
 func (s *Store) pushDir(name, target string, expected ocispec.Descriptor, content io.Reader) (err error) {
+	// A symlink at target would make the directory, and everything extracted
+	// into it, resolve outside the working directory. (GHSA-2hhj-vj64-hx3j)
+	if err := removeSymlink(target); err != nil {
+		return err
+	}
 	if err := ensureDir(target); err != nil {
 		return fmt.Errorf("failed to ensure directories of the target path: %w", err)
 	}
@@ -625,6 +662,13 @@ func (s *Store) resolveWritePath(name string) (string, error) {
 		if strings.HasPrefix(rel, "../") || rel == ".." {
 			return "", ErrPathTraversalDisallowed
 		}
+		// The lexical check above prevents "../" escapes but does not resolve
+		// symlinks. A symlink component under workingDir (e.g. "out" -> "/outside")
+		// passes the lexical check yet directs writes outside workingDir.
+		// Re-check after resolving symlinks in the parent path to close that gap.
+		if err := checkSymlinkEscape(base, target); err != nil {
+			return "", err
+		}
 	}
 	if s.DisableOverwrite {
 		if _, err := os.Stat(path); err == nil {
@@ -685,4 +729,73 @@ func (s *Store) setClosed() {
 // ensureDir ensures the directories of the path exists.
 func ensureDir(path string) error {
 	return os.MkdirAll(path, 0777)
+}
+
+// removeSymlink removes path if it is a symlink, so that a subsequent write to
+// path does not follow it. It is a no-op if path does not exist or is not a
+// symlink.
+func removeSymlink(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		return nil
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("failed to remove symlink %s: %w", path, err)
+	}
+	return nil
+}
+
+// checkSymlinkEscape returns ErrPathTraversalDisallowed if resolving symlinks
+// in target's ancestor directories causes it to escape base. target may not
+// yet exist, so symlinks are resolved on its deepest existing ancestor.
+func checkSymlinkEscape(base, target string) error {
+	realBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // base doesn't exist yet; no symlinks to follow
+		}
+		return err
+	}
+	realTarget, err := realPathForWrite(target)
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(realBase, realTarget)
+	if err != nil {
+		return ErrPathTraversalDisallowed
+	}
+	rel = filepath.ToSlash(rel)
+	if strings.HasPrefix(rel, "../") || rel == ".." {
+		return ErrPathTraversalDisallowed
+	}
+	return nil
+}
+
+// realPathForWrite resolves symlinks in the deepest existing ancestor of path
+// and returns the resulting absolute path. Non-existent path components are
+// appended verbatim, matching the semantics of a file about to be created.
+func realPathForWrite(path string) (string, error) {
+	dir := filepath.Dir(path)
+	suffix := filepath.Base(path)
+	for {
+		real, err := filepath.EvalSymlinks(dir)
+		if err == nil {
+			return filepath.Join(real, suffix), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return path, nil // reached filesystem root
+		}
+		suffix = filepath.Join(filepath.Base(dir), suffix)
+		dir = parent
+	}
 }
