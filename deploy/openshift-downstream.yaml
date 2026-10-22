@@ -5613,6 +5613,18 @@ rules:
   - update
   - watch
 - apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+- apiGroups:
   - cert-manager.io
   resources:
   - certificates
@@ -5793,6 +5805,20 @@ rules:
   - list
   - watch
 - apiGroups:
+  - config.openshift.io
+  resources:
+  - apiservers
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - config.openshift.io
+  resources:
+  - clusteroperators
+  verbs:
+  - get
+- apiGroups:
   - security-profiles-operator.x-k8s.io
   resources:
   - apparmorprofiles
@@ -5898,6 +5924,32 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+- apiGroups:
+  - config.openshift.io
+  resources:
+  - apiservers
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - config.openshift.io
+  resources:
+  - clusteroperators
+  verbs:
+  - get
 - apiGroups:
   - security-profiles-operator.x-k8s.io
   resources:

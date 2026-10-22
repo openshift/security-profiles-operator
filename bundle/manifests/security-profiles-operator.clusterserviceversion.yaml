@@ -422,6 +422,18 @@ spec:
           - update
           - watch
         - apiGroups:
+          - authentication.k8s.io
+          resources:
+          - tokenreviews
+          verbs:
+          - create
+        - apiGroups:
+          - authorization.k8s.io
+          resources:
+          - subjectaccessreviews
+          verbs:
+          - create
+        - apiGroups:
           - cert-manager.io
           resources:
           - certificates
@@ -559,6 +571,32 @@ spec:
           - list
           - watch
         - apiGroups:
+          - authentication.k8s.io
+          resources:
+          - tokenreviews
+          verbs:
+          - create
+        - apiGroups:
+          - authorization.k8s.io
+          resources:
+          - subjectaccessreviews
+          verbs:
+          - create
+        - apiGroups:
+          - config.openshift.io
+          resources:
+          - apiservers
+          verbs:
+          - get
+          - list
+          - watch
+        - apiGroups:
+          - config.openshift.io
+          resources:
+          - clusteroperators
+          verbs:
+          - get
+        - apiGroups:
           - security-profiles-operator.x-k8s.io
           resources:
           - apparmorprofiles
@@ -600,14 +638,6 @@ spec:
           - get
           - patch
           - update
-        - apiGroups:
-          - config.openshift.io
-          resources:
-          - apiservers
-          verbs:
-          - get
-          - list
-          - watch
         serviceAccountName: spo-webhook
       - rules:
         - apiGroups:
@@ -651,6 +681,20 @@ spec:
           - get
           - list
           - watch
+        - apiGroups:
+          - config.openshift.io
+          resources:
+          - apiservers
+          verbs:
+          - get
+          - list
+          - watch
+        - apiGroups:
+          - config.openshift.io
+          resources:
+          - clusteroperators
+          verbs:
+          - get
         - apiGroups:
           - security-profiles-operator.x-k8s.io
           resources:
@@ -715,14 +759,6 @@ spec:
           - security-profiles-operator.x-k8s.io
           resources:
           - securityprofilesoperatordaemons
-          verbs:
-          - get
-          - list
-          - watch
-        - apiGroups:
-          - config.openshift.io
-          resources:
-          - apiservers
           verbs:
           - get
           - list
