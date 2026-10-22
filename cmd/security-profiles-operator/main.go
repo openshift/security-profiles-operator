@@ -109,6 +109,7 @@ const (
 	memOptimFlag                 string = "with-mem-optim"
 	insecureMetricsAccessFlag    string = "with-insecure-metrics-access"
 	defaultWebhookPort           int    = 9443
+	metricsPort                  int    = 8443
 	auditLogIntervalSecondsParam string = "audit-log-interval-seconds"
 	auditLogPathParam            string = "audit-log-path"
 	auditLogMaxSizeParam         string = "audit-log-maxsize"
@@ -499,7 +500,7 @@ func runManager(ctx *cli.Context, info *version.Info) error {
 	}
 
 	// Fetch initial TLS configuration from OpenShift API Server
-	_, initialTLSProfile, initialTLSAdherencePolicy, isOpenShift, err := fetchTLSOptions(
+	tlsOpts, initialTLSProfile, initialTLSAdherencePolicy, isOpenShift, err := fetchTLSOptions(
 		ctx.Context, cfg,
 	)
 	if err != nil {
@@ -510,6 +511,7 @@ func runManager(ctx *cli.Context, info *version.Info) error {
 		Cache:            cache.Options{SyncPeriod: &sync},
 		LeaderElection:   true,
 		LeaderElectionID: "security-profiles-operator-lock",
+		Metrics:          secureMetricsOptions(tlsOpts),
 	}
 
 	setControllerOptionsForNamespaces(&ctrlOpts)
@@ -866,6 +868,19 @@ func fetchTLSOptions(ctx context.Context, cfg *rest.Config) (
 	return tlsOptions, initialTLSProfile, initialTLSAdherencePolicy, isOpenShift, nil
 }
 
+// secureMetricsOptions returns the metrics server options of the manager and
+// the webhook. The metrics are served via TLS and require an authenticated and
+// authorized client, like the ones of the daemon. No certificate is mounted
+// for these components, so the server uses a self-signed one.
+func secureMetricsOptions(tlsOpts []func(*tls.Config)) metricsserver.Options {
+	return metricsserver.Options{
+		BindAddress:    fmt.Sprintf(":%d", metricsPort),
+		SecureServing:  true,
+		FilterProvider: metricsfilters.WithAuthenticationAndAuthorization,
+		TLSOpts:        tlsOpts,
+	}
+}
+
 // setupManagerWithTLSWatcher sets up TLS watching for a manager and starts it.
 // The sigHandler parameter should be obtained from ctrl.SetupSignalHandler() in the caller.
 func setupManagerWithTLSWatcher(
@@ -1160,6 +1175,7 @@ func runWebhook(ctx *cli.Context, info *version.Info) error {
 		LeaderElection:   true,
 		LeaderElectionID: "security-profiles-operator-webhook-lock",
 		WebhookServer:    webhookServer,
+		Metrics:          secureMetricsOptions(webhookTLSOpts),
 	}
 
 	mgr, err := ctrl.NewManager(cfg, ctrlOpts)
