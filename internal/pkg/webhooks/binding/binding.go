@@ -113,6 +113,8 @@ func initContainerMap(m *sync.Map, spec *corev1.PodSpec) {
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=coordination.k8s.io,namespace=security-profiles-operator,resources=leases,verbs=create
 // +kubebuilder:rbac:groups=coordination.k8s.io,namespace=security-profiles-operator,resourceNames=security-profiles-operator-webhook-lock,resources=leases,verbs=get;patch;update
+// +kubebuilder:rbac:groups=config.openshift.io,resources=clusteroperators,verbs=get
+// +kubebuilder:rbac:groups=config.openshift.io,resources=apiservers,verbs=get;list;watch
 
 // OpenShift (This is ignored in other distros):
 //nolint:lll // required for kubebuilder

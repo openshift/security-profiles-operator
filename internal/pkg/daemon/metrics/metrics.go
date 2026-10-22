@@ -32,6 +32,8 @@ import (
 // Metrics proxy required permissions
 // +kubebuilder:rbac:groups=authentication.k8s.io,resources=tokenreviews;subjectaccessreviews,verbs=create
 // +kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create
+// +kubebuilder:rbac:groups=config.openshift.io,resources=clusteroperators,verbs=get
+// +kubebuilder:rbac:groups=config.openshift.io,resources=apiservers,verbs=get;list;watch
 
 const (
 	metricNamespace = "security_profiles_operator"
