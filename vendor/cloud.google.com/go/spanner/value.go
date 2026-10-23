@@ -1051,6 +1051,85 @@ func (n *PGNumeric) UnmarshalJSON(payload []byte) error {
 	return nil
 }
 
+// Value implements the driver.Valuer interface.
+func (n PGNumeric) Value() (driver.Value, error) {
+	if n.IsNull() {
+		return nil, nil
+	}
+	return n.Numeric, nil
+}
+
+// Scan implements the sql.Scanner interface.
+func (n *PGNumeric) Scan(value interface{}) error {
+	if value == nil {
+		n.Numeric, n.Valid = "", false
+		return nil
+	}
+	n.Valid = true
+	switch p := value.(type) {
+	default:
+		return spannerErrorf(codes.InvalidArgument, "invalid type for PGNumeric: %v", p)
+	case *big.Rat:
+		if p == nil {
+			n.Numeric, n.Valid = "", false
+		} else {
+			n.Numeric = NumericString(p)
+		}
+	case big.Rat:
+		n.Numeric = NumericString(&p)
+	case *NullNumeric:
+		if p == nil {
+			n.Numeric, n.Valid = "", false
+		} else {
+			if p.Valid {
+				n.Numeric = p.String()
+			} else {
+				n.Numeric = ""
+			}
+			n.Valid = p.Valid
+		}
+	case NullNumeric:
+		if p.Valid {
+			n.Numeric = p.String()
+		} else {
+			n.Numeric = ""
+		}
+		n.Valid = p.Valid
+	case string:
+		n.Numeric = p
+		n.Valid = true
+	case *string:
+		if p == nil {
+			n.Numeric, n.Valid = "", false
+		} else {
+			n.Numeric = *p
+			n.Valid = true
+		}
+	case float32:
+		n.Numeric = strconv.FormatFloat(float64(p), 'f', 9, 32)
+	case *float32:
+		if p == nil {
+			n.Numeric, n.Valid = "", false
+		} else {
+			n.Numeric = strconv.FormatFloat(float64(*p), 'f', 9, 32)
+		}
+	case float64:
+		n.Numeric = strconv.FormatFloat(p, 'f', 9, 64)
+	case *float64:
+		if p == nil {
+			n.Numeric, n.Valid = "", false
+		} else {
+			n.Numeric = strconv.FormatFloat(*p, 'f', 9, 64)
+		}
+	}
+	return nil
+}
+
+// GormDataType is used by gorm to determine the default data type for fields with this type.
+func (n PGNumeric) GormDataType() string {
+	return "numeric"
+}
+
 // NullProtoMessage represents a Cloud Spanner PROTO that may be NULL.
 // To write a NULL value using NullProtoMessage set ProtoMessageVal to typed nil and set Valid to true.
 type NullProtoMessage struct {
@@ -1285,6 +1364,11 @@ func (n *PGJsonB) UnmarshalJSON(payload []byte) error {
 	return nil
 }
 
+// GormDataType is used by gorm to determine the default data type for fields with this type.
+func (n PGJsonB) GormDataType() string {
+	return "jsonb"
+}
+
 func nulljson(valid bool, v interface{}) ([]byte, error) {
 	if !valid {
 		return []byte("null"), nil
@@ -1414,6 +1498,41 @@ func parseNullTime(v *proto3.Value, p *NullTime, code sppb.TypeCode, isNull bool
 	p.Valid = true
 	p.Time = y
 	return nil
+}
+
+// tryDecodePointerToDecoder attempts to decode a **T where *T implements Decoder
+// Returns (handled, error) - handled=true if this case was processed
+func tryDecodePointerToDecoder(ptr interface{}, t *sppb.Type, v *proto3.Value, isNull bool) (bool, error) {
+	rv := reflect.ValueOf(ptr)
+	if rv.Kind() != reflect.Ptr || rv.Type().Elem().Kind() != reflect.Ptr {
+		return false, nil
+	}
+
+	elemType := rv.Type().Elem().Elem()
+	if !reflect.PointerTo(elemType).Implements(reflect.TypeOf((*Decoder)(nil)).Elem()) {
+		return false, nil
+	}
+
+	if isNull {
+		rv.Elem().Set(reflect.Zero(rv.Elem().Type()))
+		return true, nil
+	}
+
+	// Create a new instance of the underlying type
+	newInstance := reflect.New(elemType)
+	if decodedVal, ok := newInstance.Interface().(Decoder); ok {
+		x, err := getGenericValue(t, v)
+		if err != nil {
+			return true, err
+		}
+		if err := decodedVal.DecodeSpanner(x); err != nil {
+			return true, err
+		}
+		rv.Elem().Set(newInstance)
+		return true, nil
+	}
+
+	return false, nil
 }
 
 // decodeValue decodes a protobuf Value into a pointer to a Go value, as
@@ -2197,7 +2316,7 @@ func decodeValue(v *proto3.Value, t *sppb.Type, ptr interface{}, opts ...DecodeO
 		if p == nil {
 			return errNilDst(p)
 		}
-		if acode != sppb.TypeCode_JSON || typeAnnotation != sppb.TypeAnnotationCode_PG_JSONB {
+		if acode != sppb.TypeCode_JSON || atypeAnnotation != sppb.TypeAnnotationCode_PG_JSONB {
 			return errTypeMismatch(code, acode, ptr)
 		}
 		if isNull {
@@ -2470,6 +2589,10 @@ func decodeValue(v *proto3.Value, t *sppb.Type, ptr interface{}, opts ...DecodeO
 			}
 			return decodedVal.DecodeSpanner(x)
 		}
+		// Check if the pointer is a pointer to a pointer, and if the underlying type implements Decoder
+		if handled, err := tryDecodePointerToDecoder(ptr, t, v, isNull); handled {
+			return err
+		}
 		if p == nil {
 			return errNilDst(p)
 		}
@@ -2720,6 +2843,10 @@ func decodeValue(v *proto3.Value, t *sppb.Type, ptr interface{}, opts ...DecodeO
 				return err
 			}
 			return decodedVal.DecodeSpanner(x)
+		}
+		// Check if the pointer is a pointer to a pointer, and if the underlying type implements Decoder
+		if handled, err := tryDecodePointerToDecoder(ptr, t, v, isNull); handled {
+			return err
 		}
 
 		// Check if the pointer is a variant of a base type.
@@ -5549,12 +5676,30 @@ func encodeProtoEnumArray(len int, at func(int) reflect.Value) (*proto3.Value, e
 	return listProto(vs...), nil
 }
 
+// spannerTag contains metadata about a struct field's spanner tag.
+type spannerTag struct {
+	// ReadOnly is true if the field should be excluded from writes (read-only).
+	ReadOnly bool
+}
+
 func spannerTagParser(t reflect.StructTag) (name string, keep bool, other interface{}, err error) {
 	if s := t.Get("spanner"); s != "" {
 		if s == "-" {
 			return "", false, nil, nil
 		}
-		return s, true, nil, nil
+		if s == "->" {
+			tag := spannerTag{ReadOnly: true}
+			return "", true, tag, nil
+		}
+		parts := strings.Split(s, ";")
+		name = parts[0]
+		tag := spannerTag{}
+		for _, part := range parts[1:] {
+			if part == "->" || strings.ToLower(part) == "readonly" {
+				tag.ReadOnly = true
+			}
+		}
+		return name, true, tag, nil
 	}
 	return "", true, nil, nil
 }

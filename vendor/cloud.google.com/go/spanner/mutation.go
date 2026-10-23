@@ -17,6 +17,7 @@ limitations under the License.
 package spanner
 
 import (
+	"fmt"
 	"math/rand"
 	"reflect"
 	"time"
@@ -24,6 +25,7 @@ import (
 	sppb "cloud.google.com/go/spanner/apiv1/spannerpb"
 	"google.golang.org/grpc/codes"
 	proto3 "google.golang.org/protobuf/types/known/structpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // op is the mutation operation.
@@ -47,10 +49,19 @@ const (
 	// opUpdate updates a row in a table.  If the row does not already
 	// exist, the write or transaction fails.
 	opUpdate
+	// opSend sends a message to a queue. Users need to specify the queue
+	// name, a key, payload, and optionally delivery time and sending
+	// a message.
+	opSend
+	// opAck acks a message in a queue, effectively remove it from the
+	// queue. Users need to specify the queue name and the key, and optionally
+	// a bool value to ignore error if the message does not exist.
+	opAck
 )
 
 // A Mutation describes a modification to one or more Cloud Spanner rows.  The
-// mutation represents an insert, update, delete, etc on a table.
+// mutation represents an insert, update, delete, etc on a table, or send, ack
+// on a queue.
 //
 // Many mutations can be applied in a single atomic commit. For purposes of
 // constraint checking (such as foreign key constraints), the operations can be
@@ -141,6 +152,22 @@ type Mutation struct {
 	// values specifies the new values for the target columns
 	// named by Columns.
 	values []interface{}
+
+	// Queue related fields
+	// Target queue name to be modified
+	queue string
+	// key is the primary key used in send or ack
+	key Key
+	// payload is the content of the message
+	payload interface{}
+	// deliverTime is optionally set for opSend
+	deliverTime time.Time
+	// ignoreNotFound is optionally set for opAck
+	ignoreNotFound bool
+
+	// wrapped is the protobuf mutation that is the source for this Mutation.
+	// This is only set if the [WrapMutation] function was used to create the Mutation.
+	wrapped *sppb.Mutation
 }
 
 // A MutationGroup is a list of Mutation to be committed atomically.
@@ -194,6 +221,11 @@ func structToMutationParams(in interface{}) ([]string, []interface{}, error) {
 	var cols []string
 	var vals []interface{}
 	for _, f := range fields {
+		if f.ParsedTag != nil {
+			if tag, ok := f.ParsedTag.(spannerTag); ok && tag.ReadOnly {
+				continue
+			}
+		}
 		cols = append(cols, f.Name)
 		vals = append(vals, v.FieldByIndex(f.Index).Interface())
 	}
@@ -356,6 +388,90 @@ func Delete(table string, ks KeySet) *Mutation {
 	}
 }
 
+// SendOption specifies optional fields for Send mutation
+type SendOption func(*Mutation)
+
+// AckOption specifies optional fields for Ack mutation
+type AckOption func(*Mutation)
+
+// WithDeliveryTime returns an SendOption to set field `deliverTime`
+func WithDeliveryTime(t time.Time) SendOption {
+	return func(m *Mutation) {
+		m.deliverTime = t
+	}
+}
+
+// Send returns a Mutation to send a message to a queue.
+func Send(queue string, key Key, payload interface{}, opts ...SendOption) *Mutation {
+	m := &Mutation{
+		op:      opSend,
+		queue:   queue,
+		key:     key,
+		payload: payload,
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// WithIgnoreNotFound returns an AckOption to set field `ignoreNotFound`
+func WithIgnoreNotFound(ignoreNotFound bool) AckOption {
+	return func(m *Mutation) {
+		m.ignoreNotFound = ignoreNotFound
+	}
+}
+
+// Ack returns a Mutation to acknowledge (and thus delete) a message from a queue.
+func Ack(queue string, key Key, opts ...AckOption) *Mutation {
+	m := &Mutation{
+		op:    opAck,
+		queue: queue,
+		key:   key,
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// WrapMutation creates a mutation that wraps an existing protobuf mutation object.
+func WrapMutation(proto *sppb.Mutation) (*Mutation, error) {
+	if proto == nil {
+		return nil, fmt.Errorf("protobuf mutation may not be nil")
+	}
+	op, table, queue, err := getTableOrQueueAndSpannerOperation(proto)
+	if err != nil {
+		return nil, err
+	}
+	return &Mutation{
+		op:      op,
+		table:   table,
+		queue:   queue,
+		wrapped: proto,
+	}, nil
+}
+
+func getTableOrQueueAndSpannerOperation(proto *sppb.Mutation) (op, string, string, error) {
+	switch op := proto.Operation.(type) {
+	case *sppb.Mutation_Insert:
+		return opInsert, op.Insert.Table, "", nil
+	case *sppb.Mutation_Update:
+		return opUpdate, op.Update.Table, "", nil
+	case *sppb.Mutation_Replace:
+		return opReplace, op.Replace.Table, "", nil
+	case *sppb.Mutation_Delete_:
+		return opDelete, op.Delete.Table, "", nil
+	case *sppb.Mutation_InsertOrUpdate:
+		return opInsertOrUpdate, op.InsertOrUpdate.Table, "", nil
+	case *sppb.Mutation_Send_:
+		return opSend, "", op.Send.Queue, nil
+	case *sppb.Mutation_Ack_:
+		return opAck, "", op.Ack.Queue, nil
+	}
+	return 0, "", "", spannerErrorf(codes.InvalidArgument, "unknown op type: %T", proto.Operation)
+}
+
 // prepareWrite generates sppb.Mutation_Write from table name, column names
 // and new column values.
 func prepareWrite(table string, columns []string, vals []interface{}) (*sppb.Mutation_Write, error) {
@@ -375,9 +491,13 @@ func errInvdMutationOp(m Mutation) error {
 	return spannerErrorf(codes.InvalidArgument, "Unknown op type: %d", m.op)
 }
 
-// proto converts spanner.Mutation to sppb.Mutation, in preparation to send
+// proto converts a spanner.Mutation to sppb.Mutation, in preparation to send
 // RPCs.
 func (m Mutation) proto() (*sppb.Mutation, error) {
+	if m.wrapped != nil {
+		return m.wrapped, nil
+	}
+
 	var pb *sppb.Mutation
 	switch m.op {
 	case opDelete:
@@ -421,6 +541,43 @@ func (m Mutation) proto() (*sppb.Mutation, error) {
 			return nil, err
 		}
 		pb = &sppb.Mutation{Operation: &sppb.Mutation_Update{Update: w}}
+	case opSend:
+		k, err := encodeValueArray([]interface{}(m.key))
+		if err != nil {
+			return nil, err
+		}
+		p, _, err := encodeValue(m.payload)
+		if err != nil {
+			return nil, err
+		}
+		var dt *timestamppb.Timestamp
+		if !m.deliverTime.IsZero() {
+			dt = timestamppb.New(m.deliverTime)
+		}
+		pb = &sppb.Mutation{
+			Operation: &sppb.Mutation_Send_{
+				Send: &sppb.Mutation_Send{
+					Queue:       m.queue,
+					Key:         k,
+					Payload:     p,
+					DeliverTime: dt,
+				},
+			},
+		}
+	case opAck:
+		k, err := encodeValueArray([]interface{}(m.key))
+		if err != nil {
+			return nil, err
+		}
+		pb = &sppb.Mutation{
+			Operation: &sppb.Mutation_Ack_{
+				Ack: &sppb.Mutation_Ack{
+					Queue:          m.queue,
+					Key:            k,
+					IgnoreNotFound: m.ignoreNotFound,
+				},
+			},
+		}
 	default:
 		return nil, errInvdMutationOp(m)
 	}
@@ -430,41 +587,39 @@ func (m Mutation) proto() (*sppb.Mutation, error) {
 // mutationsProto turns a spanner.Mutation array into a sppb.Mutation array,
 // it is convenient for sending batch mutations to Cloud Spanner.
 func mutationsProto(ms []*Mutation) ([]*sppb.Mutation, *sppb.Mutation, error) {
-	var selectedMutation *Mutation
-	var nonInsertMutations []*Mutation
-
-	l := make([]*sppb.Mutation, 0, len(ms))
-	for _, m := range ms {
-		if m.op != opInsert {
-			nonInsertMutations = append(nonInsertMutations, m)
-		}
-		if selectedMutation == nil {
-			selectedMutation = m
-		}
-		// Track the INSERT mutation with the highest number of values if only INSERT mutation were found
-		if selectedMutation.op == opInsert && m.op == opInsert && len(m.values) > len(selectedMutation.values) {
-			selectedMutation = m
-		}
-
-		// Convert the mutation to sppb.Mutation and add to the list
+	n := len(ms)
+	out := make([]*sppb.Mutation, 0, n)
+	if n == 0 {
+		return out, nil, nil
+	}
+	maxInsertIdx := -1
+	maxInsertVals := -1
+	nonInsertCount := 0
+	selectedNonInsertIdx := -1
+	for i, m := range ms {
 		pb, err := m.proto()
 		if err != nil {
 			return nil, nil, err
 		}
-		l = append(l, pb)
-	}
-	if len(nonInsertMutations) > 0 {
-		selectedMutation = nonInsertMutations[rand.New(rand.NewSource(time.Now().UnixNano())).Intn(len(nonInsertMutations))]
-	}
-	if selectedMutation != nil {
-		m, err := selectedMutation.proto()
-		if err != nil {
-			return nil, nil, err
+		out = append(out, pb)
+		if m.op == opInsert {
+			if v := len(m.values); v >= maxInsertVals {
+				maxInsertVals, maxInsertIdx = v, i
+			}
+			continue
 		}
-		return l, m, nil
+		nonInsertCount++
+		if rand.Intn(nonInsertCount) == 0 {
+			selectedNonInsertIdx = i
+		}
 	}
-
-	return l, nil, nil
+	if nonInsertCount > 0 {
+		return out, out[selectedNonInsertIdx], nil
+	}
+	if maxInsertIdx >= 0 {
+		return out, out[maxInsertIdx], nil
+	}
+	return out, nil, nil
 }
 
 // mutationGroupsProto turns a spanner.MutationGroup array into a
