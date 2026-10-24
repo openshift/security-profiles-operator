@@ -261,12 +261,20 @@ func (n *NullInt64) Scan(value interface{}) error {
 	default:
 		return spannerErrorf(codes.InvalidArgument, "invalid type for NullInt64: %v", p)
 	case *int64:
-		n.Int64 = *p
+		if p == nil {
+			n.Int64, n.Valid = 0, false
+		} else {
+			n.Int64 = *p
+		}
 	case int64:
 		n.Int64 = p
 	case *NullInt64:
-		n.Int64 = p.Int64
-		n.Valid = p.Valid
+		if p == nil {
+			n.Int64, n.Valid = 0, false
+		} else {
+			n.Int64 = p.Int64
+			n.Valid = p.Valid
+		}
 	case NullInt64:
 		n.Int64 = p.Int64
 		n.Valid = p.Valid
@@ -278,6 +286,10 @@ func (n *NullInt64) Scan(value interface{}) error {
 		n.Int64 = i64
 		n.Valid = true
 	case *string:
+		if p == nil {
+			n.Int64, n.Valid = 0, false
+			return nil
+		}
 		i64, err := strconv.ParseInt(*p, 10, 64)
 		if err != nil {
 			return err
@@ -360,12 +372,20 @@ func (n *NullString) Scan(value interface{}) error {
 	default:
 		return spannerErrorf(codes.InvalidArgument, "invalid type for NullString: %v", p)
 	case *string:
-		n.StringVal = *p
+		if p == nil {
+			n.StringVal, n.Valid = "", false
+		} else {
+			n.StringVal = *p
+		}
 	case string:
 		n.StringVal = p
 	case *NullString:
-		n.StringVal = p.StringVal
-		n.Valid = p.Valid
+		if p == nil {
+			n.StringVal, n.Valid = "", false
+		} else {
+			n.StringVal = p.StringVal
+			n.Valid = p.Valid
+		}
 	case NullString:
 		n.StringVal = p.StringVal
 		n.Valid = p.Valid
@@ -440,12 +460,20 @@ func (n *NullFloat64) Scan(value interface{}) error {
 	default:
 		return spannerErrorf(codes.InvalidArgument, "invalid type for NullFloat64: %v", p)
 	case *float64:
-		n.Float64 = *p
+		if p == nil {
+			n.Float64, n.Valid = 0, false
+		} else {
+			n.Float64 = *p
+		}
 	case float64:
 		n.Float64 = p
 	case *NullFloat64:
-		n.Float64 = p.Float64
-		n.Valid = p.Valid
+		if p == nil {
+			n.Float64, n.Valid = 0, false
+		} else {
+			n.Float64 = p.Float64
+			n.Valid = p.Valid
+		}
 	case NullFloat64:
 		n.Float64 = p.Float64
 		n.Valid = p.Valid
@@ -457,6 +485,10 @@ func (n *NullFloat64) Scan(value interface{}) error {
 		n.Float64 = f
 		n.Valid = true
 	case *string:
+		if p == nil {
+			n.Float64, n.Valid = 0, false
+			return nil
+		}
 		f, err := strconv.ParseFloat(*p, 64)
 		if err != nil {
 			return err
@@ -534,12 +566,20 @@ func (n *NullFloat32) Scan(value interface{}) error {
 	default:
 		return spannerErrorf(codes.InvalidArgument, "invalid type for NullFloat32: %v", p)
 	case *float32:
-		n.Float32 = *p
+		if p == nil {
+			n.Float32, n.Valid = 0, false
+		} else {
+			n.Float32 = *p
+		}
 	case float32:
 		n.Float32 = p
 	case *NullFloat32:
-		n.Float32 = p.Float32
-		n.Valid = p.Valid
+		if p == nil {
+			n.Float32, n.Valid = 0, false
+		} else {
+			n.Float32 = p.Float32
+			n.Valid = p.Valid
+		}
 	case NullFloat32:
 		n.Float32 = p.Float32
 		n.Valid = p.Valid
@@ -551,6 +591,10 @@ func (n *NullFloat32) Scan(value interface{}) error {
 		n.Float32 = float32(f)
 		n.Valid = true
 	case *string:
+		if p == nil {
+			n.Float32, n.Valid = 0, false
+			return nil
+		}
 		f, err := strconv.ParseFloat(*p, 32)
 		if err != nil {
 			return err
@@ -628,12 +672,20 @@ func (n *NullBool) Scan(value interface{}) error {
 	default:
 		return spannerErrorf(codes.InvalidArgument, "invalid type for NullBool: %v", p)
 	case *bool:
-		n.Bool = *p
+		if p == nil {
+			n.Bool, n.Valid = false, false
+		} else {
+			n.Bool = *p
+		}
 	case bool:
 		n.Bool = p
 	case *NullBool:
-		n.Bool = p.Bool
-		n.Valid = p.Valid
+		if p == nil {
+			n.Bool, n.Valid = false, false
+		} else {
+			n.Bool = p.Bool
+			n.Valid = p.Valid
+		}
 	case NullBool:
 		n.Bool = p.Bool
 		n.Valid = p.Valid
@@ -645,6 +697,10 @@ func (n *NullBool) Scan(value interface{}) error {
 		n.Bool = f
 		n.Valid = true
 	case *string:
+		if p == nil {
+			n.Bool, n.Valid = false, false
+			return nil
+		}
 		f, err := strconv.ParseBool(*p)
 		if err != nil {
 			return err
@@ -727,12 +783,20 @@ func (n *NullTime) Scan(value interface{}) error {
 	default:
 		return spannerErrorf(codes.InvalidArgument, "invalid type for NullTime: %v", p)
 	case *time.Time:
-		n.Time = *p
+		if p == nil {
+			n.Time, n.Valid = time.Time{}, false
+		} else {
+			n.Time = *p
+		}
 	case time.Time:
 		n.Time = p
 	case *NullTime:
-		n.Time = p.Time
-		n.Valid = p.Valid
+		if p == nil {
+			n.Time, n.Valid = time.Time{}, false
+		} else {
+			n.Time = p.Time
+			n.Valid = p.Valid
+		}
 	case NullTime:
 		n.Time = p.Time
 		n.Valid = p.Valid
@@ -744,6 +808,10 @@ func (n *NullTime) Scan(value interface{}) error {
 		n.Time = f
 		n.Valid = true
 	case *string:
+		if p == nil {
+			n.Time, n.Valid = time.Time{}, false
+			return nil
+		}
 		f, err := time.Parse(time.RFC3339Nano, *p)
 		if err != nil {
 			return err
@@ -831,12 +899,20 @@ func (n *NullDate) Scan(value interface{}) error {
 		n.Date = d
 		n.Valid = true
 	case *civil.Date:
-		n.Date = *p
+		if p == nil {
+			n.Date, n.Valid = civil.Date{}, false
+		} else {
+			n.Date = *p
+		}
 	case civil.Date:
 		n.Date = p
 	case *NullDate:
-		n.Date = p.Date
-		n.Valid = p.Valid
+		if p == nil {
+			n.Date, n.Valid = civil.Date{}, false
+		} else {
+			n.Date = p.Date
+			n.Valid = p.Valid
+		}
 	case NullDate:
 		n.Date = p.Date
 		n.Valid = p.Valid
@@ -916,12 +992,20 @@ func (n *NullNumeric) Scan(value interface{}) error {
 	default:
 		return spannerErrorf(codes.InvalidArgument, "invalid type for NullNumeric: %v", p)
 	case *big.Rat:
-		n.Numeric = *p
+		if p == nil {
+			n.Numeric, n.Valid = big.Rat{}, false
+		} else {
+			n.Numeric = *p
+		}
 	case big.Rat:
 		n.Numeric = p
 	case *NullNumeric:
-		n.Numeric = p.Numeric
-		n.Valid = p.Valid
+		if p == nil {
+			n.Numeric, n.Valid = big.Rat{}, false
+		} else {
+			n.Numeric = p.Numeric
+			n.Valid = p.Valid
+		}
 	case NullNumeric:
 		n.Numeric = p.Numeric
 		n.Valid = p.Valid
@@ -933,6 +1017,10 @@ func (n *NullNumeric) Scan(value interface{}) error {
 		n.Numeric = *y
 		n.Valid = true
 	case *string:
+		if p == nil {
+			n.Numeric, n.Valid = big.Rat{}, false
+			return nil
+		}
 		y, ok := (&big.Rat{}).SetString(*p)
 		if !ok {
 			return errUnexpectedNumericStr(*p)
@@ -1049,6 +1137,85 @@ func (n *PGNumeric) UnmarshalJSON(payload []byte) error {
 	n.Numeric = string(payload)
 	n.Valid = true
 	return nil
+}
+
+// Value implements the driver.Valuer interface.
+func (n PGNumeric) Value() (driver.Value, error) {
+	if n.IsNull() {
+		return nil, nil
+	}
+	return n.Numeric, nil
+}
+
+// Scan implements the sql.Scanner interface.
+func (n *PGNumeric) Scan(value interface{}) error {
+	if value == nil {
+		n.Numeric, n.Valid = "", false
+		return nil
+	}
+	n.Valid = true
+	switch p := value.(type) {
+	default:
+		return spannerErrorf(codes.InvalidArgument, "invalid type for PGNumeric: %v", p)
+	case *big.Rat:
+		if p == nil {
+			n.Numeric, n.Valid = "", false
+		} else {
+			n.Numeric = NumericString(p)
+		}
+	case big.Rat:
+		n.Numeric = NumericString(&p)
+	case *NullNumeric:
+		if p == nil {
+			n.Numeric, n.Valid = "", false
+		} else {
+			if p.Valid {
+				n.Numeric = p.String()
+			} else {
+				n.Numeric = ""
+			}
+			n.Valid = p.Valid
+		}
+	case NullNumeric:
+		if p.Valid {
+			n.Numeric = p.String()
+		} else {
+			n.Numeric = ""
+		}
+		n.Valid = p.Valid
+	case string:
+		n.Numeric = p
+		n.Valid = true
+	case *string:
+		if p == nil {
+			n.Numeric, n.Valid = "", false
+		} else {
+			n.Numeric = *p
+			n.Valid = true
+		}
+	case float32:
+		n.Numeric = strconv.FormatFloat(float64(p), 'f', 9, 32)
+	case *float32:
+		if p == nil {
+			n.Numeric, n.Valid = "", false
+		} else {
+			n.Numeric = strconv.FormatFloat(float64(*p), 'f', 9, 32)
+		}
+	case float64:
+		n.Numeric = strconv.FormatFloat(p, 'f', 9, 64)
+	case *float64:
+		if p == nil {
+			n.Numeric, n.Valid = "", false
+		} else {
+			n.Numeric = strconv.FormatFloat(*p, 'f', 9, 64)
+		}
+	}
+	return nil
+}
+
+// GormDataType is used by gorm to determine the default data type for fields with this type.
+func (n PGNumeric) GormDataType() string {
+	return "numeric"
 }
 
 // NullProtoMessage represents a Cloud Spanner PROTO that may be NULL.
@@ -1206,18 +1373,47 @@ func (n *NullUUID) Scan(value interface{}) error {
 	n.Valid = true
 	switch p := value.(type) {
 	default:
-		return spannerErrorf(codes.InvalidArgument, "invalid type for NullUUID: %v", p)
+		return spannerErrorf(codes.InvalidArgument, "invalid type for NullUUID: %v (%t)", p, p)
 	case *uuid.UUID:
-		n.UUID = *p
+		if p == nil {
+			n.UUID = uuid.Nil
+			n.Valid = false
+		} else {
+			n.UUID = *p
+		}
 	case uuid.UUID:
 		n.UUID = p
 	case *NullUUID:
-		n.UUID = p.UUID
-		n.Valid = p.Valid
+		if p == nil {
+			n.UUID = uuid.Nil
+			n.Valid = false
+		} else {
+			n.UUID = p.UUID
+			n.Valid = p.Valid
+		}
 	case NullUUID:
 		n.UUID = p.UUID
 		n.Valid = p.Valid
+	case string:
+		return n.scanStringValue(p)
+	case *string:
+		if p == nil {
+			n.UUID = uuid.Nil
+			n.Valid = false
+			return nil
+		}
+		return n.scanStringValue(*p)
 	}
+	return nil
+}
+
+func (n *NullUUID) scanStringValue(s string) error {
+	u, err := uuid.Parse(s)
+	if err != nil {
+		return err
+	}
+	n.UUID = u
+	n.Valid = true
 	return nil
 }
 
@@ -1283,6 +1479,11 @@ func (n *PGJsonB) UnmarshalJSON(payload []byte) error {
 	n.Value = v
 	n.Valid = true
 	return nil
+}
+
+// GormDataType is used by gorm to determine the default data type for fields with this type.
+func (n PGJsonB) GormDataType() string {
+	return "jsonb"
 }
 
 func nulljson(valid bool, v interface{}) ([]byte, error) {
@@ -1414,6 +1615,41 @@ func parseNullTime(v *proto3.Value, p *NullTime, code sppb.TypeCode, isNull bool
 	p.Valid = true
 	p.Time = y
 	return nil
+}
+
+// tryDecodePointerToDecoder attempts to decode a **T where *T implements Decoder
+// Returns (handled, error) - handled=true if this case was processed
+func tryDecodePointerToDecoder(ptr interface{}, t *sppb.Type, v *proto3.Value, isNull bool) (bool, error) {
+	rv := reflect.ValueOf(ptr)
+	if rv.Kind() != reflect.Ptr || rv.Type().Elem().Kind() != reflect.Ptr {
+		return false, nil
+	}
+
+	elemType := rv.Type().Elem().Elem()
+	if !reflect.PointerTo(elemType).Implements(reflect.TypeOf((*Decoder)(nil)).Elem()) {
+		return false, nil
+	}
+
+	if isNull {
+		rv.Elem().Set(reflect.Zero(rv.Elem().Type()))
+		return true, nil
+	}
+
+	// Create a new instance of the underlying type
+	newInstance := reflect.New(elemType)
+	if decodedVal, ok := newInstance.Interface().(Decoder); ok {
+		x, err := getGenericValue(t, v)
+		if err != nil {
+			return true, err
+		}
+		if err := decodedVal.DecodeSpanner(x); err != nil {
+			return true, err
+		}
+		rv.Elem().Set(newInstance)
+		return true, nil
+	}
+
+	return false, nil
 }
 
 // decodeValue decodes a protobuf Value into a pointer to a Go value, as
@@ -2197,7 +2433,7 @@ func decodeValue(v *proto3.Value, t *sppb.Type, ptr interface{}, opts ...DecodeO
 		if p == nil {
 			return errNilDst(p)
 		}
-		if acode != sppb.TypeCode_JSON || typeAnnotation != sppb.TypeAnnotationCode_PG_JSONB {
+		if acode != sppb.TypeCode_JSON || atypeAnnotation != sppb.TypeAnnotationCode_PG_JSONB {
 			return errTypeMismatch(code, acode, ptr)
 		}
 		if isNull {
@@ -2470,6 +2706,10 @@ func decodeValue(v *proto3.Value, t *sppb.Type, ptr interface{}, opts ...DecodeO
 			}
 			return decodedVal.DecodeSpanner(x)
 		}
+		// Check if the pointer is a pointer to a pointer, and if the underlying type implements Decoder
+		if handled, err := tryDecodePointerToDecoder(ptr, t, v, isNull); handled {
+			return err
+		}
 		if p == nil {
 			return errNilDst(p)
 		}
@@ -2720,6 +2960,10 @@ func decodeValue(v *proto3.Value, t *sppb.Type, ptr interface{}, opts ...DecodeO
 				return err
 			}
 			return decodedVal.DecodeSpanner(x)
+		}
+		// Check if the pointer is a pointer to a pointer, and if the underlying type implements Decoder
+		if handled, err := tryDecodePointerToDecoder(ptr, t, v, isNull); handled {
+			return err
 		}
 
 		// Check if the pointer is a variant of a base type.
@@ -5549,12 +5793,30 @@ func encodeProtoEnumArray(len int, at func(int) reflect.Value) (*proto3.Value, e
 	return listProto(vs...), nil
 }
 
+// spannerTag contains metadata about a struct field's spanner tag.
+type spannerTag struct {
+	// ReadOnly is true if the field should be excluded from writes (read-only).
+	ReadOnly bool
+}
+
 func spannerTagParser(t reflect.StructTag) (name string, keep bool, other interface{}, err error) {
 	if s := t.Get("spanner"); s != "" {
 		if s == "-" {
 			return "", false, nil, nil
 		}
-		return s, true, nil, nil
+		if s == "->" {
+			tag := spannerTag{ReadOnly: true}
+			return "", true, tag, nil
+		}
+		parts := strings.Split(s, ";")
+		name = parts[0]
+		tag := spannerTag{}
+		for _, part := range parts[1:] {
+			if part == "->" || strings.ToLower(part) == "readonly" {
+				tag.ReadOnly = true
+			}
+		}
+		return name, true, tag, nil
 	}
 	return "", true, nil, nil
 }
