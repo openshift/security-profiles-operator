@@ -119,6 +119,7 @@ func (p *parser) parseDescription() descriptionWithComment {
 		return desc
 	}
 
+	desc.present = true
 	desc.comment = p.comment
 	desc.text = p.next().Value
 	return desc
@@ -231,7 +232,6 @@ func (p *parser) parseFieldsDefinition() (FieldList, *CommentGroup) {
 
 func (p *parser) parseFieldDefinition() *FieldDefinition {
 	var def FieldDefinition
-	def.Position = p.peekPos()
 
 	desc := p.parseDescription()
 	if desc.text != "" {
@@ -241,6 +241,7 @@ func (p *parser) parseFieldDefinition() *FieldDefinition {
 
 	p.peek() // peek to set p.comment
 	def.AfterDescriptionComment = p.comment
+	def.Position = p.peekPos()
 	def.Name = p.parseName()
 	def.Arguments = p.parseArgumentDefs()
 	p.expect(lexer.Colon)
@@ -260,7 +261,6 @@ func (p *parser) parseArgumentDefs() ArgumentDefinitionList {
 
 func (p *parser) parseArgumentDef() *ArgumentDefinition {
 	var def ArgumentDefinition
-	def.Position = p.peekPos()
 
 	desc := p.parseDescription()
 	if desc.text != "" {
@@ -270,6 +270,7 @@ func (p *parser) parseArgumentDef() *ArgumentDefinition {
 
 	p.peek() // peek to set p.comment
 	def.AfterDescriptionComment = p.comment
+	def.Position = p.peekPos()
 	def.Name = p.parseName()
 	p.expect(lexer.Colon)
 	def.Type = p.parseTypeReference()
@@ -282,7 +283,6 @@ func (p *parser) parseArgumentDef() *ArgumentDefinition {
 
 func (p *parser) parseInputValueDef() *FieldDefinition {
 	var def FieldDefinition
-	def.Position = p.peekPos()
 
 	desc := p.parseDescription()
 	if desc.text != "" {
@@ -292,6 +292,7 @@ func (p *parser) parseInputValueDef() *FieldDefinition {
 
 	p.peek() // peek to set p.comment
 	def.AfterDescriptionComment = p.comment
+	def.Position = p.peekPos()
 	def.Name = p.parseName()
 	p.expect(lexer.Colon)
 	def.Type = p.parseTypeReference()
@@ -329,22 +330,26 @@ func (p *parser) parseUnionTypeDefinition(description descriptionWithComment) *D
 	def.AfterDescriptionComment = comment
 	def.Name = p.parseName()
 	def.Directives = p.parseDirectives(true)
-	def.Types = p.parseUnionMemberTypes()
+	def.Types, def.TypePositions = p.parseUnionMemberTypes()
 	return &def
 }
 
-func (p *parser) parseUnionMemberTypes() []string {
-	var types []string
+// parseUnionMemberTypes parses a union's member type list. It returns the member
+// type names alongside their source positions; the two slices have equal length
+// (one position per name), so callers can report errors at a specific member.
+func (p *parser) parseUnionMemberTypes() (types []string, positions []*Position) {
 	if p.skip(lexer.Equals) {
 		// optional leading pipe
 		p.skip(lexer.Pipe)
 
+		positions = append(positions, p.peekPos())
 		types = append(types, p.parseName())
 		for p.skip(lexer.Pipe) && p.err == nil {
+			positions = append(positions, p.peekPos())
 			types = append(types, p.parseName())
 		}
 	}
-	return types
+	return types, positions
 }
 
 func (p *parser) parseEnumTypeDefinition(description descriptionWithComment) *Definition {
@@ -372,7 +377,6 @@ func (p *parser) parseEnumValuesDefinition() (EnumValueList, *CommentGroup) {
 
 func (p *parser) parseEnumValueDefinition() *EnumValueDefinition {
 	var def EnumValueDefinition
-	def.Position = p.peekPos()
 	desc := p.parseDescription()
 	if desc.text != "" {
 		def.BeforeDescriptionComment = desc.comment
@@ -381,7 +385,7 @@ func (p *parser) parseEnumValueDefinition() *EnumValueDefinition {
 
 	p.peek() // peek to set p.comment
 	def.AfterDescriptionComment = p.comment
-
+	def.Position = p.peekPos()
 	def.Name = p.parseName()
 	def.Directives = p.parseDirectives(true)
 
@@ -429,6 +433,11 @@ func (p *parser) parseTypeSystemExtension(doc *SchemaDocument) {
 		doc.Extensions = append(doc.Extensions, p.parseEnumTypeExtension(comment))
 	case "input":
 		doc.Extensions = append(doc.Extensions, p.parseInputObjectTypeExtension(comment))
+	case "directive":
+		doc.DirectiveExtensions = append(
+			doc.DirectiveExtensions,
+			p.parseDirectiveExtension(comment),
+		)
 	default:
 		p.unexpectedError()
 	}
@@ -490,9 +499,10 @@ func (p *parser) parseInterfaceTypeExtension(comment *CommentGroup) *Definition 
 	def.AfterDescriptionComment = comment
 	def.Kind = Interface
 	def.Name = p.parseName()
+	def.Interfaces = p.parseImplementsInterfaces()
 	def.Directives = p.parseDirectives(true)
 	def.Fields, def.EndOfDefinitionComment = p.parseFieldsDefinition()
-	if len(def.Directives) == 0 && len(def.Fields) == 0 {
+	if len(def.Interfaces) == 0 && len(def.Directives) == 0 && len(def.Fields) == 0 {
 		p.unexpectedError()
 	}
 	return &def
@@ -507,7 +517,7 @@ func (p *parser) parseUnionTypeExtension(comment *CommentGroup) *Definition {
 	def.Kind = Union
 	def.Name = p.parseName()
 	def.Directives = p.parseDirectives(true)
-	def.Types = p.parseUnionMemberTypes()
+	def.Types, def.TypePositions = p.parseUnionMemberTypes()
 
 	if len(def.Directives) == 0 && len(def.Types) == 0 {
 		p.unexpectedError()
@@ -558,6 +568,7 @@ func (p *parser) parseDirectiveDefinition(description descriptionWithComment) *D
 	def.AfterDescriptionComment = comment
 	def.Name = p.parseName()
 	def.Arguments = p.parseArgumentDefs()
+	def.Directives = p.parseDirectives(true)
 
 	if peek := p.peek(); peek.Kind == lexer.Name && peek.Value == "repeatable" {
 		def.IsRepeatable = true
@@ -566,6 +577,21 @@ func (p *parser) parseDirectiveDefinition(description descriptionWithComment) *D
 
 	p.expectKeyword("on")
 	def.Locations = p.parseDirectiveLocations()
+	return &def
+}
+
+func (p *parser) parseDirectiveExtension(comment *CommentGroup) *DirectiveDefinition {
+	p.expectKeyword("directive")
+	p.expect(lexer.At)
+
+	var def DirectiveDefinition
+	def.Position = p.peekPos()
+	def.AfterDescriptionComment = comment
+	def.Name = p.parseName()
+	def.Directives = p.parseDirectives(true)
+	if len(def.Directives) == 0 {
+		p.unexpectedError()
+	}
 	return &def
 }
 
@@ -623,6 +649,8 @@ func (p *parser) parseDirectiveLocation() DirectiveLocation {
 		return LocationInputObject
 	case `INPUT_FIELD_DEFINITION`:
 		return LocationInputFieldDefinition
+	case `DIRECTIVE_DEFINITION`:
+		return LocationDirectiveDefinition
 	}
 
 	p.unexpectedToken(name)
@@ -632,4 +660,7 @@ func (p *parser) parseDirectiveLocation() DirectiveLocation {
 type descriptionWithComment struct {
 	text    string
 	comment *CommentGroup
+	// present reports whether a description string was read, so an empty
+	// "" still counts where the grammar forbids a description.
+	present bool
 }

@@ -23,10 +23,39 @@ type parser struct {
 
 	tokenCount    int
 	maxTokenLimit int
+
+	// depth is the number of selection sets, list and object values, and
+	// list types enclosing the current token. It never exceeds
+	// MaxNestingDepth; see enterNested.
+	depth int
 }
+
+// MaxNestingDepth is the deepest that selection sets, list and object
+// values, and list types may nest, all counted together. The parser
+// recurses once per level, and exhausting the goroutine stack is a fatal
+// runtime error that recover cannot catch, so deeper input is rejected with
+// a parse error instead. Real documents nest a few dozen levels; the stack
+// runs out at several hundred thousand.
+const MaxNestingDepth = 1000
 
 func (p *parser) SetMaxTokenLimit(maxToken int) {
 	p.maxTokenLimit = maxToken
+}
+
+// enterNested reports whether the parser may descend one more nesting
+// level. If so, it increments depth and the caller must defer leaveNested.
+// If not, it records an error and leaves depth unchanged.
+func (p *parser) enterNested() bool {
+	if p.depth >= MaxNestingDepth {
+		p.error(p.peek(), "exceeded maximum nesting depth of %d", MaxNestingDepth)
+		return false
+	}
+	p.depth++
+	return true
+}
+
+func (p *parser) leaveNested() {
+	p.depth--
 }
 
 func (p *parser) consumeComment() (*ast.Comment, bool) {
@@ -91,7 +120,7 @@ func (p *parser) peek() lexer.Token {
 	return p.peekToken
 }
 
-func (p *parser) error(tok lexer.Token, format string, args ...interface{}) {
+func (p *parser) error(tok lexer.Token, format string, args ...any) {
 	if p.err != nil {
 		return
 	}
@@ -165,7 +194,7 @@ func (p *parser) unexpectedToken(tok lexer.Token) {
 	p.error(tok, "Unexpected %s", tok.String())
 }
 
-func (p *parser) many(start lexer.Type, end lexer.Type, cb func()) {
+func (p *parser) many(start, end lexer.Type, cb func()) {
 	hasDef := p.skip(start)
 	if !hasDef {
 		return
@@ -177,7 +206,7 @@ func (p *parser) many(start lexer.Type, end lexer.Type, cb func()) {
 	p.next()
 }
 
-func (p *parser) some(start lexer.Type, end lexer.Type, cb func()) *ast.CommentGroup {
+func (p *parser) some(start, end lexer.Type, cb func()) *ast.CommentGroup {
 	hasDef := p.skip(start)
 	if !hasDef {
 		return nil
