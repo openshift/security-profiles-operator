@@ -341,6 +341,17 @@ func (e *e2e) deployOperator(manifest string) {
 		e.updateManifest(manifest, "enableSelinux: false", "enableSelinux: true")
 	}
 
+	// OpenShift has no cert-manager, so let its service CA operator inject the
+	// CA bundle of the webhook serving certificate into the CRD conversion
+	// webhooks instead.
+	if clusterType == clusterTypeOpenShift {
+		e.updateManifest(
+			manifest,
+			"cert-manager.io/inject-ca-from: .*",
+			`service.beta.openshift.io/inject-cabundle: "true"`,
+		)
+	}
+
 	// Deploy the operator
 	e.logf("Deploying operator")
 	e.kubectl("create", "-f", manifest)
