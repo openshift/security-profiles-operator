@@ -2,9 +2,8 @@ package rules
 
 import (
 	"github.com/vektah/gqlparser/v2/ast"
-
 	//nolint:staticcheck // Validator rules each use dot imports for convenience.
-	. "github.com/vektah/gqlparser/v2/validator"
+	. "github.com/vektah/gqlparser/v2/validator/core"
 )
 
 const maxListsDepth = 3
@@ -29,7 +28,11 @@ var MaxIntrospectionDepth = Rule{
 	},
 }
 
-func checkDepthSelectionSet(selectionSet ast.SelectionSet, visitedFragments map[string]bool, depth int) bool {
+func checkDepthSelectionSet(
+	selectionSet ast.SelectionSet,
+	visitedFragments map[string]bool,
+	depth int,
+) bool {
 	for _, child := range selectionSet {
 		if field, ok := child.(*ast.Field); ok {
 			if checkDepthField(field, visitedFragments, depth) {
@@ -63,7 +66,11 @@ func checkDepthField(field *ast.Field, visitedFragments map[string]bool, depth i
 	return checkDepthSelectionSet(field.SelectionSet, visitedFragments, depth)
 }
 
-func checkDepthFragmentSpread(fragmentSpread *ast.FragmentSpread, visitedFragments map[string]bool, depth int) bool {
+func checkDepthFragmentSpread(
+	fragmentSpread *ast.FragmentSpread,
+	visitedFragments map[string]bool,
+	depth int,
+) bool {
 	fragmentName := fragmentSpread.Name
 	if visited, ok := visitedFragments[fragmentName]; ok && visited {
 		// Fragment cycles are handled by `NoFragmentCyclesRule`.
@@ -83,8 +90,4 @@ func checkDepthFragmentSpread(fragmentSpread *ast.FragmentSpread, visitedFragmen
 	visitedFragments[fragmentName] = true
 	defer delete(visitedFragments, fragmentName)
 	return checkDepthSelectionSet(fragment.SelectionSet, visitedFragments, depth)
-}
-
-func init() {
-	AddRule(MaxIntrospectionDepth.Name, MaxIntrospectionDepth.RuleFunc)
 }

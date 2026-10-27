@@ -25,7 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
-	spodv1alpha1 "sigs.k8s.io/security-profiles-operator/api/spod/v1alpha1"
+	spodapi "sigs.k8s.io/security-profiles-operator/api/spod/v1"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/config"
 )
 
@@ -64,7 +64,7 @@ const (
 	DefaultHostProcPath                              = "/proc"
 	SelinuxContainerName                             = "selinuxd"
 	LogEnricherContainerName                         = "log-enricher"
-	DefaultLogEnricherSource                         = "auditd"
+	DefaultLogEnricherSource                         = spodapi.LogEnricherSourceAuditd
 	JsonEnricherContainerName                        = "json-enricher"
 	BpfRecorderContainerName                         = "bpf-recorder"
 	NonRootEnablerContainerName                      = "non-root-enabler"
@@ -76,49 +76,61 @@ const (
 	ContainerPort                              int32 = 9443
 	metricsServerCert                                = "metrics-server-cert"
 	MetricsCertPath                                  = "/var/run/secrets/metrics"
+	SelinuxCustomTemplatesVolumeName                 = "selinux-custom-templates"
+	SelinuxModuleStorePath                           = "/var/lib/selinux"
 )
 
-var DefaultSPOD = &spodv1alpha1.SecurityProfilesOperatorDaemon{
+var DefaultSPOD = &spodapi.SecurityProfilesOperatorDaemon{
 	ObjectMeta: metav1.ObjectMeta{
 		Name:   config.SPOdName,
 		Labels: map[string]string{"app": config.OperatorName},
 	},
-	Spec: spodv1alpha1.SPODSpec{
-		Verbosity:           0,
-		EnableProfiling:     false,
-		EnableSelinux:       nil,
-		EnableLogEnricher:   false,
-		EnableBpfRecorder:   false,
-		EnableAppArmor:      false,
-		StaticWebhookConfig: false,
-		HostProcVolumePath:  DefaultHostProcPath,
-		PriorityClassName:   DefaultPriorityClassName,
-		SelinuxOpts: spodv1alpha1.SelinuxOptions{
-			AllowedSystemProfiles: []string{
-				"container",
+	Spec: spodapi.SPODSpec{
+		Verbosity:                   0,
+		EnableProfiling:             new(bool),
+		EnableMemoryOptimization:    new(bool),
+		EnableInsecureMetricsAccess: new(bool),
+		EnableAppArmor:              new(bool),
+		HostProcVolumePath:          DefaultHostProcPath,
+		Selinux: spodapi.SPODSelinuxConfig{
+			Options: spodapi.SelinuxOptions{
+				AllowedSystemProfiles: []string{
+					"container",
+				},
 			},
 		},
-		Tolerations: []corev1.Toleration{
-			{
-				Key:      "node-role.kubernetes.io/master",
-				Operator: corev1.TolerationOpExists,
-				Effect:   corev1.TaintEffectNoSchedule,
-			},
-			{
-				Key:      "node-role.kubernetes.io/control-plane",
-				Operator: corev1.TolerationOpExists,
-				Effect:   corev1.TaintEffectNoSchedule,
-			},
-			{
-				Key:      "node.kubernetes.io/not-ready",
-				Operator: corev1.TolerationOpExists,
-				Effect:   corev1.TaintEffectNoExecute,
+		Enricher: spodapi.SPODEnricherConfig{
+			EnableLogEnricher:  new(bool),
+			EnableJsonEnricher: new(bool),
+			EnableBpfRecorder:  new(bool),
+			LogEnricherSource:  DefaultLogEnricherSource,
+		},
+		Webhook: spodapi.SPODWebhookConfig{
+			StaticConfig: new(bool),
+		},
+		Security: spodapi.SPODSecurityConfig{
+			DisableOCIArtifactSignatureVerification: new(bool),
+		},
+		Scheduling: spodapi.SPODSchedulingConfig{
+			PriorityClassName: DefaultPriorityClassName,
+			Tolerations: []corev1.Toleration{
+				{
+					Key:      "node-role.kubernetes.io/master",
+					Operator: corev1.TolerationOpExists,
+					Effect:   corev1.TaintEffectNoSchedule,
+				},
+				{
+					Key:      "node-role.kubernetes.io/control-plane",
+					Operator: corev1.TolerationOpExists,
+					Effect:   corev1.TaintEffectNoSchedule,
+				},
+				{
+					Key:      "node.kubernetes.io/not-ready",
+					Operator: corev1.TolerationOpExists,
+					Effect:   corev1.TaintEffectNoExecute,
+				},
 			},
 		},
-		DisableOCIArtifactSignatureVerification: false,
-		JsonEnricherFilters:                     "",
-		LogEnricherFilters:                      "",
-		LogEnricherSource:                       DefaultLogEnricherSource,
 	},
 }
 
@@ -157,6 +169,7 @@ var Manifest = &appsv1.DaemonSet{
 					SeccompProfile: &corev1.SeccompProfile{
 						Type: corev1.SeccompProfileTypeRuntimeDefault,
 					},
+					FSGroup: &userRootless,
 				},
 				InitContainers: []corev1.Container{
 					{
@@ -242,6 +255,7 @@ chmod 750 /etc/selinux.d
 semodule -i /usr/share/selinuxd/templates/*.cil
 semodule -i /opt/spo-profiles/selinuxd.cil
 semodule -i /opt/spo-profiles/selinuxrecording.cil
+semodule -R
 `,
 						},
 						VolumeMounts: []corev1.VolumeMount{
@@ -268,8 +282,9 @@ semodule -i /opt/spo-profiles/selinuxrecording.cil
 							},
 						},
 						SecurityContext: &corev1.SecurityContext{
-							AllowPrivilegeEscalation: &falsely,
+							AllowPrivilegeEscalation: &truly,
 							ReadOnlyRootFilesystem:   &truly,
+							Privileged:               &truly, // Required for semodule -R to reload the kernel policy
 							Capabilities: &corev1.Capabilities{
 								Drop: []corev1.Capability{"ALL"},
 								Add:  []corev1.Capability{"CHOWN", "FOWNER", "FSETID", "DAC_OVERRIDE"},
@@ -397,6 +412,14 @@ semodule -i /opt/spo-profiles/selinuxrecording.cil
 							{
 								Name:  "HOME",
 								Value: HomeDirectory,
+							},
+							{
+								Name: "POD_NAME",
+								ValueFrom: &corev1.EnvVarSource{
+									FieldRef: &corev1.ObjectFieldSelector{
+										FieldPath: "metadata.name",
+									},
+								},
 							},
 						},
 						Ports: []corev1.ContainerPort{
@@ -992,5 +1015,20 @@ func CustomConfigMap(mountPath string, configVolSource *corev1.VolumeSource) (co
 			Name:      volumeName,
 			MountPath: mountPath,
 			ReadOnly:  false,
+		}
+}
+
+func CustomTemplatesVolume(configMapName string) (corev1.Volume, corev1.VolumeMount) {
+	return corev1.Volume{
+			Name: SelinuxCustomTemplatesVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: configMapName},
+				},
+			},
+		}, corev1.VolumeMount{
+			Name:      SelinuxCustomTemplatesVolumeName,
+			MountPath: "/usr/share/selinuxd/templates",
+			ReadOnly:  true,
 		}
 }

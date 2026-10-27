@@ -1,5 +1,4 @@
 //go:build linux && !no_bpf
-// +build linux,!no_bpf
 
 /*
 Copyright 2021 The Kubernetes Authors.
@@ -193,13 +192,9 @@ func (b *BpfRecorder) Run() error {
 
 	b.logger.Info("Connecting to metrics server")
 
-	conn, cancel, err := b.connectMetrics()
+	conn, err := b.connectMetrics()
 	if err != nil {
 		return fmt.Errorf("connect to metrics server: %w", err)
-	}
-
-	if cancel != nil {
-		defer cancel()
 	}
 
 	if conn != nil {
@@ -246,17 +241,17 @@ func (b *BpfRecorder) Run() error {
 	return b.Serve(grpcServer, listener)
 }
 
-func (b *BpfRecorder) connectMetrics() (conn *grpc.ClientConn, cancel context.CancelFunc, err error) {
+func (b *BpfRecorder) connectMetrics() (conn *grpc.ClientConn, err error) {
 	if err := util.Retry(func() (err error) {
-		conn, cancel, err = b.DialMetrics()
+		conn, err = b.DialMetrics()
 		if err != nil {
 			return fmt.Errorf("connecting to local metrics GRPC server: %w", err)
 		}
+
 		client := apimetrics.NewMetricsClient(conn)
 
 		b.metricsClient, err = b.BpfIncClient(client)
 		if err != nil {
-			cancel()
 			if err := b.CloseGRPC(conn); err != nil {
 				b.logger.Error(err, "Unable to close GRPC connection")
 			}
@@ -266,29 +261,24 @@ func (b *BpfRecorder) connectMetrics() (conn *grpc.ClientConn, cancel context.Ca
 
 		return nil
 	}, func(err error) bool { return true }); err != nil {
-		return nil, nil, fmt.Errorf("connect to local GRPC server: %w", err)
+		return nil, fmt.Errorf("connect to local GRPC server: %w", err)
 	}
 
-	return conn, cancel, nil
+	return conn, nil
 }
 
 // Dial can be used to connect to the default GRPC server by creating a new
 // client.
-func Dial() (*grpc.ClientConn, context.CancelFunc, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
-	//nolint:staticcheck // we'll use this API once we have an appropriate alternative
-	conn, err := grpc.DialContext(
-		ctx,
+func Dial() (*grpc.ClientConn, error) {
+	conn, err := grpc.NewClient(
 		"unix://"+config.GRPCServerSocketBpfRecorder,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	if err != nil {
-		cancel()
-
-		return nil, nil, fmt.Errorf("GRPC dial: %w", err)
+		return nil, fmt.Errorf("GRPC dial: %w", err)
 	}
 
-	return conn, cancel, nil
+	return conn, nil
 }
 
 func (b *BpfRecorder) Start(
@@ -429,12 +419,14 @@ func (b *BpfRecorder) getMntnsForProfileWithRetry(profile string) (uint32, error
 		func() error {
 			try++
 			b.logger.Info("Looking up mount namespace for profile", "profile", profile, "try", try)
+
 			if foundMntns, ok := b.getMntnsForProfile(profile); ok {
 				mntns = foundMntns
 				b.logger.Info("Found mount namespace for profile", "profile", profile, "mntns", mntns)
 
 				return nil
 			}
+
 			b.logger.Info("No mount namespace found for profile", "profile", profile)
 
 			return ErrNotFound
@@ -852,10 +844,12 @@ func (b *BpfRecorder) findProfileForContainerID(id string) (string, error) {
 		func() error {
 			try++
 			b.logger.Info("Looking up container ID in cluster", "id", id, "try", try)
+
 			pods, err := b.ListPods(ctx, b.clientset, b.nodeName)
 			if err != nil {
 				return fmt.Errorf("list node pods: %w", err)
 			}
+
 			if pods == nil {
 				return errors.New("no pods found in cluster")
 			}
@@ -906,6 +900,7 @@ func (b *BpfRecorder) findProfileForContainerID(id string) (string, error) {
 						config.ApparmorProfileRecordBpfAnnotationKey,
 					} {
 						key := annotation + containerName
+
 						profile, ok := pod.Annotations[key]
 						if ok && profile != "" {
 							b.logger.Info(
@@ -946,7 +941,9 @@ func (b *BpfRecorder) findProfileForContainerID(id string) (string, error) {
 	return "", fmt.Errorf("container ID not found: %s", id)
 }
 
-// When running outside of Kubernetes as spoc, we have the use case of waiting for a specific PID to exit.
+// WaitForPidExit waits for a specific PID to exit.
+// When running outside of Kubernetes as spoc, we have the use case of
+// waiting for a specific PID to exit.
 func (b *BpfRecorder) WaitForPidExit(ctx context.Context, pid uint32) error {
 	d, _ := b.recordedExits.LoadOrStore(pid, make(chan bool))
 	done, ok := d.(chan bool)

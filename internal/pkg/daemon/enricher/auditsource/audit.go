@@ -96,17 +96,20 @@ func (a *AuditdSource) TailErr() error {
 // type IDs are defined at https://elixir.bootlin.com/linux/latest/source/include/uapi/linux/audit.h
 var (
 	seccompLineRegex = regexp.MustCompile(
-		`(type=SECCOMP|audit:.+type=1326).+audit\((.+)\).+pid=(\b\d+\b).+exe="(.+)".+syscall=(\b\d+\b).*`,
+		// Fixed audit:.*?type prefix to allow spaces.
+		`(type=SECCOMP|audit:.*?type=1326).*?audit\(([^)]+)\).*?pid=(\d+).*?exe="([^"]*)".*?syscall=(\d+).*`,
 	)
 	selinuxLineRegex = regexp.MustCompile(
-		`type=AVC.+audit\((.+)\).+{ (.+) }.+pid=(\b\d+\b).*scontext=(.+) tcontext=(.+) tclass=(\b\w+\b).*`,
+		// Fixed \{\s*(.*?)\s*\} to drop trailing spaces inside the perm brackets.
+		`type=AVC.*?audit\(([^)]+)\).*?\{\s*(.*?)\s*\}.*?pid=(\d+).*?scontext=(\S+).*?tcontext=(\S+).*?tclass=(\w+).*`,
 	)
 	apparmorLineRegex = regexp.MustCompile(
 		//nolint:lll // no need to wrap regex
-		`(type=APPARMOR|audit:.+type=1400).+audit\((.+)\).+apparmor="(.+)".+operation="([a-zA-Z0-9\/\-\_]+)"\s(?:info.+)?profile="(.+)".+name="(.+)".+pid=(\b\d+\b).+comm="([a-zA-Z0-9\/\-\_]+)"\s?(.*)?`,
+		// Fixed audit:.*?type prefix to allow spaces.
+		`(type=APPARMOR|audit:.*?type=1400).*?audit\(([^)]+)\).*?apparmor="([^"]*)".*?operation="([^"]*)".*?profile="([^"]*)".*?name="([^"]*)".*?pid=(\d+).*?comm="([^"]*)"\s*(.*)`,
 	)
 
-	uidGidRegex = regexp.MustCompile(`.*\suid=([\d+]).*\sgid=([\d+]).*`)
+	uidGidRegex = regexp.MustCompile(`.*?\suid=(\d+).*?\sgid=(\d+).*`)
 )
 
 var (

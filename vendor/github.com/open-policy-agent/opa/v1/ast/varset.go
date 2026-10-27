@@ -12,7 +12,7 @@ import (
 )
 
 // VarSet represents a set of variables.
-type VarSet map[Var]struct{}
+type VarSet map[Var]struct{ *Location }
 
 // NewVarSet returns a new VarSet containing the specified variables.
 func NewVarSet(vs ...Var) VarSet {
@@ -30,7 +30,16 @@ func NewVarSetOfSize(size int) VarSet {
 
 // Add updates the set to include the variable "v".
 func (s VarSet) Add(v Var) {
-	s[v] = struct{}{}
+	if _, ok := s[v]; !ok {
+		s[v] = struct{ *Location }{}
+	}
+}
+
+func (s VarSet) AddLocation(v Var, l *Location) {
+	if entry, ok := s[v]; ok {
+		entry.Location = l
+		s[v] = entry
+	}
 }
 
 // Contains returns true if the set contains the variable "v".
@@ -50,19 +59,24 @@ func (s VarSet) Copy() VarSet {
 
 // Diff returns a VarSet containing variables in s that are not in vs.
 func (s VarSet) Diff(vs VarSet) VarSet {
-	i := 0
+	r := NewVarSetOfSize(s.DiffCount(vs))
+	for v := range s {
+		if !vs.Contains(v) {
+			r.Add(v)
+			r.AddLocation(v, s[v].Location)
+		}
+	}
+	return r
+}
+
+// DiffCount returns the number of variables in s that are not in vs.
+func (s VarSet) DiffCount(vs VarSet) (i int) {
 	for v := range s {
 		if !vs.Contains(v) {
 			i++
 		}
 	}
-	r := NewVarSetOfSize(i)
-	for v := range s {
-		if !vs.Contains(v) {
-			r.Add(v)
-		}
-	}
-	return r
+	return
 }
 
 // Equal returns true if s contains exactly the same elements as vs.

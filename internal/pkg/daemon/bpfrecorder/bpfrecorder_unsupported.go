@@ -1,5 +1,4 @@
 //go:build !linux || no_bpf
-// +build !linux no_bpf
 
 /*
 Copyright 2021 The Kubernetes Authors.
@@ -46,8 +45,8 @@ func (b *BpfRecorder) Run() error {
 
 // Dial can be used to connect to the default GRPC server by creating a new
 // client.
-func Dial() (*grpc.ClientConn, context.CancelFunc, error) {
-	return nil, nil, errUnsupported
+func Dial() (*grpc.ClientConn, error) {
+	return nil, errUnsupported
 }
 
 func (b *BpfRecorder) Start(
@@ -62,7 +61,7 @@ func (b *BpfRecorder) Stop(
 	return nil, errUnsupported
 }
 
-// SyscallsForNamespace returns the syscall names for the provided PID.
+// SyscallsForProfile returns the syscall names for the provided PID.
 func (b *BpfRecorder) SyscallsForProfile(
 	context.Context, *api.ProfileRequest,
 ) (*api.SyscallsResponse, error) {

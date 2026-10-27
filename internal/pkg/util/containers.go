@@ -18,12 +18,13 @@ package util
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/jellydator/ttlcache/v3"
 )
@@ -40,44 +41,94 @@ var (
 	// ErrContainerIDNotFound is the error returned by ContainerIDForPID if the
 	// cgroup does not contain any container ID.
 	ErrContainerIDNotFound = errors.New("unable to find container ID in cgroup path")
+
+	// errContainerIDSearchFailed is the error returned with a reason by
+	// ContainerIDForPID if it fails to parse the container ID from the logs.
+	errContainerIDSearchFailed = errors.New("failed looking for container ID")
 )
+
+// procFileReader reads a /proc/<pid>/<file> for a given PID, allowing
+// dependency injection in tests.
+type procFileReader func(pid int) ([]byte, error)
 
 // ContainerIDForPID tries to find the 64 digit container ID for the provided
 // PID by using its cgroup. It supports caching via the cache argument.
 func ContainerIDForPID(cache *ttlcache.Cache[string, string], pid int) (string, error) {
-	// Check the cache first
-	item := cache.Get(strconv.Itoa(pid))
+	readFile := func(pid int) ([]byte, error) {
+		return os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	}
+	readCgroup := func(pid int) ([]byte, error) {
+		return os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
+	}
+
+	return containerIDForPID(cache, pid, readFile, readCgroup)
+}
+
+func containerIDForPID(
+	cache *ttlcache.Cache[string, string],
+	pid int,
+	statReader, cgroupReader procFileReader,
+) (string, error) {
+	startTime, err := getProcessStartTimeTicks(pid, statReader)
+	if err != nil {
+		return "", fmt.Errorf("reading proc start time: %w", err)
+	}
+
+	// Combine the pid with the process start time as a cache key to avoid "fork-bomb"
+	// attack which reuses a PID for a different container within the cache TTL.
+	cacheKey := strconv.Itoa(pid) + "_" + startTime
+
+	item := cache.Get(cacheKey)
 	if item != nil {
 		return item.Value(), nil
 	}
 
-	cgroupPath := fmt.Sprintf("/proc/%d/cgroup", pid)
-
-	file, err := os.Open(filepath.Clean(cgroupPath))
+	cgroupData, err := cgroupReader(pid)
 	if err != nil {
 		return "", fmt.Errorf("%w: %w", ErrProcessNotFound, err)
 	}
 
-	defer func() {
-		cerr := file.Close()
-		if err == nil {
-			err = cerr
-		}
-	}()
-
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(bytes.NewReader(cgroupData))
 	for scanner.Scan() {
 		text := scanner.Text()
 
 		if containerIDs := ContainerIDRegex.FindAllString(text, -1); 0 < len(containerIDs) {
 			// Using the last container ID in the cgroup path to support "docker in docker" use cases
 			containerID := containerIDs[len(containerIDs)-1]
-			// Update the cache
-			cache.Set(strconv.Itoa(pid), containerID, ttlcache.DefaultTTL)
+			cache.Set(cacheKey, containerID, ttlcache.DefaultTTL)
 
 			return containerID, nil
 		}
 	}
 
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("%w: %w", errContainerIDSearchFailed, err)
+	}
+
 	return "", ErrContainerIDNotFound
+}
+
+// getProcessStartTimeTicks return the start time for a process.
+func getProcessStartTimeTicks(pid int, reader procFileReader) (string, error) {
+	stat, err := reader(pid)
+	if err != nil {
+		return "", fmt.Errorf("reading proc start time for %d pid: %w", pid, err)
+	}
+
+	// The comm field (field 2) is in parentheses and can contain spaces,
+	// so split after the last ")" to get reliable field indices.
+	raw := string(stat)
+
+	i := strings.LastIndexByte(raw, ')')
+	if i < 0 || i+2 >= len(raw) {
+		return "", fmt.Errorf("invalid proc stat format for pid: %d", pid)
+	}
+	// After ")" the fields are: state(3) ppid(4) ... starttime(22),
+	// which is index 19 in the zero-based slice after ")".
+	fields := strings.Fields(raw[i+2:])
+	if len(fields) < 20 {
+		return "", fmt.Errorf("invalid proc stat format for pid: %d", pid)
+	}
+
+	return fields[19], nil
 }

@@ -14,15 +14,19 @@
 
 GO ?= go
 
-GOLANGCI_LINT_VERSION = v2.4.0
+GOLANGCI_LINT_VERSION = v2.10.1
+KAL_VERSION = v0.0.0-20260518104151-5ebe05f9440b
 REPO_INFRA_VERSION = v0.2.5
 KUSTOMIZE_VERSION = 5.5.0
-OPERATOR_SDK_VERSION ?= v1.37.0
+OPERATOR_SDK_VERSION ?= v1.42.2
+OPM_VERSION ?= v1.65.0
 ZEITGEIST_VERSION = v0.5.4
 MDTOC_VERSION = v1.4.0
 CI_IMAGE ?= golang:$(shell sed -n 's;^go\s\(.*\);\1;p' go.mod)
 
 CONTROLLER_GEN_CMD := CGO_LDFLAGS= $(GO) run $(BUILD_FLAGS) -tags generate sigs.k8s.io/controller-tools/cmd/controller-gen
+
+NIX := nix --extra-experimental-features 'nix-command flakes'
 
 PROJECT := security-profiles-operator
 CLI_BINARY := spoc
@@ -197,7 +201,7 @@ image: ## Build the container image
 image-arm64: ## Build the container image for arm64
 	$(CONTAINER_RUNTIME) build -f $(DOCKERFILE) \
 		--build-arg version=$(VERSION) \
-		--build-arg target=nix/default-arm64.nix \
+		--build-arg target=spo-arm64 \
 		-t $(IMAGE) .
 
 .PHONY: image-cross
@@ -205,7 +209,7 @@ image-cross: ## Build and push the container image manifest
 	hack/image-cross.sh
 
 define nix-build-to
-	nix-build nix/default-$(1).nix
+	$(NIX) build .#spo-$(1)
 	mkdir -p $(BUILD_DIR)/$(1)
 	cp -f result/* $(BUILD_DIR)/$(1)
 endef
@@ -232,12 +236,11 @@ nix-s390x: ## Build the binaries via nix for s390x
 	$(call nix-build-to,s390x)
 
 define nix-build-sign-spoc-to
-	nix-build nix/default-spoc-$(1).nix
+	$(NIX) build .#spoc-$(1)
 	cp -f result/spoc $(BUILD_DIR)/spoc.$(1)
 	cosign sign-blob -y \
 		$(BUILD_DIR)/spoc.$(1) \
-		--output-signature $(BUILD_DIR)/spoc.$(1).sig \
-		--output-certificate $(BUILD_DIR)/spoc.$(1).cert
+		--bundle $(BUILD_DIR)/spoc.$(1).bundle
 	cd $(BUILD_DIR) && sha512sum spoc.$(1) > spoc.$(1).sha512
 endef
 
@@ -251,8 +254,7 @@ nix-spoc: nix-spoc-amd64 nix-spoc-arm64 nix-spoc-ppc64le nix-spoc-s390x ## Build
 		-o $(BUILD_DIR)/spoc.spdx
 	cosign sign-blob -y \
 		$(BUILD_DIR)/spoc.spdx \
-		--output-signature $(BUILD_DIR)/spoc.spdx.sig \
-		--output-certificate $(BUILD_DIR)/spoc.spdx.cert
+		--bundle $(BUILD_DIR)/spoc.spdx.bundle
 
 .PHONY: nix-spoc-amd64
 nix-spoc-amd64: $(BUILD_DIR) ## Build and sign the spoc binary via nix for amd64
@@ -272,8 +274,7 @@ nix-spoc-s390x: $(BUILD_DIR) ## Build and sign the spoc binary via nix for s390x
 
 .PHONY: update-nixpkgs
 update-nixpkgs: ## Update the pinned nixpkgs to the latest master
-	@nix run -f channel:nixpkgs-unstable nix-prefetch-git -- \
-		--no-deepClone https://github.com/nixos/nixpkgs > nix/nixpkgs.json
+	$(NIX) flake update
 
 .PHONY: update-go-mod
 update-go-mod: ## Cleanup, vendor and verify go modules
@@ -381,12 +382,12 @@ update-bpf: clean \
     internal/pkg/daemon/enricher/auditsource/bpf/enricher.bpf.o.arm64
 
 internal/pkg/daemon/bpfrecorder/bpf/recorder.bpf.o.%: $(BPF_RECORDER_FILES) ## Build and update all generated BPF code with nix
-	nix-build nix/default-bpf-$*.nix
+	$(NIX) build .#bpf-$*
 	cp -f result/recorder.bpf.o ./internal/pkg/daemon/bpfrecorder/bpf/recorder.bpf.o.$*
 	chmod 0644 ./internal/pkg/daemon/bpfrecorder/bpf/recorder.bpf.o.$*
 
 internal/pkg/daemon/enricher/auditsource/bpf/enricher.bpf.o.%: $(BPF_ENRICHER_FILES) ## Build and update all generated BPF code with nix
-	nix-build nix/default-bpf-$*.nix
+	$(NIX) build .#bpf-$*
 	cp -f result/enricher.bpf.o ./internal/pkg/daemon/enricher/auditsource/bpf/enricher.bpf.o.$*
 	chmod 0644 ./internal/pkg/daemon/enricher/auditsource/bpf/enricher.bpf.o.$*
 
@@ -418,6 +419,7 @@ verify-boilerplate: $(BUILD_DIR)/verify_boilerplate.py ## Verify the boilerplate
 		--skip api/grpc/bpfrecorder/api.pb.go \
 		--skip api/grpc/enricher/api.pb.go \
 		--skip api/grpc/metrics/api.pb.go \
+		--skip api/common/zz_generated.deepcopy.go \
 		--skip api/apparmorprofile/v1alpha1/zz_generated.deepcopy.go \
 		--skip api/profilebinding/v1alpha1/zz_generated.deepcopy.go \
 		--skip api/profilerecording/v1alpha1/zz_generated.deepcopy.go \
@@ -448,8 +450,8 @@ verify-deployments: deployments ## Verify the generated deployments
 	hack/tree-status
 
 .PHONY: verify-go-lint
-verify-go-lint: $(BUILD_DIR)/golangci-lint ## Verify the golang code by linting
-	GL_DEBUG=gocritic $(BUILD_DIR)/golangci-lint run --build-tags $(LINT_BUILDTAGS)
+verify-go-lint: $(BUILD_DIR)/golangci-lint-kube-api-linter ## Verify the golang code by linting
+	GL_DEBUG=gocritic $(BUILD_DIR)/golangci-lint-kube-api-linter run --build-tags $(LINT_BUILDTAGS)
 
 $(BUILD_DIR)/golangci-lint:
 	export \
@@ -458,7 +460,11 @@ $(BUILD_DIR)/golangci-lint:
 		BINDIR=$(BUILD_DIR) && \
 	curl -sfL $$URL/$$VERSION/install.sh | sh -s $$VERSION
 	$(BUILD_DIR)/golangci-lint version
-	$(BUILD_DIR)/golangci-lint linters
+
+$(BUILD_DIR)/golangci-lint-kube-api-linter: $(BUILD_DIR)/golangci-lint
+	CGO_ENABLED=0 GOFLAGS=-mod=mod $(BUILD_DIR)/golangci-lint custom
+	$(BUILD_DIR)/golangci-lint-kube-api-linter version
+	$(BUILD_DIR)/golangci-lint-kube-api-linter linters
 
 
 .PHONY: verify-dependencies
@@ -626,7 +632,7 @@ ifeq (,$(shell which opm 2>/dev/null))
 	set -e ;\
 	mkdir -p $(dir $(OPM)) ;\
 	OS=$(shell go env GOOS) && ARCH=$(shell go env GOARCH) && \
-	curl -sSLo $(OPM) https://github.com/operator-framework/operator-registry/releases/download/$(OPERATOR_SDK_VERSION)/$${OS}-$${ARCH}-opm ;\
+	curl -sSLo $(OPM) https://github.com/operator-framework/operator-registry/releases/download/$(OPM_VERSION)/$${OS}-$${ARCH}-opm ;\
 	chmod +x $(OPM) ;\
 	}
 else
@@ -648,8 +654,8 @@ catalog-build: opm ## Build a catalog image.
 	$(eval TMP_DIR := $(shell mktemp -d))
 	$(eval CATALOG_DOCKERFILE := $(TMP_DIR).Dockerfile)
 	cp deploy/catalog-preamble.json $(TMP_DIR)/security-profiles-operator-catalog.json
-	$(OPM) $(OPM_EXTRA_ARGS) render $(BUNDLE_IMGS) >> $(TMP_DIR)/security-profiles-operator-catalog.json
-	$(OPM) generate dockerfile $(TMP_DIR)
+	XDG_RUNTIME_DIR=$(TMP_DIR) $(OPM) $(OPM_EXTRA_ARGS) render $(BUNDLE_IMGS) >> $(TMP_DIR)/security-profiles-operator-catalog.json
+	XDG_RUNTIME_DIR=$(TMP_DIR) $(OPM) generate dockerfile $(TMP_DIR)
 	$(CONTAINER_RUNTIME) build -f $(CATALOG_DOCKERFILE) -t $(CATALOG_IMG) $(shell dirname $(TMP_DIR))
 	rm -rf $(TMP_DIR) $(CATALOG_DOCKERFILE)
 

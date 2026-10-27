@@ -4,9 +4,8 @@ import (
 	"fmt"
 
 	"github.com/vektah/gqlparser/v2/ast"
-
 	//nolint:staticcheck // Validator rules each use dot imports for convenience.
-	. "github.com/vektah/gqlparser/v2/validator"
+	. "github.com/vektah/gqlparser/v2/validator/core"
 )
 
 var FragmentsOnCompositeTypesRule = Rule{
@@ -18,7 +17,10 @@ var FragmentsOnCompositeTypesRule = Rule{
 				return
 			}
 
-			message := fmt.Sprintf(`Fragment cannot condition on non composite type "%s".`, inlineFragment.TypeCondition)
+			message := fmt.Sprintf(
+				`Fragment cannot condition on non composite type "%s".`,
+				inlineFragment.TypeCondition,
+			)
 
 			addError(
 				Message("%s", message),
@@ -27,11 +29,16 @@ var FragmentsOnCompositeTypesRule = Rule{
 		})
 
 		observers.OnFragment(func(walker *Walker, fragment *ast.FragmentDefinition) {
-			if fragment.Definition == nil || fragment.TypeCondition == "" || fragment.Definition.IsCompositeType() {
+			if fragment.Definition == nil || fragment.TypeCondition == "" ||
+				fragment.Definition.IsCompositeType() {
 				return
 			}
 
-			message := fmt.Sprintf(`Fragment "%s" cannot condition on non composite type "%s".`, fragment.Name, fragment.TypeCondition)
+			message := fmt.Sprintf(
+				`Fragment "%s" cannot condition on non composite type "%s".`,
+				fragment.Name,
+				fragment.TypeCondition,
+			)
 
 			addError(
 				Message("%s", message),
@@ -39,8 +46,4 @@ var FragmentsOnCompositeTypesRule = Rule{
 			)
 		})
 	},
-}
-
-func init() {
-	AddRule(FragmentsOnCompositeTypesRule.Name, FragmentsOnCompositeTypesRule.RuleFunc)
 }

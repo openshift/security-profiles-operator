@@ -32,7 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	spodv1alpha1 "sigs.k8s.io/security-profiles-operator/api/spod/v1alpha1"
+	spodapi "sigs.k8s.io/security-profiles-operator/api/spod/v1"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/config"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/daemon/metrics"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/manager/spod/bindata"
@@ -75,6 +75,7 @@ func (r *ReconcileSPOd) Setup(
 ) error {
 	r.client = mgr.GetClient()
 	r.log = ctrl.Log.WithName(r.Name())
+	//nolint:staticcheck,nolintlint // TODO: migrate to GetEventRecorder
 	r.record = mgr.GetEventRecorderFor(r.Name())
 	r.clientReader = mgr.GetAPIReader()
 
@@ -95,7 +96,7 @@ func (r *ReconcileSPOd) Setup(
 
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(r.Name()).
-		For(&spodv1alpha1.SecurityProfilesOperatorDaemon{}).
+		For(&spodapi.SecurityProfilesOperatorDaemon{}).
 		Owns(&appsv1.DaemonSet{}).
 		WithEventFilter(predicate.Funcs{
 			CreateFunc:  func(e event.CreateEvent) bool { return isInOperatorNamespace(e.Object) },
@@ -109,7 +110,8 @@ func (r *ReconcileSPOd) Setup(
 func (r *ReconcileSPOd) createConfigIfNotExist(ctx context.Context) error {
 	obj := bindata.DefaultSPOD.DeepCopy()
 	obj.Namespace = config.GetOperatorNamespace()
-	obj.Spec.StaticWebhookConfig = isStaticWebhook(ctx)
+	staticWebhook := isStaticWebhook(ctx)
+	obj.Spec.Webhook.StaticConfig = &staticWebhook
 
 	if err := r.client.Create(ctx, obj); err != nil && !k8serrors.IsAlreadyExists(err) {
 		return fmt.Errorf("create SecurityProfilesOperatorDaemon object: %w", err)
@@ -194,34 +196,14 @@ func (r *ReconcileSPOd) getJsonEnricherVolume(ctx context.Context) (*corev1.Volu
 }
 
 func (r *ReconcileSPOd) getSelinuxdImage(ctx context.Context, node *corev1.Node) (string, error) {
-	operatorCm, err := util.GetOperatorConfigMap(ctx, r.clientReader)
+	selinuxdImage, err := util.GetSelinuxdImage(ctx, r.clientReader, node)
 	if err != nil {
 		return "", err
 	}
 
-	selinuxdImageMapping := operatorCm.Data[util.SelinuxdImageMappingKey]
+	r.log.Info("using selinuxd image", "image", selinuxdImage)
 
-	selinuxdImageEnvVar, err := util.MatchSelinuxdImageJSONMapping(node, []byte(selinuxdImageMapping))
-	if err != nil {
-		return "", fmt.Errorf("matching selinuxd image: %w", err)
-	}
-
-	// not checking selinuxdImageEnvVar is fine here as os.Getenv returns an empty string in that case
-	selinuxdImage := os.Getenv(selinuxdImageEnvVar)
-	if selinuxdImage != "" {
-		r.log.Info("matched selinuxd image against nodeInfo", "image", selinuxdImage)
-
-		return selinuxdImage, nil
-	}
-
-	selinuxdImage = os.Getenv(selinuxdImageKey)
-	if selinuxdImage != "" {
-		r.log.Info("using selinuxd image from envVar", "image", selinuxdImage)
-
-		return selinuxdImage, nil
-	}
-
-	return "", errors.New("invalid selinuxd image")
+	return selinuxdImage, nil
 }
 
 func getEffectiveSPOd(dt *daemonTunables) *appsv1.DaemonSet {
@@ -277,7 +259,7 @@ func updateJsonEnricherSpec(dt *daemonTunables, refSPOd *appsv1.DaemonSet) {
 }
 
 func isInOperatorNamespace(obj runtime.Object) bool {
-	spod, ok := obj.(*spodv1alpha1.SecurityProfilesOperatorDaemon)
+	spod, ok := obj.(*spodapi.SecurityProfilesOperatorDaemon)
 	if !ok {
 		return false
 	}

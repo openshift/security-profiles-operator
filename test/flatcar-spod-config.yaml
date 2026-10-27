@@ -1,4 +1,4 @@
-apiVersion: security-profiles-operator.x-k8s.io/v1alpha1
+apiVersion: security-profiles-operator.x-k8s.io/v1
 kind: SecurityProfilesOperatorDaemon
 metadata:
   labels:
@@ -7,17 +7,19 @@ metadata:
   namespace: security-profiles-operator
 spec:
   hostProcVolumePath: /proc
-  selinuxOptions:
-    allowedSystemProfiles:
-    - container
-  selinuxTypeTag: unconfined_t
-  tolerations:
-  - effect: NoSchedule
-    key: node-role.kubernetes.io/master
-    operator: Exists
-  - effect: NoSchedule
-    key: node-role.kubernetes.io/control-plane
-    operator: Exists
-  - effect: NoExecute
-    key: node.kubernetes.io/not-ready
-    operator: Exists
+  selinux:
+    options:
+      allowedSystemProfiles:
+      - container
+    typeTag: unconfined_t
+  scheduling:
+    tolerations:
+    - effect: NoSchedule
+      key: node-role.kubernetes.io/master
+      operator: Exists
+    - effect: NoSchedule
+      key: node-role.kubernetes.io/control-plane
+      operator: Exists
+    - effect: NoExecute
+      key: node.kubernetes.io/not-ready
+      operator: Exists

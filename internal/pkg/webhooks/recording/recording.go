@@ -19,7 +19,6 @@ package recording
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -38,7 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
-	profilerecordingv1alpha1 "sigs.k8s.io/security-profiles-operator/api/profilerecording/v1alpha1"
+	profilerecordingapi "sigs.k8s.io/security-profiles-operator/api/profilerecording/v1"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/config"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/util"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/webhooks/utils"
@@ -118,8 +117,16 @@ func (p *podSeccompRecorder) Handle(
 			continue
 		}
 
+		if err := item.ValidateRecorderKindCombination(); err != nil {
+			p.log.Error(err, "Invalid recorder/kind combination",
+				"recording", item.Name,
+			)
+
+			continue
+		}
+
 		selector, err := p.LabelSelectorAsSelector(
-			&item.Spec.PodSelector,
+			item.Spec.PodSelector,
 		)
 		if err != nil {
 			p.log.Error(
@@ -167,7 +174,7 @@ func (p *podSeccompRecorder) Handle(
 }
 
 func (p *podSeccompRecorder) shouldRecordContainer(containerName string,
-	profileRecording *profilerecordingv1alpha1.ProfileRecording,
+	profileRecording *profilerecordingapi.ProfileRecording,
 ) bool {
 	// Allow all containers when no containers are explicitly listed
 	if profileRecording.Spec.Containers == nil {
@@ -180,7 +187,7 @@ func (p *podSeccompRecorder) shouldRecordContainer(containerName string,
 func (p *podSeccompRecorder) updatePod(
 	pod *corev1.Pod,
 	podName string,
-	profileRecording *profilerecordingv1alpha1.ProfileRecording,
+	profileRecording *profilerecordingapi.ProfileRecording,
 ) (podChanged bool, err error) {
 	// Collect containers as references to not copy them during modification
 	ctrs := []*corev1.Container{}
@@ -227,10 +234,15 @@ func (p *podSeccompRecorder) updatePod(
 		}
 
 		if existingValue != value {
-			p.log.Error(
-				errors.New("existing annotation"),
+			// Overwrite the existing value with the expected value to avoid that
+			// an attacker will spoof a profile recording into its own controlled
+			// profile instead of the one expected.
+			pod.Annotations[key] = value
+			podChanged = true
+
+			p.log.Info(
 				fmt.Sprintf(
-					"workload %s already has annotation %s (not mutating to %s).",
+					"workload %s already has annotation %q, overwriting with %q.",
 					podName,
 					existingValue,
 					value,
@@ -243,20 +255,20 @@ func (p *podSeccompRecorder) updatePod(
 }
 
 func (p *podSeccompRecorder) updateSecurityContext(
-	ctr *corev1.Container, pr *profilerecordingv1alpha1.ProfileRecording,
+	ctr *corev1.Container, pr *profilerecordingapi.ProfileRecording,
 ) {
-	if pr.Spec.Recorder != profilerecordingv1alpha1.ProfileRecorderLogs {
+	if pr.Spec.Recorder != profilerecordingapi.ProfileRecorderLogs {
 		// we only need to ensure the special security context if we're tailing
 		// the logs
 		return
 	}
 
 	switch pr.Spec.Kind {
-	case profilerecordingv1alpha1.ProfileRecordingKindSeccompProfile:
+	case profilerecordingapi.ProfileRecordingKindSeccompProfile:
 		p.updateSeccompSecurityContext(ctr, pr)
-	case profilerecordingv1alpha1.ProfileRecordingKindSelinuxProfile:
+	case profilerecordingapi.ProfileRecordingKindSelinuxProfile:
 		p.updateSelinuxSecurityContext(ctr, pr)
-	case profilerecordingv1alpha1.ProfileRecordingKindAppArmorProfile:
+	case profilerecordingapi.ProfileRecordingKindAppArmorProfile:
 		p.updateApparmorSecurityContext(ctr, pr)
 	}
 
@@ -268,7 +280,7 @@ func (p *podSeccompRecorder) updateSecurityContext(
 
 func (p *podSeccompRecorder) updateSeccompSecurityContext(
 	ctr *corev1.Container,
-	pr *profilerecordingv1alpha1.ProfileRecording,
+	pr *profilerecordingapi.ProfileRecording,
 ) {
 	if ctr.SecurityContext == nil {
 		ctr.SecurityContext = &corev1.SecurityContext{}
@@ -293,7 +305,7 @@ func (p *podSeccompRecorder) updateSeccompSecurityContext(
 
 func (p *podSeccompRecorder) updateSelinuxSecurityContext(
 	ctr *corev1.Container,
-	pr *profilerecordingv1alpha1.ProfileRecording,
+	pr *profilerecordingapi.ProfileRecording,
 ) {
 	if ctr.SecurityContext == nil {
 		ctr.SecurityContext = &corev1.SecurityContext{}
@@ -313,9 +325,9 @@ func (p *podSeccompRecorder) updateSelinuxSecurityContext(
 
 func (p *podSeccompRecorder) updateApparmorSecurityContext(
 	ctr *corev1.Container,
-	pr *profilerecordingv1alpha1.ProfileRecording,
+	pr *profilerecordingapi.ProfileRecording,
 ) {
-	if pr.Spec.Recorder != profilerecordingv1alpha1.ProfileRecorderLogs {
+	if pr.Spec.Recorder != profilerecordingapi.ProfileRecorderLogs {
 		return
 	}
 
@@ -328,7 +340,7 @@ func (p *podSeccompRecorder) updateApparmorSecurityContext(
 func (p *podSeccompRecorder) setRecordingReferences(
 	ctx context.Context,
 	op admissionv1.Operation,
-	profileRecording *profilerecordingv1alpha1.ProfileRecording,
+	profileRecording *profilerecordingapi.ProfileRecording,
 	selector labels.Selector,
 	podName string,
 	podLabels labels.Set,
@@ -354,7 +366,7 @@ func (p *podSeccompRecorder) setRecordingReferences(
 func (p *podSeccompRecorder) setActiveWorkloads(
 	ctx context.Context,
 	op admissionv1.Operation,
-	profileRecording *profilerecordingv1alpha1.ProfileRecording,
+	profileRecording *profilerecordingapi.ProfileRecording,
 	selector labels.Selector,
 	podName string,
 	podLabels labels.Set,
@@ -374,7 +386,7 @@ func (p *podSeccompRecorder) setActiveWorkloads(
 func (p *podSeccompRecorder) setFinalizers(
 	ctx context.Context,
 	op admissionv1.Operation,
-	profileRecording *profilerecordingv1alpha1.ProfileRecording,
+	profileRecording *profilerecordingapi.ProfileRecording,
 	selector labels.Selector,
 	podLabels labels.Set,
 ) error {
@@ -392,11 +404,11 @@ func (p *podSeccompRecorder) setFinalizers(
 }
 
 func (p *podSeccompRecorder) warnEventIfContainerPrivileged(
-	profileRecording *profilerecordingv1alpha1.ProfileRecording,
+	profileRecording *profilerecordingapi.ProfileRecording,
 	ctr *corev1.Container,
 	pod *corev1.Pod,
 ) {
-	if profileRecording.Spec.Recorder != profilerecordingv1alpha1.ProfileRecorderLogs {
+	if profileRecording.Spec.Recorder != profilerecordingapi.ProfileRecorderLogs {
 		return
 	}
 
@@ -413,7 +425,7 @@ func (p *podSeccompRecorder) warnEventIfContainerPrivileged(
 // warnEventIfNameTooLong warns the user if the name of the profile recording is too long or otherwise does
 // not conform to the Kubernetes naming conventions for labels.
 func (p *podSeccompRecorder) warnEventIfNameTooLong(
-	profileRecording *profilerecordingv1alpha1.ProfileRecording,
+	profileRecording *profilerecordingapi.ProfileRecording,
 ) {
 	errs := validation.IsDNS1123Label(profileRecording.Name)
 	if len(errs) == 0 {

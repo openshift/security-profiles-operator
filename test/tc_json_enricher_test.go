@@ -38,7 +38,7 @@ func (e *e2e) testCaseJsonEnricherFileOptions([]string) {
 	e.logf("Creating test profile for JSON Enricher")
 
 	profile := fmt.Sprintf(`
-apiVersion: security-profiles-operator.x-k8s.io/v1beta1
+apiVersion: security-profiles-operator.x-k8s.io/v1
 kind: SeccompProfile
 metadata:
   name: %s
@@ -132,7 +132,7 @@ func (e *e2e) testCaseJsonEnricher([]string) {
 	e.logf("Creating test profile for JSON Enricher")
 
 	profile := fmt.Sprintf(`
-apiVersion: security-profiles-operator.x-k8s.io/v1beta1
+apiVersion: security-profiles-operator.x-k8s.io/v1
 kind: SeccompProfile
 metadata:
   name: %s
@@ -193,12 +193,10 @@ spec:
 
 	nodeName := e.kubectl("get", "nodes",
 		"-o", "jsonpath='{.items[0].metadata.name}'")
-	e.kubectl("debug", "--profile", "general", "node/"+strings.Trim(nodeName, "'"), "--image", "busybox",
-		"-it", "--", "env")
-	// Uncomment after kubectl debug node label.
-	// PR https://github.com/kubernetes/kubernetes/pull/131791.
-	// e.Contains(nodeDebuggingPodEnvOutput, "SPO_EXEC_REQUEST_UID")
-	// e.logf("The env output has SPO_EXEC_REQUEST_UID")
+	nodeDebuggingPodEnvOutput := e.kubectl("debug", "--profile", "general",
+		"node/"+strings.Trim(nodeName, "'"), "--image", "busybox", "-it", "--", "env")
+	e.Contains(nodeDebuggingPodEnvOutput, "SPO_EXEC_REQUEST_UID")
+	e.logf("The env output has SPO_EXEC_REQUEST_UID")
 
 	// Wait for the flush interval.
 	time.Sleep(20 * time.Second)

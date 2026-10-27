@@ -1,5 +1,4 @@
 //go:build linux && !no_bpf
-// +build linux,!no_bpf
 
 /*
 Copyright 2024 The Kubernetes Authors.
@@ -47,6 +46,16 @@ func TestReplaceVarianceInFilePath(t *testing.T) {
 			name: "replace PID and TID",
 			path: "/proc/123/task/12948/attr/apparmor",
 			want: "/proc/@{pid}/task/@{tid}/attr/apparmor",
+		},
+		{
+			name: "replace direct procfs PID access",
+			path: "/10676/mounts",
+			want: "/@{pid}/mounts",
+		},
+		{
+			name: "replace direct procfs PID and TID access",
+			path: "/10676/task/10676/attr/apparmor/exec",
+			want: "/@{pid}/task/@{tid}/attr/apparmor/exec",
 		},
 		{
 			name: "replace container ID",

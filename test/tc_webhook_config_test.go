@@ -48,7 +48,7 @@ func (e *e2e) testCaseWebhookOptionsChange([]string) {
 
 	whDefault := e.getAllWebhookAttributes()
 
-	whPatch := fmt.Sprintf(`{"spec":{"webhookOptions":[{"name":"binding.spo.io","failurePolicy":"Ignore","namespaceSelector":%s, "objectSelector":%s}]}}`, whNamespaceSelector, whObjectSelector) //nolint:lll // very long patch line
+	whPatch := fmt.Sprintf(`{"spec":{"webhook":{"options":[{"name":"binding.spo.io","failurePolicy":"Ignore","namespaceSelector":%s, "objectSelector":%s}]}}}`, whNamespaceSelector, whObjectSelector) //nolint:lll // very long patch line
 	e.logf("Using patch: %s", whPatch)
 	e.kubectlOperatorNS("patch", "spod", "spod", "-p", whPatch, "--type=merge")
 	time.Sleep(defaultWaitTime)
@@ -56,14 +56,14 @@ func (e *e2e) testCaseWebhookOptionsChange([]string) {
 	// check the configured hook
 	whPatchedConfig := e.getAllWebhookAttributes()
 	e.Equal("Ignore", whPatchedConfig[bindingIdx].failurePolicy)
-	e.Equal(whNamespaceSelector, whPatchedConfig[bindingIdx].namespaceSelector)
-	e.Equal(whObjectSelector, whPatchedConfig[bindingIdx].objectSelector)
+	e.JSONEq(whNamespaceSelector, whPatchedConfig[bindingIdx].namespaceSelector)
+	e.JSONEq(whObjectSelector, whPatchedConfig[bindingIdx].objectSelector)
 	// check the other hook did not change
 	e.Equal("Fail", whPatchedConfig[recordingIdx].failurePolicy)
 	e.Equal(whDefault[recordingIdx].namespaceSelector, whPatchedConfig[recordingIdx].namespaceSelector)
 
 	// go back to defaults
-	e.kubectlOperatorNS("patch", "spod", "spod", "-p", `{"spec":{"webhookOptions":[]}}`, "--type=merge")
+	e.kubectlOperatorNS("patch", "spod", "spod", "-p", `{"spec":{"webhook":{"options":[]}}}`, "--type=merge")
 	time.Sleep(defaultWaitTime)
 
 	// check we are back to defaults

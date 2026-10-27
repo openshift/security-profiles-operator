@@ -23,6 +23,7 @@ import (
 // ProfileState defines the state that the profile is in. A profile in this context
 // refers to a SeccompProfile or a SELinux profile, the states are shared between them
 // as well as the management API.
+// +kubebuilder:validation:Enum=Partial;Disabled;Pending;InProgress;Installed;Terminating;Error
 type ProfileState string
 
 const (
@@ -82,11 +83,17 @@ func LowerOfTwoStates(currentLowest, candidate ProfileState) ProfileState {
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
-// SecurityProfileNodeStatus is a per-node status of a security profile
+// SecurityProfileNodeStatus is a per-node status of a security profile.
+//
+// This is the deprecated v1alpha1 API which keeps the exact wire format of
+// the v0.10.x releases (nodeName and status at the root of the object) so
+// that objects persisted by those releases can be converted to v1. Do not
+// change the JSON layout of this type.
 // +kubebuilder:resource:shortName=spns,scope=Cluster
 // +kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:printcolumn:name="Node",type=string,priority=10,JSONPath=`.nodeName`
+// +kubebuilder:deprecatedversion:warning="v1alpha1 SecurityProfileNodeStatus is deprecated, use v1"
 type SecurityProfileNodeStatus struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -97,6 +104,7 @@ type SecurityProfileNodeStatus struct {
 	Status   ProfileState `json:"status,omitempty"`
 }
 
+// SecurityProfileNodeStatusSpec is the empty spec of the v1alpha1 API.
 type SecurityProfileNodeStatusSpec struct{}
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

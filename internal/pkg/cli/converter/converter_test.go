@@ -1,5 +1,4 @@
 //go:build linux && !no_bpf
-// +build linux,!no_bpf
 
 /*
 Copyright 2024 The Kubernetes Authors.
@@ -46,7 +45,7 @@ func TestRun(t *testing.T) {
 		{
 			name: "AppArmor CRD in enforce mode by default",
 			input: `
-apiVersion: security-profiles-operator.x-k8s.io/v1alpha1
+apiVersion: security-profiles-operator.x-k8s.io/v1
 kind: AppArmorProfile
 spec:
   abstract:
@@ -59,10 +58,10 @@ spec:
 		{
 			name: "AppArmor CRD in enforce mode",
 			input: `
-apiVersion: security-profiles-operator.x-k8s.io/v1alpha1
+apiVersion: security-profiles-operator.x-k8s.io/v1
 kind: AppArmorProfile
 spec:
-  complainMode: false
+  mode: Enforce
   abstract:
     filesystem:
       readOnlyPaths:
@@ -73,21 +72,21 @@ spec:
 		{
 			name: "AppArmor CRD in complain mode",
 			input: `
-apiVersion: security-profiles-operator.x-k8s.io/v1alpha1
+apiVersion: security-profiles-operator.x-k8s.io/v1
 kind: AppArmorProfile
 spec:
-  complainMode: true
+  mode: Complain
   abstract:
     filesystem:
       readOnlyPaths:
       - /dev/null
 `,
-			outputContains: []string{`deny /dev/null wl`, `flags=(complain,attach_disconnected,mediate_deleted)`},
+			outputContains: []string{`/dev/null r,`, `flags=(complain,attach_disconnected,mediate_deleted)`},
 		},
 		{
 			name: "seccomp",
 			input: `
-apiVersion: security-profiles-operator.x-k8s.io/v1beta1
+apiVersion: security-profiles-operator.x-k8s.io/v1
 kind: SeccompProfile
 spec:
   defaultAction: SCMP_ACT_ERRNO

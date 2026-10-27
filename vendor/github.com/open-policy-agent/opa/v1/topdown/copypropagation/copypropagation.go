@@ -9,6 +9,7 @@ import (
 	"sort"
 
 	"github.com/open-policy-agent/opa/v1/ast"
+	"github.com/open-policy-agent/opa/v1/util"
 )
 
 // CopyPropagator implements a simple copy propagation optimization to remove
@@ -49,17 +50,7 @@ func (l *localVarGenerator) Generate() ast.Var {
 // New returns a new CopyPropagator that optimizes queries while preserving vars
 // in the livevars set.
 func New(livevars ast.VarSet) *CopyPropagator {
-
-	sorted := make([]ast.Var, 0, len(livevars))
-	for v := range livevars {
-		sorted = append(sorted, v)
-	}
-
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Compare(sorted[j]) < 0
-	})
-
-	return &CopyPropagator{livevars: livevars, sorted: sorted, localvargen: &localVarGenerator{}}
+	return &CopyPropagator{livevars: livevars, sorted: util.KeysSorted(livevars), localvargen: &localVarGenerator{}}
 }
 
 // WithEnsureNonEmptyBody configures p to ensure that results are always non-empty.
@@ -163,7 +154,8 @@ func (p *CopyPropagator) Apply(query ast.Body) ast.Body {
 	// to the current result.
 
 	// Invariant: Live vars are bound (above) and reserved vars are implicitly ground.
-	safe := ast.ReservedVars.Copy()
+	safe := ast.NewVarSetOfSize(len(p.livevars) + len(ast.ReservedVars) + 6)
+	safe.Update(ast.ReservedVars)
 	safe.Update(p.livevars)
 	safe.Update(ast.OutputVarsFromBody(p.compiler, result, safe))
 	unsafe := result.Vars(ast.SafetyCheckVisitorParams).Diff(safe)
@@ -173,9 +165,8 @@ func (p *CopyPropagator) Apply(query ast.Body) ast.Body {
 
 		providesSafety := false
 		outputVars := ast.OutputVarsFromExpr(p.compiler, removedEq, safe)
-		diff := unsafe.Diff(outputVars)
-		if len(diff) < len(unsafe) {
-			unsafe = diff
+		if unsafe.DiffCount(outputVars) < len(unsafe) {
+			unsafe = unsafe.Diff(outputVars)
 			providesSafety = true
 		}
 
@@ -344,7 +335,7 @@ func (p *CopyPropagator) livevarRef(a *ast.Term) bool {
 	}
 
 	for _, v := range p.sorted {
-		if ref[0].Value.Compare(v) == 0 {
+		if v.Equal(ref[0].Value) {
 			return true
 		}
 	}
@@ -403,7 +394,7 @@ func containedIn(value ast.Value, x any) bool {
 			if v, ok := value.(ast.Ref); ok {
 				match = x.HasPrefix(v)
 			} else {
-				match = x.Compare(value) == 0
+				match = x.Equal(value)
 			}
 			if stop || match {
 				stop = true

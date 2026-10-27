@@ -18,7 +18,6 @@ package verify
 import (
 	"context"
 	"crypto"
-	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
@@ -79,12 +78,21 @@ type VerifyBlobAttestationCommand struct {
 
 	SignaturePath       string // Path to the signature
 	UseSignedTimestamps bool
+
+	Digest        string
+	DigestAlg     string
+	HashAlgorithm crypto.Hash
 }
 
 // Exec runs the verification command
 func (c *VerifyBlobAttestationCommand) Exec(ctx context.Context, artifactPath string) (err error) {
 	if options.NOf(c.SignaturePath, c.BundlePath) == 0 {
 		return fmt.Errorf("please specify path to the DSSE envelope signature via --signature or --bundle")
+	}
+
+	// always default to sha256 if the algorithm hasn't been explicitly set
+	if c.HashAlgorithm == 0 {
+		c.HashAlgorithm = crypto.SHA256
 	}
 
 	// Require a certificate/key OR a local bundle file that has the cert.
@@ -124,7 +132,7 @@ func (c *VerifyBlobAttestationCommand) Exec(ctx context.Context, artifactPath st
 	opts := make([]static.Option, 0)
 	switch {
 	case c.KeyRef != "":
-		co.SigVerifier, err = sigs.PublicKeyFromKeyRef(ctx, c.KeyRef)
+		co.SigVerifier, err = sigs.PublicKeyFromKeyRefWithHashAlgo(ctx, c.KeyRef, c.HashAlgorithm)
 		if err != nil {
 			return fmt.Errorf("loading public key: %w", err)
 		}
@@ -155,30 +163,44 @@ func (c *VerifyBlobAttestationCommand) Exec(ctx context.Context, artifactPath st
 	var h v1.Hash
 	var digest []byte
 	if c.CheckClaims {
-		// Get the actual digest of the blob
-		var payload internal.HashReader
-		f, err := os.Open(filepath.Clean(artifactPath))
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		fileInfo, err := f.Stat()
-		if err != nil {
-			return err
-		}
-		err = payloadsize.CheckSize(uint64(fileInfo.Size()))
-		if err != nil {
-			return err
-		}
+		if artifactPath != "" {
+			if c.Digest != "" && c.DigestAlg != "" {
+				ui.Warnf(ctx, "Ignoring provided digest and digestAlg in favor of provided blob")
+			}
+			// Get the actual digest of the blob
+			var payload internal.HashReader
+			f, err := os.Open(filepath.Clean(artifactPath))
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+			fileInfo, err := f.Stat()
+			if err != nil {
+				return err
+			}
+			err = payloadsize.CheckSize(uint64(fileInfo.Size()))
+			if err != nil {
+				return err
+			}
 
-		payload = internal.NewHashReader(f, sha256.New())
-		if _, err := io.ReadAll(&payload); err != nil {
-			return err
-		}
-		digest = payload.Sum(nil)
-		h = v1.Hash{
-			Hex:       hex.EncodeToString(digest),
-			Algorithm: "sha256",
+			payload = internal.NewHashReader(f, crypto.SHA256)
+			if _, err := io.ReadAll(&payload); err != nil {
+				return err
+			}
+			digest = payload.Sum(nil)
+			h = v1.Hash{
+				Hex:       hex.EncodeToString(digest),
+				Algorithm: "sha256",
+			}
+		} else if c.Digest != "" && c.DigestAlg != "" {
+			digest, err = hex.DecodeString(c.Digest)
+			if err != nil {
+				return fmt.Errorf("unable to decode provided digest: %w", err)
+			}
+			h = v1.Hash{
+				Hex:       c.Digest,
+				Algorithm: c.DigestAlg,
+			}
 		}
 		co.ClaimVerifier = cosign.IntotoSubjectClaimVerifier
 	}
@@ -213,9 +235,51 @@ func (c *VerifyBlobAttestationCommand) Exec(ctx context.Context, artifactPath st
 			return err
 		}
 
-		_, err = cosign.VerifyNewBundle(ctx, co, sgverify.WithArtifactDigest(h.Algorithm, digest), bundle)
+		var policyOpt sgverify.ArtifactPolicyOption
+		if c.CheckClaims {
+			policyOpt = sgverify.WithArtifactDigest(h.Algorithm, digest)
+		} else {
+			policyOpt = sgverify.WithoutArtifactUnsafe()
+		}
+
+		_, err = cosign.VerifyNewBundle(ctx, co, policyOpt, bundle)
 		if err != nil {
 			return err
+		}
+
+		sigContent, err := bundle.SignatureContent()
+		if err != nil {
+			return fmt.Errorf("fetching signature content: %w", err)
+		}
+
+		envContent := sigContent.EnvelopeContent()
+		if envContent == nil {
+			return fmt.Errorf("bundle does not contain a DSSE envelope")
+		}
+
+		rawEnv := envContent.RawEnvelope()
+		if rawEnv == nil {
+			return fmt.Errorf("bundle does not contain a raw DSSE envelope")
+		}
+
+		payloadBytes, err := json.Marshal(rawEnv)
+		if err != nil {
+			return fmt.Errorf("marshaling envelope: %w", err)
+		}
+
+		att, err := static.NewAttestation(payloadBytes)
+		if err != nil {
+			return fmt.Errorf("creating attestation from envelope: %w", err)
+		}
+
+		// This checks the predicate type -- if no error is returned and no payload is, then
+		// the attestation is not of the given predicate type.
+		b, gotPredicateType, err := policy.AttestationToPayloadJSON(ctx, c.PredicateType, att)
+		if err != nil {
+			return fmt.Errorf("converting to consumable policy validation: %w", err)
+		}
+		if b == nil {
+			return fmt.Errorf("invalid predicate type, expected %s got %s", c.PredicateType, gotPredicateType)
 		}
 
 		ui.Infof(ctx, "Verified OK")
@@ -284,32 +348,25 @@ func (c *VerifyBlobAttestationCommand) Exec(ctx context.Context, artifactPath st
 		if err != nil {
 			return err
 		}
-		// A certificate is required in the bundle unless we specified with
-		//  --key, --sk, or --certificate.
-		if b.Cert == "" && co.SigVerifier == nil && cert == nil {
-			return fmt.Errorf("bundle does not contain cert for verification, please provide public key")
-		}
-		// We have to condition on this because sign-blob may not output the signing
-		// key to the bundle when there is no tlog upload.
 		if b.Cert != "" {
-			// b.Cert can either be a certificate or public key
 			certBytes := []byte(b.Cert)
 			if isb64(certBytes) {
 				certBytes, _ = base64.StdEncoding.DecodeString(b.Cert)
 			}
 			bundleCert, err := loadCertFromPEM(certBytes)
 			if err != nil {
-				// check if cert is actually a public key
-				co.SigVerifier, err = sigs.LoadPublicKeyRaw(certBytes, crypto.SHA256)
-				if err != nil {
-					return fmt.Errorf("loading verifier from bundle: %w", err)
-				}
+				return fmt.Errorf("loading verifier certificate from bundle: %w", err)
 			}
 			// if a cert was passed in, make sure it matches the cert in the bundle
 			if cert != nil && !cert.Equal(bundleCert) {
 				return fmt.Errorf("the cert passed in does not match the cert in the provided bundle")
 			}
 			cert = bundleCert
+		}
+		// A verifier must come either from a certificate from the bundle,
+		// or provided via --key, --sk, or --certificate.
+		if co.SigVerifier == nil && cert == nil {
+			return fmt.Errorf("bundle does not contain cert for verification, please provide public key")
 		}
 
 		encodedSig, err = base64.StdEncoding.DecodeString(b.Base64Signature)
@@ -386,7 +443,11 @@ func (c *VerifyBlobAttestationCommand) Exec(ctx context.Context, artifactPath st
 
 	// This checks the predicate type -- if no error is returned and no payload is, then
 	// the attestation is not of the given predicate type.
-	if b, gotPredicateType, err := policy.AttestationToPayloadJSON(ctx, c.PredicateType, signature); b == nil && err == nil {
+	b, gotPredicateType, err := policy.AttestationToPayloadJSON(ctx, c.PredicateType, signature)
+	if err != nil {
+		return fmt.Errorf("converting to consumable policy validation: %w", err)
+	}
+	if b == nil {
 		return fmt.Errorf("invalid predicate type, expected %s got %s", c.PredicateType, gotPredicateType)
 	}
 

@@ -27,15 +27,18 @@ import (
 	"github.com/stretchr/testify/require"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
-	profilebasev1alpha1 "sigs.k8s.io/security-profiles-operator/api/profilebase/v1alpha1"
-	"sigs.k8s.io/security-profiles-operator/api/profilebinding/v1alpha1"
-	seccompprofileapi "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1beta1"
-	secprofnodestatusv1alpha1 "sigs.k8s.io/security-profiles-operator/api/secprofnodestatus/v1alpha1"
-	selinuxprofileapi "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1alpha2"
+	apparmorprofileapi "sigs.k8s.io/security-profiles-operator/api/apparmorprofile/v1"
+	profilebaseapi "sigs.k8s.io/security-profiles-operator/api/profilebase/v1"
+	profilebindingapi "sigs.k8s.io/security-profiles-operator/api/profilebinding/v1"
+	seccompprofileapi "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1"
+	secprofnodestatusapi "sigs.k8s.io/security-profiles-operator/api/secprofnodestatus/v1"
+	selinuxprofileapi "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/webhooks/binding/bindingfakes"
 )
 
@@ -44,6 +47,20 @@ var (
 	testPod = &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "pod-",
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:  "container",
+					Image: "foo",
+				},
+			},
+		},
+	}
+	testPodWithLabels = &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: "pod-",
+			Labels:       map[string]string{"app": "bar"},
 		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
@@ -66,8 +83,13 @@ func TestHandle(t *testing.T) {
 	}{
 		{ // success pod unchanged
 			prepare: func(mock *bindingfakes.FakeImpl) {
-				mock.ListProfileBindingsReturns(&v1alpha1.ProfileBindingList{}, nil)
+				mock.ListProfileBindingsReturns(&profilebindingapi.ProfileBindingList{}, nil)
 				mock.DecodePodReturns(&corev1.Pod{}, nil)
+			},
+			request: admission.Request{
+				AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: admissionv1.Create,
+				},
 			},
 			assert: func(resp admission.Response) {
 				require.True(t, resp.Allowed)
@@ -75,9 +97,40 @@ func TestHandle(t *testing.T) {
 				require.Equal(t, "pod unchanged", resp.Result.Message)
 			},
 		},
+		{ // success pod update skips mutation
+			prepare: func(mock *bindingfakes.FakeImpl) {
+				mock.ListProfileBindingsReturns(&profilebindingapi.ProfileBindingList{
+					Items: []profilebindingapi.ProfileBinding{
+						{
+							Spec: profilebindingapi.ProfileBindingSpec{
+								ProfileRef: profilebindingapi.ProfileRef{
+									Kind: profilebindingapi.ProfileBindingKindSeccompProfile,
+								},
+								Image: "foo",
+							},
+						},
+					},
+				}, nil)
+			},
+			request: admission.Request{
+				AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: admissionv1.Update,
+				},
+			},
+			assert: func(resp admission.Response) {
+				require.True(t, resp.Allowed)
+				require.Empty(t, resp.Patches)
+				require.Equal(t, "pod update, skipping mutation", resp.Result.Message)
+			},
+		},
 		{ // error could not list profile bindings
 			prepare: func(mock *bindingfakes.FakeImpl) {
 				mock.ListProfileBindingsReturns(nil, errTest)
+			},
+			request: admission.Request{
+				AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: admissionv1.Create,
+				},
 			},
 			assert: func(resp admission.Response) {
 				require.Equal(t, http.StatusInternalServerError, int(resp.Result.Code))
@@ -85,21 +138,27 @@ func TestHandle(t *testing.T) {
 		},
 		{ // error failed to decode pod
 			prepare: func(mock *bindingfakes.FakeImpl) {
-				mock.ListProfileBindingsReturns(&v1alpha1.ProfileBindingList{}, nil)
+				mock.ListProfileBindingsReturns(&profilebindingapi.ProfileBindingList{}, nil)
 				mock.DecodePodReturns(nil, errTest)
+			},
+			request: admission.Request{
+				AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: admissionv1.Create,
+				},
 			},
 			assert: func(resp admission.Response) {
 				require.Equal(t, http.StatusBadRequest, int(resp.Result.Code))
 			},
 		},
+		//nolint:dupl // test duplicates are fine
 		{ // success pod changed
 			prepare: func(mock *bindingfakes.FakeImpl) {
-				mock.ListProfileBindingsReturns(&v1alpha1.ProfileBindingList{
-					Items: []v1alpha1.ProfileBinding{
+				mock.ListProfileBindingsReturns(&profilebindingapi.ProfileBindingList{
+					Items: []profilebindingapi.ProfileBinding{
 						{
-							Spec: v1alpha1.ProfileBindingSpec{
-								ProfileRef: v1alpha1.ProfileRef{
-									Kind: v1alpha1.ProfileBindingKindSeccompProfile,
+							Spec: profilebindingapi.ProfileBindingSpec{
+								ProfileRef: profilebindingapi.ProfileRef{
+									Kind: profilebindingapi.ProfileBindingKindSeccompProfile,
 								},
 								Image: "foo",
 							},
@@ -109,14 +168,15 @@ func TestHandle(t *testing.T) {
 				mock.DecodePodReturns(testPod.DeepCopy(), nil)
 				mock.GetSeccompProfileReturns(&seccompprofileapi.SeccompProfile{
 					Status: seccompprofileapi.SeccompProfileStatus{
-						StatusBase: profilebasev1alpha1.StatusBase{
-							Status: secprofnodestatusv1alpha1.ProfileStateInstalled,
+						StatusBase: profilebaseapi.StatusBase{
+							Status: secprofnodestatusapi.ProfileStateInstalled,
 						},
 					},
 				}, nil)
 			},
 			request: admission.Request{
 				AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: admissionv1.Create,
 					Object: runtime.RawExtension{
 						Raw: func() []byte {
 							b, err := json.Marshal(testPod.DeepCopy())
@@ -132,16 +192,106 @@ func TestHandle(t *testing.T) {
 				require.Len(t, resp.Patches, 1)
 			},
 		},
+		{ // success pod changed when podSelector matches
+			prepare: func(mock *bindingfakes.FakeImpl) {
+				mock.ListProfileBindingsReturns(&profilebindingapi.ProfileBindingList{
+					Items: []profilebindingapi.ProfileBinding{
+						{
+							Spec: profilebindingapi.ProfileBindingSpec{
+								ProfileRef: profilebindingapi.ProfileRef{
+									Kind: profilebindingapi.ProfileBindingKindSeccompProfile,
+								},
+								Image: "foo",
+								PodSelector: &metav1.LabelSelector{
+									MatchLabels: map[string]string{"app": "bar"},
+								},
+							},
+						},
+					},
+				}, nil)
+				mock.DecodePodReturns(testPodWithLabels.DeepCopy(), nil)
+				mock.GetSeccompProfileReturns(&seccompprofileapi.SeccompProfile{
+					Status: seccompprofileapi.SeccompProfileStatus{
+						StatusBase: profilebaseapi.StatusBase{
+							Status: secprofnodestatusapi.ProfileStateInstalled,
+						},
+					},
+				}, nil)
+			},
+			request: admission.Request{
+				AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: admissionv1.Create,
+					Object: runtime.RawExtension{
+						Raw: func() []byte {
+							b, err := json.Marshal(testPodWithLabels.DeepCopy())
+							require.NoError(t, err)
+
+							return b
+						}(),
+					},
+				},
+			},
+			assert: func(resp admission.Response) {
+				require.True(t, resp.Allowed)
+				require.Len(t, resp.Patches, 1)
+			},
+		},
+		{ // success pod unchanged when podSelector does not match
+			prepare: func(mock *bindingfakes.FakeImpl) {
+				mock.ListProfileBindingsReturns(&profilebindingapi.ProfileBindingList{
+					Items: []profilebindingapi.ProfileBinding{
+						{
+							Spec: profilebindingapi.ProfileBindingSpec{
+								ProfileRef: profilebindingapi.ProfileRef{
+									Kind: profilebindingapi.ProfileBindingKindSeccompProfile,
+								},
+								Image: "foo",
+								PodSelector: &metav1.LabelSelector{
+									MatchLabels: map[string]string{"app": "other"},
+								},
+							},
+						},
+					},
+				}, nil)
+				mock.DecodePodReturns(testPodWithLabels.DeepCopy(), nil)
+				mock.GetSeccompProfileReturns(&seccompprofileapi.SeccompProfile{
+					Status: seccompprofileapi.SeccompProfileStatus{
+						StatusBase: profilebaseapi.StatusBase{
+							Status: secprofnodestatusapi.ProfileStateInstalled,
+						},
+					},
+				}, nil)
+			},
+			request: admission.Request{
+				AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: admissionv1.Create,
+					Object: runtime.RawExtension{
+						Raw: func() []byte {
+							b, err := json.Marshal(testPodWithLabels.DeepCopy())
+							require.NoError(t, err)
+
+							return b
+						}(),
+					},
+				},
+			},
+			assert: func(resp admission.Response) {
+				require.True(t, resp.Allowed)
+				require.Empty(t, resp.Patches)
+				require.Equal(t, "pod unchanged", resp.Result.Message)
+			},
+		},
+		//nolint:dupl // test duplicates are fine
 		{ // success pod changed with * image
 			prepare: func(mock *bindingfakes.FakeImpl) {
-				mock.ListProfileBindingsReturns(&v1alpha1.ProfileBindingList{
-					Items: []v1alpha1.ProfileBinding{
+				mock.ListProfileBindingsReturns(&profilebindingapi.ProfileBindingList{
+					Items: []profilebindingapi.ProfileBinding{
 						{
-							Spec: v1alpha1.ProfileBindingSpec{
-								ProfileRef: v1alpha1.ProfileRef{
-									Kind: v1alpha1.ProfileBindingKindSeccompProfile,
+							Spec: profilebindingapi.ProfileBindingSpec{
+								ProfileRef: profilebindingapi.ProfileRef{
+									Kind: profilebindingapi.ProfileBindingKindSeccompProfile,
 								},
-								Image: v1alpha1.SelectAllContainersImage,
+								Image: profilebindingapi.SelectAllContainersImage,
 							},
 						},
 					},
@@ -149,14 +299,15 @@ func TestHandle(t *testing.T) {
 				mock.DecodePodReturns(testPod.DeepCopy(), nil)
 				mock.GetSeccompProfileReturns(&seccompprofileapi.SeccompProfile{
 					Status: seccompprofileapi.SeccompProfileStatus{
-						StatusBase: profilebasev1alpha1.StatusBase{
-							Status: secprofnodestatusv1alpha1.ProfileStateInstalled,
+						StatusBase: profilebaseapi.StatusBase{
+							Status: secprofnodestatusapi.ProfileStateInstalled,
 						},
 					},
 				}, nil)
 			},
 			request: admission.Request{
 				AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: admissionv1.Create,
 					Object: runtime.RawExtension{
 						Raw: func() []byte {
 							b, err := json.Marshal(testPod.DeepCopy())
@@ -170,16 +321,64 @@ func TestHandle(t *testing.T) {
 			assert: func(resp admission.Response) {
 				require.True(t, resp.Allowed)
 				require.Len(t, resp.Patches, 1)
+			},
+		},
+		{ // success seccomp pod security context overwrite with * image
+			prepare: func(mock *bindingfakes.FakeImpl) {
+				mock.ListProfileBindingsReturns(&profilebindingapi.ProfileBindingList{
+					Items: []profilebindingapi.ProfileBinding{
+						{
+							Spec: profilebindingapi.ProfileBindingSpec{
+								ProfileRef: profilebindingapi.ProfileRef{
+									Kind: profilebindingapi.ProfileBindingKindSeccompProfile,
+								},
+								Image: profilebindingapi.SelectAllContainersImage,
+							},
+						},
+					},
+				}, nil)
+				mock.DecodePodReturns(testPod.DeepCopy(), nil)
+				mock.GetSeccompProfileReturns(&seccompprofileapi.SeccompProfile{
+					Status: seccompprofileapi.SeccompProfileStatus{
+						StatusBase: profilebaseapi.StatusBase{
+							Status: secprofnodestatusapi.ProfileStateInstalled,
+						},
+						LocalhostProfile: "seccomp-test-profile",
+					},
+				}, nil)
+			},
+			request: admission.Request{
+				AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: admissionv1.Create,
+					Object: runtime.RawExtension{
+						Raw: func() []byte {
+							podWithSecurityContext := testPod.DeepCopy()
+							podWithSecurityContext.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{
+								SeccompProfile: &corev1.SeccompProfile{
+									Type: corev1.SeccompProfileTypeUnconfined,
+								},
+							}
+							b, err := json.Marshal(podWithSecurityContext)
+							require.NoError(t, err)
+
+							return b
+						}(),
+					},
+				},
+			},
+			assert: func(resp admission.Response) {
+				require.True(t, resp.Allowed)
+				require.Len(t, resp.Patches, 2) // add localProfile, replace type with Localhost
 			},
 		},
 		{ // selinux success pod changed
 			prepare: func(mock *bindingfakes.FakeImpl) {
-				mock.ListProfileBindingsReturns(&v1alpha1.ProfileBindingList{
-					Items: []v1alpha1.ProfileBinding{
+				mock.ListProfileBindingsReturns(&profilebindingapi.ProfileBindingList{
+					Items: []profilebindingapi.ProfileBinding{
 						{
-							Spec: v1alpha1.ProfileBindingSpec{
-								ProfileRef: v1alpha1.ProfileRef{
-									Kind: v1alpha1.ProfileBindingKindSelinuxProfile,
+							Spec: profilebindingapi.ProfileBindingSpec{
+								ProfileRef: profilebindingapi.ProfileRef{
+									Kind: profilebindingapi.ProfileBindingKindSelinuxProfile,
 								},
 								Image: "foo",
 							},
@@ -189,7 +388,7 @@ func TestHandle(t *testing.T) {
 				mock.DecodePodReturns(testPod.DeepCopy(), nil)
 				mock.GetSelinuxProfileReturns(&selinuxprofileapi.SelinuxProfile{
 					Status: selinuxprofileapi.SelinuxProfileStatus{
-						StatusBase: profilebasev1alpha1.StatusBase{
+						StatusBase: profilebaseapi.StatusBase{
 							Status: "Installed",
 						},
 					},
@@ -197,6 +396,7 @@ func TestHandle(t *testing.T) {
 			},
 			request: admission.Request{
 				AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: admissionv1.Create,
 					Object: runtime.RawExtension{
 						Raw: func() []byte {
 							b, err := json.Marshal(testPod.DeepCopy())
@@ -212,16 +412,16 @@ func TestHandle(t *testing.T) {
 				require.Len(t, resp.Patches, 1)
 			},
 		},
-		{ // selinux success pod changed with * image
+		{ // success selinux pod security context overwrite with * image
 			prepare: func(mock *bindingfakes.FakeImpl) {
-				mock.ListProfileBindingsReturns(&v1alpha1.ProfileBindingList{
-					Items: []v1alpha1.ProfileBinding{
+				mock.ListProfileBindingsReturns(&profilebindingapi.ProfileBindingList{
+					Items: []profilebindingapi.ProfileBinding{
 						{
-							Spec: v1alpha1.ProfileBindingSpec{
-								ProfileRef: v1alpha1.ProfileRef{
-									Kind: v1alpha1.ProfileBindingKindSelinuxProfile,
+							Spec: profilebindingapi.ProfileBindingSpec{
+								ProfileRef: profilebindingapi.ProfileRef{
+									Kind: profilebindingapi.ProfileBindingKindSelinuxProfile,
 								},
-								Image: v1alpha1.SelectAllContainersImage,
+								Image: profilebindingapi.SelectAllContainersImage,
 							},
 						},
 					},
@@ -229,7 +429,55 @@ func TestHandle(t *testing.T) {
 				mock.DecodePodReturns(testPod.DeepCopy(), nil)
 				mock.GetSelinuxProfileReturns(&selinuxprofileapi.SelinuxProfile{
 					Status: selinuxprofileapi.SelinuxProfileStatus{
-						StatusBase: profilebasev1alpha1.StatusBase{
+						StatusBase: profilebaseapi.StatusBase{
+							Status: "Installed",
+						},
+						Usage: "test-usage",
+					},
+				}, nil)
+			},
+			request: admission.Request{
+				AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: admissionv1.Create,
+					Object: runtime.RawExtension{
+						Raw: func() []byte {
+							podWithSecurityContext := testPod.DeepCopy()
+							podWithSecurityContext.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{
+								SELinuxOptions: &corev1.SELinuxOptions{
+									Type: "unconfined",
+								},
+							}
+							b, err := json.Marshal(podWithSecurityContext)
+							require.NoError(t, err)
+
+							return b
+						}(),
+					},
+				},
+			},
+			assert: func(resp admission.Response) {
+				require.True(t, resp.Allowed)
+				require.Len(t, resp.Patches, 2)
+			},
+		},
+		{ // selinux success pod changed with * image
+			prepare: func(mock *bindingfakes.FakeImpl) {
+				mock.ListProfileBindingsReturns(&profilebindingapi.ProfileBindingList{
+					Items: []profilebindingapi.ProfileBinding{
+						{
+							Spec: profilebindingapi.ProfileBindingSpec{
+								ProfileRef: profilebindingapi.ProfileRef{
+									Kind: profilebindingapi.ProfileBindingKindSelinuxProfile,
+								},
+								Image: profilebindingapi.SelectAllContainersImage,
+							},
+						},
+					},
+				}, nil)
+				mock.DecodePodReturns(testPod.DeepCopy(), nil)
+				mock.GetSelinuxProfileReturns(&selinuxprofileapi.SelinuxProfile{
+					Status: selinuxprofileapi.SelinuxProfileStatus{
+						StatusBase: profilebaseapi.StatusBase{
 							Status: "Installed",
 						},
 					},
@@ -237,6 +485,7 @@ func TestHandle(t *testing.T) {
 			},
 			request: admission.Request{
 				AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: admissionv1.Create,
 					Object: runtime.RawExtension{
 						Raw: func() []byte {
 							b, err := json.Marshal(testPod.DeepCopy())
@@ -252,13 +501,216 @@ func TestHandle(t *testing.T) {
 				require.Len(t, resp.Patches, 1)
 			},
 		},
+		//nolint:dupl // test duplicates are fine
+		{ // apparmor success pod changed
+			prepare: func(mock *bindingfakes.FakeImpl) {
+				mock.ListProfileBindingsReturns(&profilebindingapi.ProfileBindingList{
+					Items: []profilebindingapi.ProfileBinding{
+						{
+							Spec: profilebindingapi.ProfileBindingSpec{
+								ProfileRef: profilebindingapi.ProfileRef{
+									Kind: profilebindingapi.ProfileBindingKindAppArmorProfile,
+								},
+								Image: "foo",
+							},
+						},
+					},
+				}, nil)
+				mock.DecodePodReturns(testPod.DeepCopy(), nil)
+				mock.GetAppArmorProfileReturns(&apparmorprofileapi.AppArmorProfile{
+					Status: apparmorprofileapi.AppArmorProfileStatus{
+						StatusBase: profilebaseapi.StatusBase{
+							Status: secprofnodestatusapi.ProfileStateInstalled,
+						},
+					},
+				}, nil)
+			},
+			request: admission.Request{
+				AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: admissionv1.Create,
+					Object: runtime.RawExtension{
+						Raw: func() []byte {
+							b, err := json.Marshal(testPod.DeepCopy())
+							require.NoError(t, err)
+
+							return b
+						}(),
+					},
+				},
+			},
+			assert: func(resp admission.Response) {
+				require.True(t, resp.Allowed)
+				require.Len(t, resp.Patches, 1)
+			},
+		},
+		{ // success apparmor security context overwritten with * image
+			prepare: func(mock *bindingfakes.FakeImpl) {
+				mock.ListProfileBindingsReturns(&profilebindingapi.ProfileBindingList{
+					Items: []profilebindingapi.ProfileBinding{
+						{
+							Spec: profilebindingapi.ProfileBindingSpec{
+								ProfileRef: profilebindingapi.ProfileRef{
+									Kind: profilebindingapi.ProfileBindingKindAppArmorProfile,
+								},
+								Image: profilebindingapi.SelectAllContainersImage,
+							},
+						},
+					},
+				}, nil)
+				mock.DecodePodReturns(testPod.DeepCopy(), nil)
+				mock.GetAppArmorProfileReturns(&apparmorprofileapi.AppArmorProfile{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "test-apparmor-profile",
+					},
+					Status: apparmorprofileapi.AppArmorProfileStatus{
+						StatusBase: profilebaseapi.StatusBase{
+							Status: secprofnodestatusapi.ProfileStateInstalled,
+						},
+					},
+				}, nil)
+			},
+			request: admission.Request{
+				AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: admissionv1.Create,
+					Object: runtime.RawExtension{
+						Raw: func() []byte {
+							podWithSecurityContext := testPod.DeepCopy()
+							podWithSecurityContext.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{
+								AppArmorProfile: &corev1.AppArmorProfile{
+									Type: corev1.AppArmorProfileTypeUnconfined,
+								},
+							}
+							b, err := json.Marshal(podWithSecurityContext)
+							require.NoError(t, err)
+
+							return b
+						}(),
+					},
+				},
+			},
+			assert: func(resp admission.Response) {
+				require.True(t, resp.Allowed)
+				require.Len(t, resp.Patches, 2)
+			},
+		},
+		//nolint:dupl // test duplicates are fine
+		{ // apparmor success pod changed with * image
+			prepare: func(mock *bindingfakes.FakeImpl) {
+				mock.ListProfileBindingsReturns(&profilebindingapi.ProfileBindingList{
+					Items: []profilebindingapi.ProfileBinding{
+						{
+							Spec: profilebindingapi.ProfileBindingSpec{
+								ProfileRef: profilebindingapi.ProfileRef{
+									Kind: profilebindingapi.ProfileBindingKindAppArmorProfile,
+								},
+								Image: profilebindingapi.SelectAllContainersImage,
+							},
+						},
+					},
+				}, nil)
+				mock.DecodePodReturns(testPod.DeepCopy(), nil)
+				mock.GetAppArmorProfileReturns(&apparmorprofileapi.AppArmorProfile{
+					Status: apparmorprofileapi.AppArmorProfileStatus{
+						StatusBase: profilebaseapi.StatusBase{
+							Status: secprofnodestatusapi.ProfileStateInstalled,
+						},
+					},
+				}, nil)
+			},
+			request: admission.Request{
+				AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: admissionv1.Create,
+					Object: runtime.RawExtension{
+						Raw: func() []byte {
+							b, err := json.Marshal(testPod.DeepCopy())
+							require.NoError(t, err)
+
+							return b
+						}(),
+					},
+				},
+			},
+			assert: func(resp admission.Response) {
+				require.True(t, resp.Allowed)
+				require.Len(t, resp.Patches, 1)
+			},
+		},
+		{ // failure get apparmor profile errored
+			prepare: func(mock *bindingfakes.FakeImpl) {
+				mock.ListProfileBindingsReturns(&profilebindingapi.ProfileBindingList{
+					Items: []profilebindingapi.ProfileBinding{
+						{
+							Spec: profilebindingapi.ProfileBindingSpec{
+								ProfileRef: profilebindingapi.ProfileRef{
+									Kind: profilebindingapi.ProfileBindingKindAppArmorProfile,
+								},
+							},
+						},
+					},
+				}, nil)
+				mock.DecodePodReturns(testPod.DeepCopy(), nil)
+				mock.GetAppArmorProfileReturns(nil, errTest)
+			},
+			request: admission.Request{
+				AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: admissionv1.Create,
+					Object: runtime.RawExtension{
+						Raw: func() []byte {
+							b, err := json.Marshal(testPod.DeepCopy())
+							require.NoError(t, err)
+
+							return b
+						}(),
+					},
+				},
+			},
+			assert: func(resp admission.Response) {
+				require.Equal(t, http.StatusInternalServerError, int(resp.Result.Code))
+			},
+		},
+		//nolint:dupl // test duplicates are fine
+		{ // failure get apparmor profile without status
+			prepare: func(mock *bindingfakes.FakeImpl) {
+				mock.ListProfileBindingsReturns(&profilebindingapi.ProfileBindingList{
+					Items: []profilebindingapi.ProfileBinding{
+						{
+							Spec: profilebindingapi.ProfileBindingSpec{
+								ProfileRef: profilebindingapi.ProfileRef{
+									Kind: profilebindingapi.ProfileBindingKindAppArmorProfile,
+								},
+							},
+						},
+					},
+				}, nil)
+				mock.DecodePodReturns(testPod.DeepCopy(), nil)
+				mock.GetAppArmorProfileReturns(&apparmorprofileapi.AppArmorProfile{
+					Status: apparmorprofileapi.AppArmorProfileStatus{},
+				}, nil)
+			},
+			request: admission.Request{
+				AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: admissionv1.Create,
+					Object: runtime.RawExtension{
+						Raw: func() []byte {
+							b, err := json.Marshal(testPod.DeepCopy())
+							require.NoError(t, err)
+
+							return b
+						}(),
+					},
+				},
+			},
+			assert: func(resp admission.Response) {
+				require.Equal(t, http.StatusInternalServerError, int(resp.Result.Code))
+			},
+		},
 		{ // success unsupported kind
 			prepare: func(mock *bindingfakes.FakeImpl) {
-				mock.ListProfileBindingsReturns(&v1alpha1.ProfileBindingList{
-					Items: []v1alpha1.ProfileBinding{
+				mock.ListProfileBindingsReturns(&profilebindingapi.ProfileBindingList{
+					Items: []profilebindingapi.ProfileBinding{
 						{
-							Spec: v1alpha1.ProfileBindingSpec{
-								ProfileRef: v1alpha1.ProfileRef{
+							Spec: profilebindingapi.ProfileBindingSpec{
+								ProfileRef: profilebindingapi.ProfileRef{
 									Kind: "unsupported",
 								},
 							},
@@ -268,14 +720,15 @@ func TestHandle(t *testing.T) {
 				mock.DecodePodReturns(testPod.DeepCopy(), nil)
 				mock.GetSeccompProfileReturns(&seccompprofileapi.SeccompProfile{
 					Status: seccompprofileapi.SeccompProfileStatus{
-						StatusBase: profilebasev1alpha1.StatusBase{
-							Status: secprofnodestatusv1alpha1.ProfileStateInstalled,
+						StatusBase: profilebaseapi.StatusBase{
+							Status: secprofnodestatusapi.ProfileStateInstalled,
 						},
 					},
 				}, nil)
 			},
 			request: admission.Request{
 				AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: admissionv1.Create,
 					Object: runtime.RawExtension{
 						Raw: func() []byte {
 							b, err := json.Marshal(testPod.DeepCopy())
@@ -291,14 +744,15 @@ func TestHandle(t *testing.T) {
 				require.Empty(t, resp.Patches)
 			},
 		},
+		//nolint:dupl // test duplicates are fine
 		{ // failure get seccomp profile malicious
 			prepare: func(mock *bindingfakes.FakeImpl) {
-				mock.ListProfileBindingsReturns(&v1alpha1.ProfileBindingList{
-					Items: []v1alpha1.ProfileBinding{
+				mock.ListProfileBindingsReturns(&profilebindingapi.ProfileBindingList{
+					Items: []profilebindingapi.ProfileBinding{
 						{
-							Spec: v1alpha1.ProfileBindingSpec{
-								ProfileRef: v1alpha1.ProfileRef{
-									Kind: v1alpha1.ProfileBindingKindSeccompProfile,
+							Spec: profilebindingapi.ProfileBindingSpec{
+								ProfileRef: profilebindingapi.ProfileRef{
+									Kind: profilebindingapi.ProfileBindingKindSeccompProfile,
 								},
 							},
 						},
@@ -311,6 +765,7 @@ func TestHandle(t *testing.T) {
 			},
 			request: admission.Request{
 				AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: admissionv1.Create,
 					Object: runtime.RawExtension{
 						Raw: func() []byte {
 							b, err := json.Marshal(testPod.DeepCopy())
@@ -327,12 +782,12 @@ func TestHandle(t *testing.T) {
 		},
 		{ // failure get seccomp profile errored
 			prepare: func(mock *bindingfakes.FakeImpl) {
-				mock.ListProfileBindingsReturns(&v1alpha1.ProfileBindingList{
-					Items: []v1alpha1.ProfileBinding{
+				mock.ListProfileBindingsReturns(&profilebindingapi.ProfileBindingList{
+					Items: []profilebindingapi.ProfileBinding{
 						{
-							Spec: v1alpha1.ProfileBindingSpec{
-								ProfileRef: v1alpha1.ProfileRef{
-									Kind: v1alpha1.ProfileBindingKindSeccompProfile,
+							Spec: profilebindingapi.ProfileBindingSpec{
+								ProfileRef: profilebindingapi.ProfileRef{
+									Kind: profilebindingapi.ProfileBindingKindSeccompProfile,
 								},
 							},
 						},
@@ -343,6 +798,7 @@ func TestHandle(t *testing.T) {
 			},
 			request: admission.Request{
 				AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: admissionv1.Create,
 					Object: runtime.RawExtension{
 						Raw: func() []byte {
 							b, err := json.Marshal(testPod.DeepCopy())
@@ -360,12 +816,12 @@ func TestHandle(t *testing.T) {
 		//nolint:dupl // test duplicates are fine
 		{ // failure on UpdateResource
 			prepare: func(mock *bindingfakes.FakeImpl) {
-				mock.ListProfileBindingsReturns(&v1alpha1.ProfileBindingList{
-					Items: []v1alpha1.ProfileBinding{
+				mock.ListProfileBindingsReturns(&profilebindingapi.ProfileBindingList{
+					Items: []profilebindingapi.ProfileBinding{
 						{
-							Spec: v1alpha1.ProfileBindingSpec{
-								ProfileRef: v1alpha1.ProfileRef{
-									Kind: v1alpha1.ProfileBindingKindSeccompProfile,
+							Spec: profilebindingapi.ProfileBindingSpec{
+								ProfileRef: profilebindingapi.ProfileRef{
+									Kind: profilebindingapi.ProfileBindingKindSeccompProfile,
 								},
 								Image: "foo",
 							},
@@ -375,8 +831,8 @@ func TestHandle(t *testing.T) {
 				mock.DecodePodReturns(testPod.DeepCopy(), nil)
 				mock.GetSeccompProfileReturns(&seccompprofileapi.SeccompProfile{
 					Status: seccompprofileapi.SeccompProfileStatus{
-						StatusBase: profilebasev1alpha1.StatusBase{
-							Status: secprofnodestatusv1alpha1.ProfileStateInstalled,
+						StatusBase: profilebaseapi.StatusBase{
+							Status: secprofnodestatusapi.ProfileStateInstalled,
 						},
 					},
 				}, nil)
@@ -384,6 +840,7 @@ func TestHandle(t *testing.T) {
 			},
 			request: admission.Request{
 				AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: admissionv1.Create,
 					Object: runtime.RawExtension{
 						Raw: func() []byte {
 							b, err := json.Marshal(testPod.DeepCopy())
@@ -401,12 +858,12 @@ func TestHandle(t *testing.T) {
 		//nolint:dupl // test duplicates are fine
 		{ // failure on UpdateResourceStatus
 			prepare: func(mock *bindingfakes.FakeImpl) {
-				mock.ListProfileBindingsReturns(&v1alpha1.ProfileBindingList{
-					Items: []v1alpha1.ProfileBinding{
+				mock.ListProfileBindingsReturns(&profilebindingapi.ProfileBindingList{
+					Items: []profilebindingapi.ProfileBinding{
 						{
-							Spec: v1alpha1.ProfileBindingSpec{
-								ProfileRef: v1alpha1.ProfileRef{
-									Kind: v1alpha1.ProfileBindingKindSeccompProfile,
+							Spec: profilebindingapi.ProfileBindingSpec{
+								ProfileRef: profilebindingapi.ProfileRef{
+									Kind: profilebindingapi.ProfileBindingKindSeccompProfile,
 								},
 								Image: "foo",
 							},
@@ -416,8 +873,8 @@ func TestHandle(t *testing.T) {
 				mock.DecodePodReturns(testPod.DeepCopy(), nil)
 				mock.GetSeccompProfileReturns(&seccompprofileapi.SeccompProfile{
 					Status: seccompprofileapi.SeccompProfileStatus{
-						StatusBase: profilebasev1alpha1.StatusBase{
-							Status: secprofnodestatusv1alpha1.ProfileStateInstalled,
+						StatusBase: profilebaseapi.StatusBase{
+							Status: secprofnodestatusapi.ProfileStateInstalled,
 						},
 					},
 				}, nil)
@@ -425,6 +882,7 @@ func TestHandle(t *testing.T) {
 			},
 			request: admission.Request{
 				AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: admissionv1.Create,
 					Object: runtime.RawExtension{
 						Raw: func() []byte {
 							b, err := json.Marshal(testPod.DeepCopy())
@@ -441,15 +899,15 @@ func TestHandle(t *testing.T) {
 		},
 		{ // success pod deleted
 			prepare: func(mock *bindingfakes.FakeImpl) {
-				mock.ListProfileBindingsReturns(&v1alpha1.ProfileBindingList{
-					Items: []v1alpha1.ProfileBinding{
+				mock.ListProfileBindingsReturns(&profilebindingapi.ProfileBindingList{
+					Items: []profilebindingapi.ProfileBinding{
 						{
-							Spec: v1alpha1.ProfileBindingSpec{
-								ProfileRef: v1alpha1.ProfileRef{
-									Kind: v1alpha1.ProfileBindingKindSeccompProfile,
+							Spec: profilebindingapi.ProfileBindingSpec{
+								ProfileRef: profilebindingapi.ProfileRef{
+									Kind: profilebindingapi.ProfileBindingKindSeccompProfile,
 								},
 							},
-							Status: v1alpha1.ProfileBindingStatus{
+							Status: profilebindingapi.ProfileBindingStatus{
 								ActiveWorkloads: []string{"1", "2", "3"},
 							},
 						},
@@ -468,15 +926,15 @@ func TestHandle(t *testing.T) {
 		},
 		{ // failure delete on remove pod from binding at  UpdateResourceStatus
 			prepare: func(mock *bindingfakes.FakeImpl) {
-				mock.ListProfileBindingsReturns(&v1alpha1.ProfileBindingList{
-					Items: []v1alpha1.ProfileBinding{
+				mock.ListProfileBindingsReturns(&profilebindingapi.ProfileBindingList{
+					Items: []profilebindingapi.ProfileBinding{
 						{
-							Spec: v1alpha1.ProfileBindingSpec{
-								ProfileRef: v1alpha1.ProfileRef{
-									Kind: v1alpha1.ProfileBindingKindSeccompProfile,
+							Spec: profilebindingapi.ProfileBindingSpec{
+								ProfileRef: profilebindingapi.ProfileRef{
+									Kind: profilebindingapi.ProfileBindingKindSeccompProfile,
 								},
 							},
-							Status: v1alpha1.ProfileBindingStatus{
+							Status: profilebindingapi.ProfileBindingStatus{
 								ActiveWorkloads: []string{"1", "2", "3"},
 							},
 						},
@@ -492,6 +950,41 @@ func TestHandle(t *testing.T) {
 			},
 			assert: func(resp admission.Response) {
 				require.Equal(t, http.StatusInternalServerError, int(resp.Result.Code))
+			},
+		},
+		{ // success when the profile referenced in the profile binding doesn't exist.
+			prepare: func(mock *bindingfakes.FakeImpl) {
+				mock.ListProfileBindingsReturns(&profilebindingapi.ProfileBindingList{
+					Items: []profilebindingapi.ProfileBinding{
+						{
+							Spec: profilebindingapi.ProfileBindingSpec{
+								ProfileRef: profilebindingapi.ProfileRef{
+									Kind: profilebindingapi.ProfileBindingKindAppArmorProfile,
+								},
+								Image: "foo",
+							},
+						},
+					},
+				}, nil)
+				mock.DecodePodReturns(testPod.DeepCopy(), nil)
+				mock.GetAppArmorProfileReturns(nil, kerrors.NewNotFound(schema.GroupResource{}, "test-profile"))
+			},
+			request: admission.Request{
+				AdmissionRequest: admissionv1.AdmissionRequest{
+					Operation: admissionv1.Create,
+					Object: runtime.RawExtension{
+						Raw: func() []byte {
+							b, err := json.Marshal(testPod.DeepCopy())
+							require.NoError(t, err)
+
+							return b
+						}(),
+					},
+				},
+			},
+			assert: func(resp admission.Response) {
+				require.True(t, resp.Allowed)
+				require.Empty(t, resp.Patches)
 			},
 		},
 	} {
@@ -636,7 +1129,7 @@ func TestNewContainerMap(t *testing.T) {
 			var result sync.Map
 
 			initContainerMap(&result, tc.podSpec)
-			result.Range(func(k, v interface{}) bool {
+			result.Range(func(k, v any) bool {
 				ks, ok := k.(string)
 				require.True(t, ok)
 

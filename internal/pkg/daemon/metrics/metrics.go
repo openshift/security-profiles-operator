@@ -67,7 +67,6 @@ const (
 	metricsLabelTcontext       = "tcontext"
 	metricsLabelMountNamespace = "mount_namespace"
 	metricsLabelApparmor       = "apparmor"
-	metricsLabelName           = "name"
 
 	// HandlerPath is the default path for serving metrics.
 	HandlerPath = "/metrics-spod"
@@ -118,7 +117,6 @@ func New() *Metrics {
 				metricsLabelNamespace,
 				metricsLabelPod,
 				metricsLabelContainer,
-				metricsLabelExecutable,
 				metricsLabelSyscall,
 			},
 		),
@@ -161,7 +159,6 @@ func New() *Metrics {
 				metricsLabelNamespace,
 				metricsLabelPod,
 				metricsLabelContainer,
-				metricsLabelExecutable,
 				metricsLabelScontext,
 				metricsLabelTcontext,
 			},
@@ -193,11 +190,9 @@ func New() *Metrics {
 				metricsLabelNamespace,
 				metricsLabelPod,
 				metricsLabelContainer,
-				metricsLabelExecutable,
 				metricsLabelProfile,
 				metricLabelOperation,
 				metricsLabelApparmor,
-				metricsLabelName,
 			},
 		),
 		metricAppArmorProfileError: prometheus.NewCounterVec(
@@ -273,10 +268,10 @@ func (m *Metrics) IncSeccompProfileDelete() {
 // IncSeccompProfileAudit increments the seccomp profile audit counter for the
 // provided labels.
 func (m *Metrics) IncSeccompProfileAudit(
-	node, namespace, pod, container, executable, syscall string,
+	node, namespace, pod, container, syscall string,
 ) {
 	m.metricSeccompProfileAudit.WithLabelValues(
-		node, namespace, pod, container, executable, syscall,
+		node, namespace, pod, container, syscall,
 	).Inc()
 }
 
@@ -311,10 +306,10 @@ func (m *Metrics) IncSelinuxProfileDelete() {
 // IncSelinuxProfileAudit increments the selinux profile audit counter for the
 // provided labels.
 func (m *Metrics) IncSelinuxProfileAudit(
-	node, namespace, pod, container, executable, scontext, tcontext string,
+	node, namespace, pod, container, scontext, tcontext string,
 ) {
 	m.metricSelinuxProfileAudit.WithLabelValues(
-		node, namespace, pod, container, executable, scontext, tcontext,
+		node, namespace, pod, container, scontext, tcontext,
 	).Inc()
 }
 
@@ -339,10 +334,10 @@ func (m *Metrics) IncAppArmorProfileDelete() {
 // IncAppArmorProfileAudit increments the apparmor profile audit counter for the
 // provided labels.
 func (m *Metrics) IncAppArmorProfileAudit(
-	node, namespace, pod, container, executable, profile, operation, apparmor, name string,
+	node, namespace, pod, container, profile, operation, apparmor string,
 ) {
 	m.metricAppArmorProfileAudit.WithLabelValues(
-		node, namespace, pod, container, executable, profile, operation, apparmor, name,
+		node, namespace, pod, container, profile, operation, apparmor,
 	).Inc()
 
 	if apparmor == apparmorDeniedAction {

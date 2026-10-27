@@ -2,9 +2,8 @@ package rules
 
 import (
 	"github.com/vektah/gqlparser/v2/ast"
-
 	//nolint:staticcheck // Validator rules each use dot imports for convenience.
-	. "github.com/vektah/gqlparser/v2/validator"
+	. "github.com/vektah/gqlparser/v2/validator/core"
 )
 
 var ScalarLeafsRule = Rule{
@@ -22,22 +21,26 @@ var ScalarLeafsRule = Rule{
 
 			if fieldType.IsLeafType() && len(field.SelectionSet) > 0 {
 				addError(
-					Message(`Field "%s" must not have a selection since type "%s" has no subfields.`, field.Name, fieldType.Name),
+					Message(
+						`Field "%s" must not have a selection since type "%s" has no subfields.`,
+						field.Name,
+						fieldType.Name,
+					),
 					At(field.Position),
 				)
 			}
 
 			if !fieldType.IsLeafType() && len(field.SelectionSet) == 0 {
 				addError(
-					Message(`Field "%s" of type "%s" must have a selection of subfields.`, field.Name, field.Definition.Type.String()),
+					Message(
+						`Field "%s" of type "%s" must have a selection of subfields.`,
+						field.Name,
+						field.Definition.Type.String(),
+					),
 					Suggestf(`"%s { ... }"`, field.Name),
 					At(field.Position),
 				)
 			}
 		})
 	},
-}
-
-func init() {
-	AddRule(ScalarLeafsRule.Name, ScalarLeafsRule.RuleFunc)
 }

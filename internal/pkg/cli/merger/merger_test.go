@@ -1,5 +1,4 @@
 //go:build linux && !no_bpf
-// +build linux,!no_bpf
 
 /*
 Copyright 2024 The Kubernetes Authors.
@@ -29,7 +28,7 @@ import (
 )
 
 const SeccompA = `
-apiVersion: security-profiles-operator.x-k8s.io/v1beta1
+apiVersion: security-profiles-operator.x-k8s.io/v1
 kind: SeccompProfile
 spec:
   defaultAction: SCMP_ACT_ERRNO
@@ -40,7 +39,7 @@ spec:
 `
 
 const SeccompB = `
-apiVersion: security-profiles-operator.x-k8s.io/v1beta1
+apiVersion: security-profiles-operator.x-k8s.io/v1
 kind: SeccompProfile
 spec:
   defaultAction: SCMP_ACT_ERRNO
@@ -50,24 +49,23 @@ spec:
         - bar
 `
 
-const SeccompMerged = `apiVersion: security-profiles-operator.x-k8s.io/v1beta1
+const SeccompMerged = `apiVersion: security-profiles-operator.x-k8s.io/v1
 kind: SeccompProfile
-metadata:
-  creationTimestamp: null
+metadata: {}
 spec:
   defaultAction: SCMP_ACT_ERRNO
   syscalls:
   - action: SCMP_ACT_ALLOW
     names:
-    - foo
+    - bar
   - action: SCMP_ACT_ALLOW
     names:
-    - bar
+    - foo
 status: {}
 `
 
 const SelinuxA = `
-apiVersion: security-profiles-operator.x-k8s.io/v1alpha2
+apiVersion: security-profiles-operator.x-k8s.io/v1
 kind: SelinuxProfile
 spec:
   inherit:
@@ -103,6 +101,7 @@ func TestRun(t *testing.T) {
 			},
 			assert: func(mock *mergerfakes.FakeImpl, err error) {
 				require.NoError(t, err)
+
 				_, merged, _ := mock.WriteFileArgsForCall(0)
 				require.Equal(t, SeccompMerged, string(merged))
 			},

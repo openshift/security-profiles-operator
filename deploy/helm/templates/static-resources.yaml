@@ -63,6 +63,7 @@ rules:
   - events
   verbs:
   - create
+  - patch
 - apiGroups:
   - ""
   resources:
@@ -87,6 +88,7 @@ rules:
   - admissionregistration.k8s.io
   resources:
   - mutatingwebhookconfigurations
+  - validatingwebhookconfigurations
   verbs:
   - create
   - get
@@ -306,6 +308,16 @@ rules:
   verbs:
   - create
 - apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
   - security-profiles-operator.x-k8s.io
   resources:
   - apparmorprofiles
@@ -336,6 +348,7 @@ rules:
   - apparmorprofiles/status
   - rawselinuxprofiles/status
   - seccompprofiles/status
+  - securityprofilenodestatuses/status
   - selinuxprofiles/status
   verbs:
   - get
@@ -411,10 +424,22 @@ rules:
   - events
   verbs:
   - create
+  - patch
 - apiGroups:
   - ""
   resources:
   - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - security-profiles-operator.x-k8s.io
+  resources:
+  - apparmorprofiles
+  - rawselinuxprofiles
+  - seccompprofiles
+  - selinuxprofiles
   verbs:
   - get
   - list
@@ -450,15 +475,6 @@ rules:
   - get
   - patch
   - update
-- apiGroups:
-  - security-profiles-operator.x-k8s.io
-  resources:
-  - seccompprofiles
-  - selinuxprofiles
-  verbs:
-  - get
-  - list
-  - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -686,7 +702,7 @@ type: kubernetes.io/service-account-token
 ---
 apiVersion: v1
 data:
-  bpf-recorder.json: |
+  bpf-recorder.json: |-
     {
       "defaultAction": "SCMP_ACT_ERRNO",
       "archMap": [
@@ -728,6 +744,7 @@ data:
             "capget",
             "capset",
             "chdir",
+            "clone",
             "clone3",
             "close",
             "connect",
@@ -791,6 +808,7 @@ data:
             "socket",
             "stat",
             "statfs",
+            "statx",
             "tgkill",
             "uname",
             "write"
@@ -800,7 +818,7 @@ data:
       ]
     }
   bpfrecorder-apparmor.yaml: |
-    apiVersion: security-profiles-operator.x-k8s.io/v1alpha1
+    apiVersion: security-profiles-operator.x-k8s.io/v1
     kind: AppArmorProfile
     metadata:
       labels:
@@ -835,11 +853,12 @@ data:
           readWritePaths:
           - "ptrace (read),\n# ugly template injection hack"
           - /var/run/grpc/bpf-recorder.sock
+          - /var/run/grpc/metrics.sock
         network:
           allowedProtocols:
             allowTcp: true
             allowUdp: true
-      disabled: false
+      state: Enabled
   json-enricher-log-volume-mount-path: /data/logs/jsonenricher
   json-enricher-log-volume-source.json: |-
     {
@@ -847,37 +866,37 @@ data:
         "sizeLimit": "500Mi"
       }
     }
-  security-profiles-operator.json: |
+  security-profiles-operator.json: |-
     {
       "defaultAction": "SCMP_ACT_ERRNO",
-        "archMap": [
-            {
-                "architecture": "SCMP_ARCH_X86_64",
-                "subArchitectures": [
-                    "SCMP_ARCH_X86",
-                    "SCMP_ARCH_X32"
-                ]
-            },
-            {
-                "architecture": "SCMP_ARCH_AARCH64",
-                "subArchitectures": [
-                    "SCMP_ARCH_ARM"
-                ]
-            },
-            {
-            "architecture": "SCMP_ARCH_PPC64LE",
-                "subArchitectures": [
-                    "SCMP_ARCH_PPC64",
-                    "SCMP_ARCH_PPC"
-                ]
-            },
-            {
-                "architecture": "SCMP_ARCH_S390X",
-                "subArchitectures": [
-                    "SCMP_ARCH_S390"
-                ]
-            }
-        ],
+      "archMap": [
+        {
+          "architecture": "SCMP_ARCH_X86_64",
+          "subArchitectures": [
+            "SCMP_ARCH_X86",
+            "SCMP_ARCH_X32"
+          ]
+        },
+        {
+          "architecture": "SCMP_ARCH_AARCH64",
+          "subArchitectures": [
+            "SCMP_ARCH_ARM"
+          ]
+        },
+        {
+          "architecture": "SCMP_ARCH_PPC64LE",
+          "subArchitectures": [
+            "SCMP_ARCH_PPC64",
+            "SCMP_ARCH_PPC"
+          ]
+        },
+        {
+          "architecture": "SCMP_ARCH_S390X",
+          "subArchitectures": [
+            "SCMP_ARCH_S390"
+          ]
+        }
+      ],
       "syscalls": [
         {
           "names": [
@@ -888,6 +907,7 @@ data:
             "capget",
             "capset",
             "chdir",
+            "clone",
             "clone3",
             "close",
             "connect",
@@ -923,6 +943,7 @@ data:
             "nanosleep",
             "newfstatat",
             "openat",
+            "openat2",
             "prctl",
             "pread64",
             "prlimit64",
@@ -945,6 +966,7 @@ data:
             "socket",
             "stat",
             "statfs",
+            "statx",
             "tgkill",
             "uname",
             "unshare",
@@ -955,19 +977,23 @@ data:
         }
       ]
     }
-  selinuxd-image-mapping.json: |
+  selinuxd-image-mapping.json: |-
     [
         {
-            "regex":"(.*)(CoreOS).*([\\d+])\\.8[\\d+]\\.(.*)",
-            "imageFromVar":"RELATED_IMAGE_SELINUXD_EL8"
+            "regex": "(.*)(CoreOS).*(41[0-2]\\.[0-9]+)\\..*|(.*)(Red Hat Enterprise Linux release)\\s+8\\.[0-9]+",
+            "imageFromVar": "RELATED_IMAGE_SELINUXD_EL8"
         },
         {
-            "regex":"(.*)(CoreOS).*([\\d+])\\.9[\\d+]\\.(.*)|(.*)(CoreOS)([\\s+])9\\.(.*)",
-            "imageFromVar":"RELATED_IMAGE_SELINUXD_EL9"
+            "regex": "(.*)(CoreOS).*10\\.[0-9]+\\..*|(.*)(Red Hat Enterprise Linux CoreOS)\\s+10\\.[0-9]+\\..*|(.*)(Red Hat Enterprise Linux release)\\s+10\\.[0-9]+",
+            "imageFromVar": "RELATED_IMAGE_SELINUXD_EL10"
         },
         {
-            "regex":"Fedora \\d+",
-            "imageFromVar":"RELATED_IMAGE_SELINUXD_FEDORA"
+            "regex": "(.*)(CoreOS).*(41[3-9]\\.[0-9]+)\\..*|(.*)(CoreOS)\\s+9\\.[0-9]+\\..*|(.*)(Red Hat Enterprise Linux release)\\s+9\\.[0-9]+",
+            "imageFromVar": "RELATED_IMAGE_SELINUXD_EL9"
+        },
+        {
+            "regex": "Fedora \\d+",
+            "imageFromVar": "RELATED_IMAGE_SELINUXD_FEDORA"
         }
     ]
   selinuxd.cil: |
@@ -988,15 +1014,10 @@ data:
         (allow process file_context_t ( file ( append create getattr ioctl lock map open read rename setattr unlink write )))
         (allow process file_context_t ( sock_file ( append getattr open read write )))
         (allow process security_t ( file ( append create getattr ioctl lock map open read rename setattr unlink write )))
-        (allow process security_t ( security ( load_policy )))
         (allow process selinux_config_t ( dir ( add_name create getattr ioctl lock open read remove_name rename rmdir search setattr write )))
         (allow process selinux_config_t ( fifo_file ( getattr read write append ioctl lock open )))
         (allow process selinux_config_t ( file ( append create getattr ioctl lock map open read rename setattr unlink write )))
         (allow process selinux_config_t ( sock_file ( append getattr open read write )))
-        (allow process selinux_login_config_t ( dir ( add_name create getattr ioctl lock open read remove_name rmdir search setattr write )))
-        (allow process selinux_login_config_t ( fifo_file ( getattr read write append ioctl lock open )))
-        (allow process selinux_login_config_t ( file ( append create getattr ioctl lock map open read rename setattr unlink write )))
-        (allow process selinux_login_config_t ( sock_file ( append getattr open read write )))
         (allow process semanage_read_lock_t ( dir ( add_name create getattr ioctl lock open read remove_name rmdir search setattr write )))
         (allow process semanage_read_lock_t ( fifo_file ( getattr read write append ioctl lock open )))
         (allow process semanage_read_lock_t ( file ( append create getattr ioctl lock map open read rename setattr unlink write )))
@@ -1013,6 +1034,23 @@ data:
         (allow process sysfs_t ( fifo_file ( getattr read write append ioctl lock open )))
         (allow process sysfs_t ( file ( append create getattr ioctl lock map open read rename setattr unlink write )))
         (allow process sysfs_t ( sock_file ( append getattr open read write )))
+
+        ; Best effort to allow loading policies
+        (optional load_policy_rule_support
+            ; Direct allow rule for distros without 'can_load_policy' (e.g. minimal SELinux setups)
+            (allow process security_t ( security ( load_policy )))
+        )
+        (optional can_load_policy_attr_support
+            ; Join the can_load_policy attribute, which also satisfies refpolicy's neverallow
+            (typeattributeset can_load_policy process)
+        )
+
+        (optional login_config_support
+            (allow process selinux_login_config_t ( dir ( add_name create getattr ioctl lock open read remove_name rmdir search setattr write )))
+            (allow process selinux_login_config_t ( fifo_file ( getattr read write append ioctl lock open )))
+            (allow process selinux_login_config_t ( file ( append create getattr ioctl lock map open read rename setattr unlink write )))
+            (allow process selinux_login_config_t ( sock_file ( append getattr open read write )))
+        )
     )
   selinuxrecording.cil: |
     (block selinuxrecording
@@ -1020,7 +1058,7 @@ data:
       (typepermissive process)
     )
   spo-apparmor.yaml: |
-    apiVersion: security-profiles-operator.x-k8s.io/v1alpha1
+    apiVersion: security-profiles-operator.x-k8s.io/v1
     kind: AppArmorProfile
     metadata:
       labels:
@@ -1066,7 +1104,7 @@ data:
           allowedProtocols:
             allowTcp: true
             allowUdp: true
-      disabled: false
+      state: Enabled
 kind: ConfigMap
 metadata:
   annotations:

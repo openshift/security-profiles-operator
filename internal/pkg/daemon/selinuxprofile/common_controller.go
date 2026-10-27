@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -40,8 +41,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/scheme"
 
-	statusv1alpha1 "sigs.k8s.io/security-profiles-operator/api/secprofnodestatus/v1alpha1"
-	selxv1alpha2 "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1alpha2"
+	secprofnodestatusapi "sigs.k8s.io/security-profiles-operator/api/secprofnodestatus/v1"
+	selinuxprofileapi "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/config"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/daemon/metrics"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/manager/spod/bindata"
@@ -74,10 +75,17 @@ const (
 	reasonCannotContactSelinuxd    string = "CannotContactSelinuxd"
 	reasonCannotRemovePolicy       string = "CannotRemoveSelinuxPolicy"
 	reasonCannotInstallPolicy      string = "CannotSaveSelinuxPolicy"
+	reasonSystemModuleConflict     string = "SystemModuleConflict"
 	reasonCannotWritePolicyFile    string = "CannotWritePolicyFile"
 	reasonCannotGetPolicyStatus    string = "CannotGetPolicyStatus"
 	reasonCannotUpdatePolicyStatus string = "CannotUpdatePolicyStatus"
 	reasonInstalledPolicy          string = "SavedSelinuxPolicy"
+	reasonCannotReloadPolicy       string = "CannotReloadSelinuxPolicy"
+)
+
+const (
+	reloadInstallGenerationAnnotation = "spo.x-k8s.io/selinux-policy-reload-generation"
+	reloadRemoveGenerationAnnotation  = "spo.x-k8s.io/selinux-policy-reload-remove-generation"
 )
 
 // blank assignment to verify that ReconcileSelinux implements `reconcile.Reconciler`.
@@ -90,7 +98,10 @@ var errPolicyNotFound = errors.New("policy not found")
 type ReconcileSelinux struct {
 	// This client, initialized using mgr.Client() above, is a split client
 	// that reads objects from the cache and writes to the apiserver.
-	client            client.Client
+	client client.Client
+	// clientReader reads objects directly from api-server, this is useful when
+	// the cache is filtered or otherwise not expected to contain an object.
+	clientReader      client.Reader
 	scheme            *runtime.Scheme
 	record            record.EventRecorder
 	metrics           *metrics.Metrics
@@ -109,7 +120,9 @@ func (r *ReconcileSelinux) Setup(
 ) error {
 	r.log = logf.Log.WithName(r.controllerName)
 	r.client = mgr.GetClient()
+	r.clientReader = mgr.GetAPIReader()
 	r.scheme = mgr.GetScheme()
+	//nolint:staticcheck,nolintlint // TODO: migrate to GetEventRecorder
 	r.record = mgr.GetEventRecorderFor(r.controllerName)
 	r.metrics = met
 	r.httpc = &http.Client{
@@ -130,7 +143,7 @@ func (r *ReconcileSelinux) Name() string {
 
 // SchemeBuilder returns the API scheme of the controller.
 func (r *ReconcileSelinux) SchemeBuilder() *scheme.Builder {
-	return selxv1alpha2.SchemeBuilder
+	return selinuxprofileapi.SchemeBuilder
 }
 
 // Healthz is the liveness probe endpoint of the controller.
@@ -156,6 +169,8 @@ func (r *ReconcileSelinux) Healthz(*http.Request) error {
 // +kubebuilder:rbac:groups=security-profiles-operator.x-k8s.io,resources=rawselinuxprofiles,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=security-profiles-operator.x-k8s.io,resources=rawselinuxprofiles/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=security-profiles-operator.x-k8s.io,resources=rawselinuxprofiles/finalizers,verbs=delete;get;update;patch
+
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;delete;get;list;watch
 
 // Reconcile reads that state of the cluster for a SelinuxProfile object and makes changes based on the state read
 // and what is in the `SelinuxProfile.Spec`.
@@ -183,16 +198,21 @@ func (r *ReconcileSelinux) Reconcile(ctx context.Context, request reconcile.Requ
 			return reconcile.Result{}, fmt.Errorf("checking if node status exists: %w", existErr)
 		}
 
+		firstInstall := false
+
 		if !exists {
-			if err := nodeStatus.Create(ctx); err != nil {
-				return reconcile.Result{}, fmt.Errorf("cannot ensure node status: %w", err)
+			wasMigrated, createErr := nodeStatus.Create(ctx)
+			if createErr != nil {
+				return reconcile.Result{}, fmt.Errorf("cannot ensure node status: %w", createErr)
 			}
+
+			firstInstall = !wasMigrated
 		}
 
-		return r.reconcilePolicy(ctx, instance, oh, nodeStatus, reqLogger)
+		return r.reconcilePolicy(ctx, instance, oh, nodeStatus, firstInstall, reqLogger)
 	}
 
-	if err := nodeStatus.SetNodeStatus(ctx, statusv1alpha1.ProfileStateTerminating); err != nil {
+	if err := nodeStatus.SetNodeStatus(ctx, secprofnodestatusapi.ProfileStateTerminating); err != nil {
 		reqLogger.Error(err, "cannot update SELinux profile status")
 		r.metrics.IncSelinuxProfileError(reasonCannotUpdatePolicyStatus)
 		r.record.Event(instance, util.EventTypeWarning, reasonCannotUpdatePolicyStatus, err.Error())
@@ -219,7 +239,7 @@ func (r *ReconcileSelinux) Reconcile(ctx context.Context, request reconcile.Requ
 		r.record.Event(instance, util.EventTypeWarning, reasonCannotRemovePolicy, err.Error())
 
 		return res, err
-	} else if res.RequeueAfter > 0 {
+	} else if res.RequeueAfter > 0 || res.Requeue { //nolint:staticcheck // Requeue expresses immediate requeue intent
 		reqLogger.Info("Re-queueing delete request to make sure the policy is gone")
 
 		return res, err
@@ -238,9 +258,10 @@ func (r *ReconcileSelinux) Reconcile(ctx context.Context, request reconcile.Requ
 
 func (r *ReconcileSelinux) reconcilePolicy(
 	ctx context.Context,
-	sp selxv1alpha2.SelinuxProfileObject,
+	sp selinuxprofileapi.SelinuxProfileObject,
 	oh SelinuxObjectHandler,
 	nodeStatus *nodestatus.StatusClient,
+	firstInstall bool,
 	l logr.Logger,
 ) (reconcile.Result, error) {
 	selinuxdReady, err := isSelinuxdReady(ctx, r.httpc)
@@ -259,7 +280,7 @@ func (r *ReconcileSelinux) reconcilePolicy(
 	}
 
 	if valErr := oh.Validate(); valErr != nil {
-		if err := nodeStatus.SetNodeStatus(ctx, statusv1alpha1.ProfileStateError); err != nil {
+		if err := nodeStatus.SetNodeStatus(ctx, secprofnodestatusapi.ProfileStateError); err != nil {
 			r.metrics.IncSelinuxProfileError(reasonCannotUpdatePolicyStatus)
 			r.record.Event(sp, util.EventTypeWarning, reasonCannotUpdatePolicyStatus, err.Error())
 
@@ -280,7 +301,27 @@ func (r *ReconcileSelinux) reconcilePolicy(
 		return reconcile.Result{}, nil
 	}
 
-	err = r.reconcilePolicyFile(sp, oh, l)
+	if firstInstall && isSystemSELinuxModule(bindata.SelinuxModuleStorePath, sp.GetPolicyName()) {
+		if err := nodeStatus.SetNodeStatus(ctx, secprofnodestatusapi.ProfileStateError); err != nil {
+			r.metrics.IncSelinuxProfileError(reasonCannotUpdatePolicyStatus)
+			r.record.Event(sp, util.EventTypeWarning, reasonCannotUpdatePolicyStatus, err.Error())
+
+			return reconcile.Result{}, fmt.Errorf("setting node status to error: %w", err)
+		}
+
+		evstr := fmt.Sprintf(
+			"Profile name %q conflicts with a system SELinux module on %s; "+
+				"use a different name (e.g. %q)",
+			sp.GetPolicyName(), os.Getenv(config.NodeNameEnvKey), "custom-"+sp.GetPolicyName(),
+		)
+
+		r.metrics.IncSelinuxProfileError(reasonSystemModuleConflict)
+		r.record.Event(sp, util.EventTypeWarning, reasonSystemModuleConflict, evstr)
+
+		return reconcile.Result{}, nil
+	}
+
+	policyUpdated, err := r.reconcilePolicyFile(sp, oh, l)
 	if err != nil {
 		r.metrics.IncSelinuxProfileError(reasonCannotWritePolicyFile)
 		r.record.Event(sp, util.EventTypeWarning, reasonCannotWritePolicyFile, err.Error())
@@ -288,11 +329,27 @@ func (r *ReconcileSelinux) reconcilePolicy(
 		return reconcile.Result{}, fmt.Errorf("creating policy file: %w", err)
 	}
 
+	// If the policy file was just updated, requeue to give selinuxd time to detect
+	// the change and reinstall the policy before we check status and trigger reload.
+	// Without this, we might trigger the reload job before selinuxd has processed the update.
+	if policyUpdated {
+		l.Info("Policy file updated, requeuing to allow selinuxd to process the change")
+
+		if err := nodeStatus.SetNodeStatus(ctx, secprofnodestatusapi.ProfileStateInProgress); err != nil {
+			r.metrics.IncSelinuxProfileError(reasonCannotUpdatePolicyStatus)
+			r.record.Event(sp, util.EventTypeWarning, reasonCannotUpdatePolicyStatus, err.Error())
+
+			return reconcile.Result{}, fmt.Errorf("setting node status to in progress: %w", err)
+		}
+
+		return reconcile.Result{Requeue: true}, nil
+	}
+
 	l.Info("Checking if policy deployed", "policyName", sp.GetName())
 	polStatus, err := getPolicyStatus(ctx, sp, r.httpc)
 
 	if errors.Is(err, errPolicyNotFound) {
-		if err := nodeStatus.SetNodeStatus(ctx, statusv1alpha1.ProfileStateInProgress); err != nil {
+		if err := nodeStatus.SetNodeStatus(ctx, secprofnodestatusapi.ProfileStateInProgress); err != nil {
 			r.metrics.IncSelinuxProfileError(reasonCannotUpdatePolicyStatus)
 			r.record.Event(sp, util.EventTypeWarning, reasonCannotUpdatePolicyStatus, err.Error())
 
@@ -309,17 +366,46 @@ func (r *ReconcileSelinux) reconcilePolicy(
 		return reconcile.Result{}, fmt.Errorf("looking up policy status: %w", err)
 	}
 
-	var polState statusv1alpha1.ProfileState
+	var polState secprofnodestatusapi.ProfileState
 
 	switch polStatus.Status {
 	case installedStatus:
-		polState = statusv1alpha1.ProfileStateInstalled
+		polState = secprofnodestatusapi.ProfileStateInstalled
 		evstr := "Successfully saved profile to disk on " + os.Getenv(config.NodeNameEnvKey)
 
 		r.metrics.IncSelinuxProfileUpdate()
 		r.record.Event(sp, util.EventTypeNormal, reasonInstalledPolicy, evstr)
+
+		reloadGeneration := strconv.FormatInt(sp.GetGeneration(), 10)
+
+		lastReloadGeneration, err := nodeStatus.GetAnnotation(ctx, reloadInstallGenerationAnnotation)
+		if err != nil {
+			l.Error(err, "Failed to read reload generation annotation")
+		}
+
+		if lastReloadGeneration == reloadGeneration {
+			l.Info("Reload already performed for policy generation, skipping",
+				"generation", reloadGeneration, "policyName", sp.GetPolicyName())
+		} else {
+			// On RHEL 9/OpenShift 4.20+, semodule -i no longer automatically reloads
+			// the kernel's in-memory policy. Create a short-lived privileged Job to
+			// run semodule -R and reload the policy.
+			jobCreated, err := r.createPolicyReloadJob(ctx, sp.GetPolicyName(), "install", l)
+			if err != nil {
+				l.Error(err, "Failed to create policy reload job, policy may not be active until manual reload")
+				r.record.Event(sp, util.EventTypeWarning, reasonCannotReloadPolicy,
+					fmt.Sprintf("Failed to create policy reload job on %s: %s", os.Getenv(config.NodeNameEnvKey), err.Error()))
+				// Don't fail the reconcile - the policy is installed, just not reloaded yet
+			} else if jobCreated {
+				// Only update the annotation if a job was actually created
+				if err := nodeStatus.SetAnnotation(ctx, reloadInstallGenerationAnnotation, reloadGeneration); err != nil {
+					l.Error(err, "Failed to set reload generation annotation")
+				}
+			}
+			// If jobCreated is false (skipped due to TTL), don't update annotation - will retry on next reconcile
+		}
 	case failedStatus:
-		polState = statusv1alpha1.ProfileStateError
+		polState = secprofnodestatusapi.ProfileStateError
 		evstr := fmt.Sprintf("Failed to save profile to disk on %s: %s", os.Getenv(config.NodeNameEnvKey), polStatus.Msg)
 
 		r.metrics.IncSelinuxProfileError(reasonCannotInstallPolicy)
@@ -338,30 +424,33 @@ func (r *ReconcileSelinux) reconcilePolicy(
 	return reconcile.Result{}, nil
 }
 
+// reconcilePolicyFile writes the policy file to the drop directory if the content differs.
+// Returns (policyUpdated, error) where policyUpdated is true if the file was actually written.
 func (r *ReconcileSelinux) reconcilePolicyFile(
-	sp selxv1alpha2.SelinuxProfileObject,
+	sp selinuxprofileapi.SelinuxProfileObject,
 	oh SelinuxObjectHandler,
 	l logr.Logger,
-) error {
+) (bool, error) {
 	policyPath := path.Join(bindata.SelinuxDropDirectory, sp.GetPolicyName()+".cil")
 
 	cil, parseErr := oh.GetCILPolicy()
 	if parseErr != nil {
-		return fmt.Errorf("generating CIL: %w", parseErr)
+		return false, fmt.Errorf("generating CIL: %w", parseErr)
 	}
 
 	policyContent := []byte(cil)
 
-	if err := writeFileIfDiffers(policyPath, policyContent, l); err != nil {
-		return fmt.Errorf("writing policy file: %w", err)
+	written, err := writeFileIfDiffers(policyPath, policyContent, l)
+	if err != nil {
+		return false, fmt.Errorf("writing policy file: %w", err)
 	}
 
-	return nil
+	return written, nil
 }
 
 func (r *ReconcileSelinux) reconcileDeletePolicy(
 	ctx context.Context,
-	sp selxv1alpha2.SelinuxProfileObject,
+	sp selinuxprofileapi.SelinuxProfileObject,
 	nodeStatus *nodestatus.StatusClient,
 	l logr.Logger,
 ) (reconcile.Result, error) {
@@ -377,7 +466,8 @@ func (r *ReconcileSelinux) reconcileDeletePolicy(
 	}
 
 	res, err := r.reconcileDeletePolicyFile(sp, l)
-	if res.RequeueAfter > 0 || err != nil {
+	//nolint:staticcheck // Requeue expresses immediate requeue intent
+	if res.RequeueAfter > 0 || res.Requeue || err != nil {
 		return res, err
 	}
 
@@ -385,6 +475,31 @@ func (r *ReconcileSelinux) reconcileDeletePolicy(
 	polStatus, err := getPolicyStatus(ctx, sp, r.httpc)
 
 	if errors.Is(err, errPolicyNotFound) {
+		// Policy was successfully removed, trigger a reload to update kernel policy
+		reloadGeneration := strconv.FormatInt(sp.GetGeneration(), 10)
+
+		lastReloadGeneration, err := nodeStatus.GetAnnotation(ctx, reloadRemoveGenerationAnnotation)
+		if err != nil {
+			l.Error(err, "Failed to read reload generation annotation after removal")
+		}
+
+		if lastReloadGeneration == reloadGeneration {
+			l.Info("Reload already performed for policy removal, skipping",
+				"generation", reloadGeneration, "policyName", sp.GetPolicyName())
+		} else {
+			jobCreated, err := r.createPolicyReloadJob(ctx, sp.GetPolicyName(), "remove", l)
+			if err != nil {
+				l.Error(err, "Failed to create policy reload job after removal")
+				r.record.Event(sp, util.EventTypeWarning, reasonCannotReloadPolicy,
+					fmt.Sprintf("Failed to create policy reload job after removal on %s: %s",
+						os.Getenv(config.NodeNameEnvKey), err.Error()))
+			} else if jobCreated {
+				if err := nodeStatus.SetAnnotation(ctx, reloadRemoveGenerationAnnotation, reloadGeneration); err != nil {
+					l.Error(err, "Failed to set reload generation annotation after removal")
+				}
+			}
+		}
+
 		return reconcile.Result{}, nil
 	}
 
@@ -400,7 +515,7 @@ func (r *ReconcileSelinux) reconcileDeletePolicy(
 
 		return reconcile.Result{Requeue: true}, nil
 	case failedStatus:
-		if err := nodeStatus.SetNodeStatus(ctx, statusv1alpha1.ProfileStateError); err != nil {
+		if err := nodeStatus.SetNodeStatus(ctx, secprofnodestatusapi.ProfileStateError); err != nil {
 			r.metrics.IncSelinuxProfileError(reasonCannotRemovePolicy)
 
 			return reconcile.Result{}, fmt.Errorf("updating SELinux policy with installation: %w", err)
@@ -418,7 +533,7 @@ func (r *ReconcileSelinux) reconcileDeletePolicy(
 	return reconcile.Result{}, nil
 }
 
-func (r *ReconcileSelinux) reconcileDeletePolicyFile(sp selxv1alpha2.SelinuxProfileObject,
+func (r *ReconcileSelinux) reconcileDeletePolicyFile(sp selinuxprofileapi.SelinuxProfileObject,
 	l logr.Logger,
 ) (reconcile.Result, error) {
 	policyPath := path.Join(bindata.SelinuxDropDirectory, sp.GetPolicyName()+".cil")
@@ -445,7 +560,7 @@ func (r *ReconcileSelinux) reconcileDeletePolicyFile(sp selxv1alpha2.SelinuxProf
 
 func getPolicyStatus(
 	ctx context.Context,
-	sp selxv1alpha2.SelinuxProfileObject,
+	sp selinuxprofileapi.SelinuxProfileObject,
 	httpc *http.Client,
 ) (*sePolStatus, error) {
 	polURL := selinuxdPoliciesBaseURL + sp.GetPolicyName()
@@ -506,34 +621,74 @@ func selinuxdGetRequest(ctx context.Context, httpc *http.Client, url string) (*h
 
 // writeFileIfDiffers checks if the content of file at filePath are the same as the byte array
 // contents, if not, overwrites the file at filePath.
+// Returns (written, error) where written is true if the file was actually written
+// (content differed or file didn't exist).
 //
 // Reopening the same file may seem wasteful and even look like a TOCTOU issue, but the policy
 // drop dir is private to this pod, but mostly just calling a single write is much easier codepath
 // than mucking around with seeks and truncates to account for all the corner cases.
-func writeFileIfDiffers(filePath string, contents []byte, l logr.Logger) error {
+func writeFileIfDiffers(filePath string, contents []byte, l logr.Logger) (bool, error) {
 	const filePermissions = 0o600
 
 	file, err := os.OpenFile(filePath, os.O_RDONLY, filePermissions)
 	if os.IsNotExist(err) {
 		file.Close()
 
-		return os.WriteFile(filePath, contents, filePermissions)
+		l.Info("Writing new policy file", "policyPath", filePath)
+
+		return true, os.WriteFile(filePath, contents, filePermissions)
 	} else if err != nil {
-		return fmt.Errorf("could not open for reading: %w"+filePath, err)
+		return false, fmt.Errorf("could not open for reading: %w"+filePath, err)
 	}
 
 	defer file.Close()
 
 	existing, err := io.ReadAll(file)
 	if err != nil {
-		return fmt.Errorf("reading file : %w"+filePath, err)
+		return false, fmt.Errorf("reading file : %w"+filePath, err)
 	}
 
 	if bytes.Equal(existing, contents) {
-		return nil
+		return false, nil
 	}
 
-	l.Info("Writing to policy file", "policyPath", filePath)
+	l.Info("Updating policy file", "policyPath", filePath)
 
-	return os.WriteFile(filePath, contents, filePermissions)
+	return true, os.WriteFile(filePath, contents, filePermissions)
+}
+
+// isSystemSELinuxModule checks whether an SELinux module with the given name
+// is already installed in the host's module store. The store layout is
+// /var/lib/selinux/<policy_type>/active/modules/<priority>/<module_name>/.
+func isSystemSELinuxModule(moduleStorePath, name string) bool {
+	policyTypes, err := os.ReadDir(moduleStorePath)
+	if err != nil {
+		return false
+	}
+
+	for _, pt := range policyTypes {
+		if !pt.IsDir() {
+			continue
+		}
+
+		modulesDir := filepath.Join(moduleStorePath, pt.Name(), "active", "modules")
+
+		priorities, err := os.ReadDir(modulesDir)
+		if err != nil {
+			continue
+		}
+
+		for _, prio := range priorities {
+			if !prio.IsDir() {
+				continue
+			}
+
+			moduleDir := filepath.Join(modulesDir, prio.Name(), name)
+			if fi, err := os.Stat(moduleDir); err == nil && fi.IsDir() {
+				return true
+			}
+		}
+	}
+
+	return false
 }

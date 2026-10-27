@@ -20,23 +20,28 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/go-logr/logr"
+	"github.com/opencontainers/go-digest"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/generate"
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/verify"
 	"oras.land/oras-go/v2"
+	"oras.land/oras-go/v2/registry/remote"
 	"oras.land/oras-go/v2/registry/remote/auth"
 	"oras.land/oras-go/v2/registry/remote/retry"
 
-	apparmorprofileapi "sigs.k8s.io/security-profiles-operator/api/apparmorprofile/v1alpha1"
-	seccompprofileapi "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1beta1"
-	selinuxprofileapi "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1alpha2"
+	apparmorprofileapi "sigs.k8s.io/security-profiles-operator/api/apparmorprofile/v1"
+	seccompprofileapi "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1"
+	selinuxprofileapi "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1"
 )
+
+const allowAllRegexp = ".*"
 
 // PullResult is the type returned by Pull.
 type PullResult struct {
@@ -78,6 +83,18 @@ func (p *PullResult) Content() []byte {
 type Artifact struct {
 	impl
 	logger logr.Logger
+}
+
+// PullSignatureOptions options for verifying the OCI image signature during pulling.
+type PullSignatureOptions struct {
+	// DisableSignatureVerification disables signature verification during pulling.
+	DisableSignatureVerification bool
+
+	// AllowedIdentityRegexp regexp for allowed identities for signature verification.
+	AllowedIdentityRegexp string
+
+	// AllowedOidcIssuerRegexp regexp for allowed Oidc issuer for signature verification.
+	AllowedOidcIssuerRegexp string
 }
 
 // New returns a new Artifact instance.
@@ -145,9 +162,7 @@ func (a *Artifact) Push(
 			return fmt.Errorf("add profile to store: %w", err)
 		}
 
-		for k, v := range annotations {
-			fileDescriptor.Annotations[k] = v
-		}
+		maps.Copy(fileDescriptor.Annotations, annotations)
 
 		fileDescriptor.Platform = platform
 		fileDescriptors = append(fileDescriptors, fileDescriptor)
@@ -265,20 +280,38 @@ func (a *Artifact) Pull(
 	c context.Context,
 	from, username, password string,
 	platform *v1.Platform,
-	disableSignatureVerification bool,
+	signOpts *PullSignatureOptions,
 ) (*PullResult, error) {
 	ctx, cancel := context.WithTimeout(c, defaultTimeout)
 	defer cancel()
 
-	if !disableSignatureVerification {
-		a.logger.Info("Verifying signature")
+	originalImage := from
 
-		const all = ".*"
+	a.logger.Info("Resolving digest of image: " + originalImage)
+
+	// Retrieve the immutable image digest before doing any verification to
+	// prevent a TOCTOU attack on the mutable tag of the base image, which
+	// might lead to a malicious base profile being injected between
+	// verification and copying the content.
+	from, repo, sha, err := a.imageWithDigest(ctx, originalImage, username, password)
+	if err != nil {
+		return nil, fmt.Errorf("resolving digest for image %q: %w", originalImage, err)
+	}
+
+	if signOpts == nil {
+		signOpts = &PullSignatureOptions{
+			AllowedIdentityRegexp:   allowAllRegexp,
+			AllowedOidcIssuerRegexp: allowAllRegexp,
+		}
+	}
+
+	if !signOpts.DisableSignatureVerification {
+		a.logger.Info("Verifying signature")
 
 		v := verify.VerifyCommand{
 			CertVerifyOptions: options.CertVerifyOptions{
-				CertIdentityRegexp:   all,
-				CertOidcIssuerRegexp: all,
+				CertIdentityRegexp:   signOpts.AllowedIdentityRegexp,
+				CertOidcIssuerRegexp: signOpts.AllowedOidcIssuerRegexp,
 			},
 		}
 		if err := a.VerifyCmd(ctx, v, from); err != nil {
@@ -310,41 +343,11 @@ func (a *Artifact) Pull(
 		}
 	}()
 
-	a.logger.Info("Verifying reference: " + from)
-
-	parsedRef, err := a.ParseReference(from)
-	if err != nil {
-		return nil, fmt.Errorf("parse reference: %w", err)
-	}
-
-	ref := parsedRef.Context().Name()
-	a.logger.Info("Creating repository for " + ref)
-
-	repo, err := a.NewRepository(ref)
-	if err != nil {
-		return nil, fmt.Errorf("create repository: %w", err)
-	}
-
-	if username != "" && password != "" {
-		a.logger.Info("Using username and password")
-
-		repo.Client = &auth.Client{
-			Client: retry.DefaultClient,
-			Cache:  auth.DefaultCache,
-			Credential: auth.StaticCredential(
-				repo.Reference.Registry,
-				auth.Credential{Username: username, Password: password},
-			),
-		}
-	}
-
-	tag := parsedRef.Identifier()
-	a.logger.Info("Using tag: " + tag)
-
 	a.logger.Info("Copying profile from repository")
+	a.logger.Info("Source image", "image", from)
 
 	if _, err := a.Copy(
-		ctx, repo, tag, store, tag, oras.DefaultCopyOptions,
+		ctx, repo, sha.String(), store, sha.String(), oras.DefaultCopyOptions,
 	); err != nil {
 		return nil, fmt.Errorf("copy from repository: %w", err)
 	}
@@ -387,13 +390,53 @@ func (a *Artifact) Pull(
 		}, nil
 	case *apparmorprofileapi.AppArmorProfile:
 		return &PullResult{
-			typ:             PullResultTypeApparmorProfile,
+			typ:             PullResultTypeAppArmorProfile,
 			apparmorProfile: obj,
 			content:         content,
 		}, nil
 	default:
 		return nil, fmt.Errorf("cannot process %T to PullResult", obj)
 	}
+}
+
+// imageWithDigest transforms the given image into an image with digest instead of a tag.
+// It retrieves the digest from the remote repository. Returns the updated image with
+// digest and the repository and the digest as separate return arguments.
+func (a *Artifact) imageWithDigest(ctx context.Context, image, username, password string) (
+	string, *remote.Repository, digest.Digest, error,
+) {
+	ref, err := a.ParseReference(image)
+	if err != nil {
+		return "", nil, "", fmt.Errorf("parsing ref for image %q: %w", image, err)
+	}
+
+	repo, err := a.NewRepository(ref.Context().Name())
+	if err != nil {
+		return "", nil, "", fmt.Errorf("creating repository for %q: %w",
+			ref.Name(), err)
+	}
+
+	if username != "" && password != "" {
+		a.logger.Info("Using username and password")
+
+		repo.Client = &auth.Client{
+			Client: retry.DefaultClient,
+			Cache:  auth.DefaultCache,
+			Credential: auth.StaticCredential(
+				repo.Reference.Registry,
+				auth.Credential{Username: username, Password: password},
+			),
+		}
+	}
+
+	desc, err := a.ResolveRepository(ctx, repo, ref.Identifier())
+	if err != nil {
+		return "", nil, "",
+			fmt.Errorf("resolving image identifier %q: %w", ref.Identifier(), err)
+	}
+
+	return fmt.Sprintf("%s@%s", ref.Context().Name(),
+		desc.Digest.String()), repo, desc.Digest, nil
 }
 
 // profileName returns the name for the profile based on the platform.

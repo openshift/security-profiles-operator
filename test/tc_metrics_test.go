@@ -40,7 +40,7 @@ func (e *e2e) testCaseSeccompMetrics([]string) {
 	metricUpdates := e.parseMetric(output, operationUpdate)
 
 	profile := fmt.Sprintf(`
-apiVersion: security-profiles-operator.x-k8s.io/v1beta1
+apiVersion: security-profiles-operator.x-k8s.io/v1
 kind: SeccompProfile
 metadata:
   name: %s
@@ -124,7 +124,7 @@ func (e *e2e) parseMetric(content, metric string) int {
 			fields := strings.Fields(line)
 			e.Len(fields, 2)
 			i, err := strconv.Atoi(fields[1])
-			e.Nil(err)
+			e.NoError(err)
 
 			return i
 		}

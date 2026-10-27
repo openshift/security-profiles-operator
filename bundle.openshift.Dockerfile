@@ -1,18 +1,25 @@
-ARG SPO_VERSION="0.10.0"
+ARG SPO_VERSION="1.0.1"
+# The downstream version replaced by this bundle (spec.replaces).
+ARG PREVIOUS_SPO_VERSION="0.10.1"
 
-FROM brew.registry.redhat.io/rh-osbs/openshift-golang-builder:v1.24 as builder-runner
+FROM registry.redhat.io/openshift/golang-builder:v1.26.7-202608270918.p2.gedd1cdd.assembly.stream.el9 as builder-runner
 # Use a new stage to enable caching of the package installations for local development
 FROM builder-runner as builder
 ARG SPO_VERSION
+ARG PREVIOUS_SPO_VERSION
 COPY . .
 WORKDIR bundle-hack
-RUN go run ./update_csv.go ../bundle/manifests ${SPO_VERSION}
+RUN go run ./update_csv.go ../bundle/manifests ${SPO_VERSION} ${PREVIOUS_SPO_VERSION}
 RUN ./update_bundle_annotations.sh
 RUN ./update_bundle_namespace.sh
 RUN ./update_bundle_rbac.sh
+RUN ./update_crd_conversion.sh
 
 FROM scratch
-LABEL name=openshift-compliance-operator-bundle
+ARG SPO_VERSION
+
+LABEL name="compliance/openshift-security-profiles-operator-bundle"
+LABEL cpe="cpe:/a:redhat:openshift_security_profiles_operator:1::el9"
 LABEL version=${SPO_VERSION}
 LABEL summary='OpenShift Security Profiles Operator'
 LABEL maintainer='Infrastructure Security and Compliance Team <isc-team@redhat.com>'

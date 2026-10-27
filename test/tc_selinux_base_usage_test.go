@@ -26,7 +26,7 @@ const (
 	maxNodeIterations      = 6
 	sleepBetweenIterations = 5 * time.Second
 	errorloggerPolicy      = `
-apiVersion: security-profiles-operator.x-k8s.io/v1alpha2
+apiVersion: security-profiles-operator.x-k8s.io/v1
 kind: SelinuxProfile
 metadata:
   name: errorlogger
@@ -62,7 +62,7 @@ spec:
 `
 
 	rawErrorloggerPolicy = `
-apiVersion: security-profiles-operator.x-k8s.io/v1alpha2
+apiVersion: security-profiles-operator.x-k8s.io/v1
 kind: RawSelinuxProfile
 metadata:
   name: raw-errorlogger
@@ -78,7 +78,7 @@ spec:
 	// ensure that the workload will fail if the policy in incomplete. Allows setting a parameter
 	// as needed.
 	errorloggerIncompletePolFmt = `
-apiVersion: security-profiles-operator.x-k8s.io/v1alpha2
+apiVersion: security-profiles-operator.x-k8s.io/v1
 kind: SelinuxProfile
 metadata:
   name: errorlogger-incomplete-%s
@@ -111,7 +111,7 @@ spec:
 `
 
 	netContainerPolicy = `
-apiVersion: security-profiles-operator.x-k8s.io/v1alpha2
+apiVersion: security-profiles-operator.x-k8s.io/v1
 kind: SelinuxProfile
 metadata:
   name: net-container-policy
@@ -214,7 +214,7 @@ func (e *e2e) testCaseSelinuxIncompletePolicy() {
 	e.logf("creating incomplete policy")
 
 	removeFn := e.writeAndCreate(
-		fmt.Sprintf(errorloggerIncompletePolFmt, "enforcing", "permissive", "false"),
+		fmt.Sprintf(errorloggerIncompletePolFmt, "enforcing", "mode", "Enforcing"),
 		"errorlogger-policy-incomplete-enforcing.yml")
 	defer removeFn()
 
@@ -283,7 +283,7 @@ func (e *e2e) testCaseSelinuxIncompletePermissivePolicy() {
 	e.logf("creating incomplete policy")
 
 	removeFn := e.writeAndCreate(
-		fmt.Sprintf(errorloggerIncompletePolFmt, "permissive", "permissive", "true"),
+		fmt.Sprintf(errorloggerIncompletePolFmt, "permissive", "mode", "Permissive"),
 		"errorlogger-policy-incomplete-permissive.yml")
 	defer removeFn()
 
@@ -314,7 +314,7 @@ func (e *e2e) testCaseSelinuxIncompleteDisabledPolicy() {
 	e.logf("creating disabled policy")
 
 	removeFn := e.writeAndCreate(
-		fmt.Sprintf(errorloggerIncompletePolFmt, "disabled", "disabled", "true"),
+		fmt.Sprintf(errorloggerIncompletePolFmt, "disabled", "state", "Disabled"),
 		"errorlogger-policy-incomplete-disabled.yml")
 	defer removeFn()
 

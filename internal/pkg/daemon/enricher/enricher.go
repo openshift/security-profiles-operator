@@ -61,7 +61,7 @@ type LogEnricherOptions struct {
 
 var LogEnricherDefaultOptions = LogEnricherOptions{
 	EnricherFiltersJson: "[]",
-	AuditSource:         "auditd",
+	AuditSource:         "Auditd",
 }
 
 // Enricher is the main structure of this package.
@@ -96,7 +96,7 @@ func New(logger logr.Logger, opts *LogEnricherOptions) (*Enricher, error) {
 
 	var source auditsource.AuditLineSource
 
-	if opts != nil && opts.AuditSource == "bpf" {
+	if opts != nil && strings.EqualFold(opts.AuditSource, "bpf") {
 		logger.Info("Using BPF-based audit source")
 
 		source, err = auditsource.NewBpfSource(logger)
@@ -167,20 +167,19 @@ func (e *Enricher) Run() error {
 
 	var (
 		conn          *grpc.ClientConn
-		cancel        context.CancelFunc
 		metricsClient apimetrics.Metrics_AuditIncClient
 	)
 
 	if err := util.Retry(func() (err error) {
-		conn, cancel, err = e.Dial()
+		conn, err = e.Dial()
 		if err != nil {
 			return fmt.Errorf("connecting to local GRPC server: %w", err)
 		}
+
 		client := apimetrics.NewMetricsClient(conn)
 
 		metricsClient, err = e.AuditInc(client)
 		if err != nil {
-			cancel()
 			e.Close(conn)
 
 			return fmt.Errorf("create metrics audit client: %w", err)
@@ -191,7 +190,6 @@ func (e *Enricher) Run() error {
 		return fmt.Errorf("connect to local GRPC server: %w", err)
 	}
 
-	defer cancel()
 	defer e.Close(conn)
 
 	if err := e.startGrpcServer(); err != nil {
@@ -301,21 +299,16 @@ func (e *Enricher) startGrpcServer() error {
 
 // Dial can be used to connect to the default GRPC server by creating a new
 // client.
-func Dial() (*grpc.ClientConn, context.CancelFunc, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
-	//nolint:staticcheck // we'll use this API once we have an appropriate alternative
-	conn, err := grpc.DialContext(
-		ctx,
+func Dial() (*grpc.ClientConn, error) {
+	conn, err := grpc.NewClient(
 		"unix://"+config.GRPCServerSocketEnricher,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	if err != nil {
-		cancel()
-
-		return nil, nil, fmt.Errorf("GRPC dial: %w", err)
+		return nil, fmt.Errorf("GRPC dial: %w", err)
 	}
 
-	return conn, cancel, nil
+	return conn, nil
 }
 
 func (e *Enricher) addToBacklog(line *types.AuditLine) error {
@@ -433,7 +426,7 @@ func (e *Enricher) dispatchSelinuxLine(
 	}
 
 	if info.RecordProfile != "" {
-		for _, perm := range strings.Split(auditLine.Perm, " ") {
+		for perm := range strings.SplitSeq(auditLine.Perm, " ") {
 			avc := &apienricher.AvcResponse_SelinuxAvc{
 				Perm:     perm,
 				Scontext: auditLine.Scontext,
