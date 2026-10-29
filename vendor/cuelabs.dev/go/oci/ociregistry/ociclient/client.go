@@ -18,13 +18,16 @@ package ociclient
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -51,6 +54,10 @@ type Options struct {
 	// [ociauth.RequestInfo] value added, suitable for consumption
 	// by the transport created by [ociauth.NewStdTransport]. If
 	// Transport is nil, [http.DefaultTransport] will be used.
+	//
+	// Clients should use Transport to set a meaningful User-Agent header,
+	// particularly when talking to registries they do not control;
+	// see the userAgent example.
 	Transport http.RoundTripper
 
 	// Insecure specifies whether an http scheme will be used to
@@ -72,7 +79,7 @@ type Options struct {
 // it it's more than that.
 const DefaultListPageSize = 1000
 
-var debugID int32
+var debugID atomic.Int32
 
 // New returns a registry implementation that uses the OCI
 // HTTP API. A nil opts parameter is equivalent to a pointer
@@ -86,7 +93,7 @@ func New(host string, opts0 *Options) (ociregistry.Interface, error) {
 		opts = *opts0
 	}
 	if opts.DebugID == "" {
-		opts.DebugID = fmt.Sprintf("id%d", atomic.AddInt32(&debugID, 1))
+		opts.DebugID = fmt.Sprintf("id%d", debugID.Add(1))
 	}
 	if opts.Transport == nil {
 		opts.Transport = http.DefaultTransport
@@ -132,6 +139,11 @@ const (
 	requireDigest
 )
 
+var (
+	errUnknownContentLength = errors.New("unknown content length")
+	errNoDigest             = errors.New("no digest found in response")
+)
+
 // descriptorFromResponse tries to form a descriptor from an HTTP response,
 // filling in the Digest field using knownDigest if it's not present.
 //
@@ -160,7 +172,7 @@ func descriptorFromResponse(resp *http.Response, knownDigest digest.Digest, requ
 			size = contentSize
 		} else {
 			if resp.ContentLength < 0 {
-				return ociregistry.Descriptor{}, fmt.Errorf("unknown content length")
+				return ociregistry.Descriptor{}, errUnknownContentLength
 			}
 			size = resp.ContentLength
 		}
@@ -174,7 +186,7 @@ func descriptorFromResponse(resp *http.Response, knownDigest digest.Digest, requ
 		digest = knownDigest
 	}
 	if (require&requireDigest) != 0 && digest == "" {
-		return ociregistry.Descriptor{}, fmt.Errorf("no digest found in response")
+		return ociregistry.Descriptor{}, errNoDigest
 	}
 	return ociregistry.Descriptor{
 		Digest:    digest,
@@ -306,6 +318,17 @@ func (c *client) do(req *http.Request, okStatuses ...int) (*http.Response, error
 	if err != nil {
 		return nil, fmt.Errorf("cannot do HTTP request: %w", err)
 	}
+	// net/http only decompresses responses transparently when it asked
+	// for gzip itself, so do the same when a server ignores our request
+	// for identity encoding. Decompressing a partial response would not
+	// work, as its range is over the compressed bytes.
+	if resp.Header.Get("Content-Encoding") == "gzip" && resp.StatusCode != http.StatusPartialContent {
+		resp.Header.Del("Content-Encoding")
+		resp.Header.Del("Content-Length")
+		resp.ContentLength = -1
+		resp.Uncompressed = true
+		resp.Body = &gzipReader{body: resp.Body}
+	}
 	if debug {
 		buf.Reset()
 		fmt.Fprintf(&buf, "} -> %s {\n", resp.Status)
@@ -321,19 +344,45 @@ func (c *client) do(req *http.Request, okStatuses ...int) (*http.Response, error
 		resp.Body = io.NopCloser(bytes.NewReader(data))
 		c.logf("%s", buf.Bytes())
 	}
-	if len(okStatuses) == 0 && resp.StatusCode == http.StatusOK {
-		return resp, nil
-	}
-	for _, status := range okStatuses {
-		if resp.StatusCode == status {
-			return resp, nil
+	if len(okStatuses) == 0 && resp.StatusCode == http.StatusOK ||
+		slices.Contains(okStatuses, resp.StatusCode) {
+		// When asking for content as-is, any remaining encoding means
+		// that neither the body nor the Content-Length match the content.
+		if req.Header.Get("Accept-Encoding") == "identity" {
+			if enc := resp.Header.Get("Content-Encoding"); enc != "" && enc != "identity" {
+				resp.Body.Close()
+				return nil, fmt.Errorf("unexpected Content-Encoding %q", enc)
+			}
 		}
+		return resp, nil
 	}
 	defer resp.Body.Close()
 	if !isOKStatus(resp.StatusCode) {
 		return nil, makeError(resp)
 	}
 	return nil, unexpectedStatusError(resp.StatusCode)
+}
+
+// gzipReader decompresses a response body lazily, like net/http does,
+// as the body may be empty or never read.
+type gzipReader struct {
+	body io.ReadCloser
+	zr   *gzip.Reader
+	err  error
+}
+
+func (r *gzipReader) Read(p []byte) (int, error) {
+	if r.zr == nil && r.err == nil {
+		r.zr, r.err = gzip.NewReader(r.body)
+	}
+	if r.err != nil {
+		return 0, r.err
+	}
+	return r.zr.Read(p)
+}
+
+func (r *gzipReader) Close() error {
+	return r.body.Close()
 }
 
 func (c *client) logf(f string, a ...any) {
@@ -419,5 +468,19 @@ func newRequest(ctx context.Context, rreq *ocirequest.Request, body io.Reader) (
 	ctx = ociauth.ContextWithRequestInfo(ctx, ociauth.RequestInfo{
 		RequiredScope: scopeForRequest(rreq),
 	})
-	return http.NewRequestWithContext(ctx, method, u, body)
+	req, err := http.NewRequestWithContext(ctx, method, u, body)
+	if err != nil {
+		return nil, err
+	}
+	switch rreq.Kind {
+	case ocirequest.ReqBlobGet, ocirequest.ReqBlobHead,
+		ocirequest.ReqManifestGet, ocirequest.ReqManifestHead:
+		// Ask for content as-is: compression gains little for blobs,
+		// which are usually compressed already, nor for manifests,
+		// which are usually small. Moreover, net/http's transparent
+		// decompression would drop the Content-Length that we use
+		// to determine the size of the content.
+		req.Header.Set("Accept-Encoding", "identity")
+	}
+	return req, nil
 }
