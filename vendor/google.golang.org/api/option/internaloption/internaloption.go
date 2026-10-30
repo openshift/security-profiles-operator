@@ -8,6 +8,7 @@ package internaloption
 import (
 	"context"
 	"log/slog"
+	"maps"
 
 	"cloud.google.com/go/auth"
 	"github.com/googleapis/gax-go/v2/internallog"
@@ -109,6 +110,22 @@ func (x enableDirectPathXds) Apply(o *internal.DialSettings) {
 	o.EnableDirectPathXds = bool(x)
 }
 
+// EnableDirectPathXdsOverInterconnect returns a ClientOption that enables
+// DirectPath xDS over Cloud Interconnect. It is only valid when DirectPath
+// and DirectPath xDS are enabled.
+//
+// It should only be used internally by generated clients.
+// This is an EXPERIMENTAL API and may be changed or removed in the future.
+func EnableDirectPathXdsOverInterconnect() option.ClientOption {
+	return enableDirectPathXdsOverInterconnect(true)
+}
+
+type enableDirectPathXdsOverInterconnect bool
+
+func (x enableDirectPathXdsOverInterconnect) Apply(o *internal.DialSettings) {
+	o.EnableDirectPathXdsOverInterconnect = bool(x)
+}
+
 // AllowNonDefaultServiceAccount returns a ClientOption that overrides the default
 // requirement for using the default service account for DirectPath.
 //
@@ -151,6 +168,23 @@ type withDefaultScopes []string
 func (w withDefaultScopes) Apply(o *internal.DialSettings) {
 	o.DefaultScopes = make([]string, len(w))
 	copy(o.DefaultScopes, w)
+}
+
+// WithTelemetryAttributes returns a ClientOption that specifies a map of
+// telemetry attributes to be added to all telemetry signals, such as tracing
+// and metrics, for purposes including representing the static identity of the
+// client (e.g., service name, version). These attributes are expected to be
+// consistent across all signals to enable cross-signal correlation.
+//
+// It should only be used internally by generated clients.
+func WithTelemetryAttributes(attrs map[string]string) option.ClientOption {
+	return withTelemetryAttributes(attrs)
+}
+
+type withTelemetryAttributes map[string]string
+
+func (w withTelemetryAttributes) Apply(o *internal.DialSettings) {
+	o.TelemetryAttributes = maps.Clone(w)
 }
 
 // WithDefaultUniverseDomain returns a ClientOption that sets the default universe domain.
@@ -290,7 +324,7 @@ func GetLogger(opts []option.ClientOption) *slog.Logger {
 // options, in this order:
 //
 //   - [option.WithoutAuthentication]
-//   - [option.WithAuthCredentials]
+//   - [option.Credentials]
 //   - [WithCredentials] (internal use only)
 //   - [option.WithCredentials]
 //   - [option.WithTokenSource]
@@ -300,7 +334,9 @@ func GetLogger(opts []option.ClientOption) *slog.Logger {
 // returns the result:
 //
 //   - [option.WithAudiences]
+//   - [option.WithAuthCredentialsFile]
 //   - [option.WithCredentialsFile]
+//   - [option.WithAuthCredentialsJSON]
 //   - [option.WithCredentialsJSON]
 //   - [option.WithScopes]
 //   - [WithDefaultScopes] (internal use only)
