@@ -4,17 +4,25 @@ package ssooidc
 
 import (
 	"context"
-	"fmt"
-	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
+	"github.com/aws/aws-sdk-go-v2/service/ssooidc/schemas"
 	"github.com/aws/aws-sdk-go-v2/service/ssooidc/types"
+	smithy "github.com/aws/smithy-go"
 	"github.com/aws/smithy-go/middleware"
-	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
-// Creates and returns access and refresh tokens for clients and applications that
-// are authenticated using IAM entities. The access token can be used to fetch
-// short-lived credentials for the assigned Amazon Web Services accounts or to
-// access application APIs using bearer authentication.
+// Creates and returns access and refresh tokens for authorized client
+// applications that are authenticated using any IAM entity, such as a service role
+// or user. These tokens might contain defined scopes that specify permissions such
+// as read:profile or write:data . Through downscoping, you can use the scopes
+// parameter to request tokens with reduced permissions compared to the original
+// client application's permissions or, if applicable, the refresh token's scopes.
+// The access token can be used to fetch short-lived credentials for the assigned
+// Amazon Web Services accounts or to access application APIs using bearer
+// authentication.
+//
+// This API is used with Signature Version 4. For more information, see [Amazon Web Services Signature Version 4 for API Requests].
+//
+// [Amazon Web Services Signature Version 4 for API Requests]: https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv.html
 func (c *Client) CreateTokenWithIAM(ctx context.Context, params *CreateTokenWithIAMInput, optFns ...func(*Options)) (*CreateTokenWithIAMOutput, error) {
 	if params == nil {
 		params = &CreateTokenWithIAMInput{}
@@ -118,15 +126,54 @@ type CreateTokenWithIAMInput struct {
 	noSmithyDocumentSerde
 }
 
+func (v *CreateTokenWithIAMInput) Serialize(s smithy.ShapeSerializer) {
+	s.WriteStruct(schemas.CreateTokenWithIAMRequest)
+	v.SerializeMembers(s)
+	s.CloseStruct()
+}
+
+func (v *CreateTokenWithIAMInput) SerializeMembers(s smithy.ShapeSerializer) {
+	if v.Assertion != nil {
+		s.WriteString(schemas.CreateTokenWithIAMRequest_assertion, *v.Assertion)
+	}
+	if v.ClientId != nil {
+		s.WriteString(schemas.CreateTokenWithIAMRequest_clientId, *v.ClientId)
+	}
+	if v.Code != nil {
+		s.WriteString(schemas.CreateTokenWithIAMRequest_code, *v.Code)
+	}
+	if v.CodeVerifier != nil {
+		s.WriteString(schemas.CreateTokenWithIAMRequest_codeVerifier, *v.CodeVerifier)
+	}
+	if v.GrantType != nil {
+		s.WriteString(schemas.CreateTokenWithIAMRequest_grantType, *v.GrantType)
+	}
+	if v.RedirectUri != nil {
+		s.WriteString(schemas.CreateTokenWithIAMRequest_redirectUri, *v.RedirectUri)
+	}
+	if v.RefreshToken != nil {
+		s.WriteString(schemas.CreateTokenWithIAMRequest_refreshToken, *v.RefreshToken)
+	}
+	if v.RequestedTokenType != nil {
+		s.WriteString(schemas.CreateTokenWithIAMRequest_requestedTokenType, *v.RequestedTokenType)
+	}
+	serializeScopes(s, schemas.CreateTokenWithIAMRequest_scope, v.Scope)
+	if v.SubjectToken != nil {
+		s.WriteString(schemas.CreateTokenWithIAMRequest_subjectToken, *v.SubjectToken)
+	}
+	if v.SubjectTokenType != nil {
+		s.WriteString(schemas.CreateTokenWithIAMRequest_subjectTokenType, *v.SubjectTokenType)
+	}
+}
+
 type CreateTokenWithIAMOutput struct {
 
 	// A bearer token to access Amazon Web Services accounts and applications assigned
 	// to a user.
 	AccessToken *string
 
-	// A structure containing information from the idToken . Only the identityContext
-	// is in it, which is a value extracted from the idToken . This provides direct
-	// access to identity information without requiring JWT parsing.
+	// A structure containing information from IAM Identity Center managed user and
+	// group information.
 	AwsAdditionalDetails *types.AwsAdditionalDetails
 
 	// Indicates the time in seconds when an access token will expire.
@@ -168,80 +215,88 @@ type CreateTokenWithIAMOutput struct {
 	noSmithyDocumentSerde
 }
 
+func (v *CreateTokenWithIAMOutput) Serialize(s smithy.ShapeSerializer) {
+	s.WriteStruct(schemas.CreateTokenWithIAMResponse)
+	v.SerializeMembers(s)
+	s.CloseStruct()
+}
+
+func (v *CreateTokenWithIAMOutput) SerializeMembers(s smithy.ShapeSerializer) {
+	if v.AccessToken != nil {
+		s.WriteString(schemas.CreateTokenWithIAMResponse_accessToken, *v.AccessToken)
+	}
+	if v.AwsAdditionalDetails != nil {
+		s.WriteStruct(schemas.CreateTokenWithIAMResponse_awsAdditionalDetails)
+		v.AwsAdditionalDetails.SerializeMembers(s)
+		s.CloseStruct()
+	}
+	if v.ExpiresIn != 0 {
+		s.WriteInt32(schemas.CreateTokenWithIAMResponse_expiresIn, v.ExpiresIn)
+	}
+	if v.IdToken != nil {
+		s.WriteString(schemas.CreateTokenWithIAMResponse_idToken, *v.IdToken)
+	}
+	if v.IssuedTokenType != nil {
+		s.WriteString(schemas.CreateTokenWithIAMResponse_issuedTokenType, *v.IssuedTokenType)
+	}
+	if v.RefreshToken != nil {
+		s.WriteString(schemas.CreateTokenWithIAMResponse_refreshToken, *v.RefreshToken)
+	}
+	serializeScopes(s, schemas.CreateTokenWithIAMResponse_scope, v.Scope)
+	if v.TokenType != nil {
+		s.WriteString(schemas.CreateTokenWithIAMResponse_tokenType, *v.TokenType)
+	}
+}
+func (v *CreateTokenWithIAMOutput) Deserialize(d smithy.ShapeDeserializer) error {
+	return smithy.ReadStruct(d, schemas.CreateTokenWithIAMResponse, func(s *smithy.Schema) error {
+		switch s {
+		case schemas.CreateTokenWithIAMResponse_accessToken:
+			v.AccessToken = new(string)
+			return d.ReadString(schemas.CreateTokenWithIAMResponse_accessToken, v.AccessToken)
+		case schemas.CreateTokenWithIAMResponse_awsAdditionalDetails:
+			v.AwsAdditionalDetails = &types.AwsAdditionalDetails{}
+			return v.AwsAdditionalDetails.Deserialize(d)
+		case schemas.CreateTokenWithIAMResponse_expiresIn:
+			return d.ReadInt32(schemas.CreateTokenWithIAMResponse_expiresIn, &v.ExpiresIn)
+		case schemas.CreateTokenWithIAMResponse_idToken:
+			v.IdToken = new(string)
+			return d.ReadString(schemas.CreateTokenWithIAMResponse_idToken, v.IdToken)
+		case schemas.CreateTokenWithIAMResponse_issuedTokenType:
+			v.IssuedTokenType = new(string)
+			return d.ReadString(schemas.CreateTokenWithIAMResponse_issuedTokenType, v.IssuedTokenType)
+		case schemas.CreateTokenWithIAMResponse_refreshToken:
+			v.RefreshToken = new(string)
+			return d.ReadString(schemas.CreateTokenWithIAMResponse_refreshToken, v.RefreshToken)
+		case schemas.CreateTokenWithIAMResponse_scope:
+			return deserializeScopes(d, schemas.CreateTokenWithIAMResponse_scope, &v.Scope)
+		case schemas.CreateTokenWithIAMResponse_tokenType:
+			v.TokenType = new(string)
+			return d.ReadString(schemas.CreateTokenWithIAMResponse_tokenType, v.TokenType)
+		}
+		return nil
+	})
+}
 func (c *Client) addOperationCreateTokenWithIAMMiddlewares(stack *middleware.Stack, options Options) (err error) {
-	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+	if err := stack.Serialize.Add(&serializeRequestMiddleware{options: &options, operationSchema: smithy.NewOperationSchema(schemas.CreateTokenWithIAM, schemas.CreateTokenWithIAMRequest, schemas.CreateTokenWithIAMResponse)}, middleware.After); err != nil {
 		return err
 	}
-	err = stack.Serialize.Add(&awsRestjson1_serializeOpCreateTokenWithIAM{}, middleware.After)
-	if err != nil {
+	if err := stack.Deserialize.Add(&deserializeResponseMiddleware{options: &options, operationSchema: smithy.NewOperationSchema(schemas.CreateTokenWithIAM, schemas.CreateTokenWithIAMRequest, schemas.CreateTokenWithIAMResponse), output: &CreateTokenWithIAMOutput{}}, middleware.After); err != nil {
 		return err
-	}
-	err = stack.Deserialize.Add(&awsRestjson1_deserializeOpCreateTokenWithIAM{}, middleware.After)
-	if err != nil {
-		return err
-	}
-	if err := addProtocolFinalizerMiddlewares(stack, options, "CreateTokenWithIAM"); err != nil {
-		return fmt.Errorf("add protocol finalizers: %v", err)
 	}
 
-	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
-		return err
-	}
-	if err = addSetLoggerMiddleware(stack, options); err != nil {
-		return err
-	}
-	if err = addClientRequestID(stack); err != nil {
-		return err
-	}
-	if err = addComputeContentLength(stack); err != nil {
-		return err
-	}
 	if err = addResolveEndpointMiddleware(stack, options); err != nil {
 		return err
 	}
 	if err = addComputePayloadSHA256(stack); err != nil {
 		return err
 	}
-	if err = addRetry(stack, options); err != nil {
-		return err
-	}
-	if err = addRawResponseToMetadata(stack); err != nil {
-		return err
-	}
-	if err = addRecordResponseTiming(stack); err != nil {
-		return err
-	}
-	if err = addSpanRetryLoop(stack, options); err != nil {
-		return err
-	}
-	if err = addClientUserAgent(stack, options); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
-		return err
-	}
-	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
-		return err
-	}
-	if err = addTimeOffsetBuild(stack, c); err != nil {
-		return err
-	}
-	if err = addUserAgentRetryMode(stack, options); err != nil {
+	if err = addRecordResponseTiming(stack, options); err != nil {
 		return err
 	}
 	if err = addCredentialSource(stack, options); err != nil {
 		return err
 	}
 	if err = addOpCreateTokenWithIAMValidationMiddleware(stack); err != nil {
-		return err
-	}
-	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opCreateTokenWithIAM(options.Region), middleware.Before); err != nil {
-		return err
-	}
-	if err = addRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -256,25 +311,8 @@ func (c *Client) addOperationCreateTokenWithIAMMiddlewares(stack *middleware.Sta
 	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
 		return err
 	}
-	if err = addSpanInitializeStart(stack); err != nil {
-		return err
-	}
-	if err = addSpanInitializeEnd(stack); err != nil {
-		return err
-	}
-	if err = addSpanBuildRequestStart(stack); err != nil {
-		return err
-	}
-	if err = addSpanBuildRequestEnd(stack); err != nil {
+	if err = addInterceptors(stack, options); err != nil {
 		return err
 	}
 	return nil
-}
-
-func newServiceMetadataMiddleware_opCreateTokenWithIAM(region string) *awsmiddleware.RegisterServiceMetadata {
-	return &awsmiddleware.RegisterServiceMetadata{
-		Region:        region,
-		ServiceID:     ServiceID,
-		OperationName: "CreateTokenWithIAM",
-	}
 }
