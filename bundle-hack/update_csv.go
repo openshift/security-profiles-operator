@@ -218,6 +218,11 @@ func replaceImages(m map[string]interface{}) error {
 			RedHatBase: "registry.redhat.io/compliance/openshift-selinuxd-rhel9",
 		},
 		{
+			EnvName:    "RELATED_IMAGE_SELINUXD_EL10",
+			KonfluxPS:  "quay.io/redhat-user-workloads/ocp-isc-tenant/openshift-selinuxd-rhel10-container-release@sha256:92ecc6ad0f0b4ff8531059b9b36b0db2cdff13e055defaddb5bf0f1d266958a6",
+			RedHatBase: "registry.redhat.io/compliance/openshift-selinuxd-rhel10",
+		},
+		{
 			EnvName:    "RELATED_IMAGE_SELINUXD_FEDORA",
 			KonfluxPS:  "quay.io/redhat-user-workloads/ocp-isc-tenant/openshift-selinuxd-rhel9-container-dev@sha256:256be04e4d97f3d09ec8b9516c23eda4e80e77fc5c8aec27ed4ab3ace69d608b",
 			RedHatBase: "registry.redhat.io/compliance/openshift-selinuxd-rhel9",
