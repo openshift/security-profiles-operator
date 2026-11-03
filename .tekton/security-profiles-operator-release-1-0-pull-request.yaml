@@ -4,16 +4,17 @@ metadata:
   annotations:
     build.appstudio.openshift.io/repo: https://github.com/openshift/security-profiles-operator?rev={{revision}}
     build.appstudio.redhat.com/commit_sha: '{{revision}}'
+    build.appstudio.redhat.com/pull_request_number: '{{pull_request_number}}'
     build.appstudio.redhat.com/target_branch: '{{target_branch}}'
-    pipelinesascode.tekton.dev/cancel-in-progress: "false"
+    pipelinesascode.tekton.dev/cancel-in-progress: "true"
     pipelinesascode.tekton.dev/max-keep-runs: "3"
-    pipelinesascode.tekton.dev/on-cel-expression: event == "push" && target_branch == "konflux" && ("bundle-hack/***".pathChanged() || "bundle/***".pathChanged() || "bundle.openshift.Dockerfile".pathChanged() || ".tekton/*bundle-dev*.yaml".pathChanged())
+    pipelinesascode.tekton.dev/on-cel-expression: event == "pull_request" && target_branch == "release-1.0" && !files.all.all(x, x.matches('^bundle/') || x.matches('^bundle-hack/') || x.matches('^bundle\\.openshift\\.Dockerfile') || x.matches('^\\.tekton/security-profiles-operator-bundle-.*\\.yaml'))
   creationTimestamp:
   labels:
-    appstudio.openshift.io/application: security-profiles-operator-dev
-    appstudio.openshift.io/component: security-profiles-operator-bundle-dev
+    appstudio.openshift.io/application: security-profiles-operator-release-1-0
+    appstudio.openshift.io/component: security-profiles-operator-release-1-0
     pipelines.appstudio.openshift.io/type: build
-  name: security-profiles-operator-bundle-dev-on-push
+  name: security-profiles-operator-release-1-0-on-pull-request
   namespace: ocp-isc-tenant
 spec:
   params:
@@ -22,21 +23,27 @@ spec:
   - name: revision
     value: '{{revision}}'
   - name: output-image
-    value: quay.io/redhat-user-workloads/ocp-isc-tenant/security-profiles-operator-bundle-dev:{{revision}}
+    value: quay.io/redhat-user-workloads/ocp-isc-tenant/security-profiles-operator-release:on-pr-{{revision}}
+  - name: image-expires-after
+    value: 5d
+  - name: build-platforms
+    value:
+    - linux/x86_64
+    - linux/ppc64le
   - name: dockerfile
-    value: bundle.openshift.Dockerfile
+    value: Dockerfile.openshift
   - name: hermetic
     value: "true"
   - name: build-source-image
     value: "true"
   - name: prefetch-input
-    value: '[{"type": "gomod", "path": "."}]'
+    value: '[{"type": "rpm", "path": "konflux"}, {"type": "gomod", "path": "."}]'
   pipelineSpec:
     description: |
-      This pipeline is ideal for building container images from a Containerfile while maintaining trust after pipeline customization.
+      This pipeline is ideal for building multi-arch container images from a Containerfile while maintaining trust after pipeline customization.
 
-      _Uses `buildah` to create a container image leveraging [trusted artifacts](https://konflux-ci.dev/architecture/ADR/0036-trusted-artifacts.html). It also optionally creates a source image and runs some build-time tests. Information is shared between tasks using OCI artifacts instead of PVCs. EC will pass the [`trusted_task.trusted`](https://conforma.dev/docs/policy/packages/release_trusted_task.html#trusted_task__trusted) policy as long as all data used to build the artifact is generated from trusted tasks.
-      This pipeline is pushed as a Tekton bundle to [quay.io](https://quay.io/repository/konflux-ci/tekton-catalog/pipeline-docker-build-oci-ta?tab=tags)_
+      _Uses `buildah` to create a multi-platform container image leveraging [trusted artifacts](https://konflux-ci.dev/architecture/ADR/0036-trusted-artifacts.html). It also optionally creates a source image and runs some build-time tests. This pipeline requires that the [multi platform controller](https://github.com/konflux-ci/multi-platform-controller) is deployed and configured on your Konflux instance. Information is shared between tasks using OCI artifacts instead of PVCs. EC will pass the [`trusted_task.trusted`](https://conforma.dev/docs/policy/packages/release_trusted_task.html#trusted_task__trusted) policy as long as all data used to build the artifact is generated from trusted tasks.
+      This pipeline is pushed as a Tekton bundle to [quay.io](https://quay.io/repository/konflux-ci/tekton-catalog/pipeline-docker-build-multi-platform-oci-ta?tab=tags)_
     params:
     - description: Source Repository URL
       name: git-url
@@ -76,7 +83,7 @@ spec:
       description: Build a source image.
       name: build-source-image
       type: string
-    - default: "false"
+    - default: "true"
       description: Add built image into an OCI image index
       name: build-image-index
       type: string
@@ -92,6 +99,11 @@ spec:
       description: Whether to enable privileged mode, should be used only with remote VMs
       name: privileged-nested
       type: string
+    - default:
+      - linux/x86_64
+      description: List of platforms to build the container images on. The available set of values is determined by the configuration of the multi-platform-controller.
+      name: build-platforms
+      type: array
     - name: source-date-epoch
       type: string
       default: ''
@@ -186,7 +198,12 @@ spec:
         workspace: git-auth
       - name: netrc
         workspace: netrc
-    - name: build-container
+    - matrix:
+        params:
+        - name: PLATFORM
+          value:
+          - $(params.build-platforms)
+      name: build-images
       params:
       - name: IMAGE
         value: $(params.output-image)
@@ -213,6 +230,8 @@ spec:
         value: $(tasks.prefetch-dependencies.results.SOURCE_ARTIFACT)
       - name: CACHI2_ARTIFACT
         value: $(tasks.prefetch-dependencies.results.CACHI2_ARTIFACT)
+      - name: IMAGE_APPEND_PLATFORM
+        value: "true"
       - name: SOURCE_DATE_EPOCH
         value: $(params.source-date-epoch)
       - name: REWRITE_TIMESTAMP
@@ -224,9 +243,9 @@ spec:
       taskRef:
         params:
         - name: name
-          value: buildah-oci-ta
+          value: buildah-remote-oci-ta
         - name: bundle
-          value: quay.io/konflux-ci/tekton-catalog/task-buildah-oci-ta:0.12.2@sha256:e1bbe61a3a4bc543be9b5f6fc4174acaa2dd08fb5f7fe4d9db9f3193a7e1b03c
+          value: quay.io/konflux-ci/tekton-catalog/task-buildah-remote-oci-ta:0.12.3@sha256:88b971c800b3e71903ddad83da884d092e9beda8b51deaf980f6525e45ed043f
         - name: kind
           value: task
         resolver: bundles
@@ -238,9 +257,9 @@ spec:
         value: $(params.build-image-index)
       - name: IMAGES
         value:
-        - $(tasks.build-container.results.IMAGE_URL)@$(tasks.build-container.results.IMAGE_DIGEST)
+        - $(tasks.build-images.results.IMAGE_REF[*])
       runAfter:
-      - build-container
+      - build-images
       taskRef:
         params:
         - name: name
@@ -514,9 +533,6 @@ spec:
         value: $(tasks.build-image-index.results.IMAGE_URL)
       - name: IMAGE_DIGEST
         value: $(tasks.build-image-index.results.IMAGE_DIGEST)
-      - name: ADDITIONAL_TAGS
-        value:
-        - '{{ target_branch }}'
       runAfter:
       - build-image-index
       taskRef:
@@ -579,7 +595,7 @@ spec:
     - name: netrc
       optional: true
   taskRunTemplate:
-    serviceAccountName: build-pipeline-security-profiles-operator-bundle-dev
+    serviceAccountName: build-pipeline-security-profiles-operator-release-1-0
   workspaces:
   - name: git-auth
     secret:
