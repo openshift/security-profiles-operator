@@ -5652,6 +5652,18 @@ rules:
   - update
   - watch
 - apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - security-profiles-operator.x-k8s.io
   resources:
   - profilerecordings
@@ -6597,6 +6609,8 @@ spec:
           value: quay.io/security-profiles-operator/selinuxd-el8:latest
         - name: RELATED_IMAGE_SELINUXD_EL9
           value: quay.io/security-profiles-operator/selinuxd-el9:latest
+        - name: RELATED_IMAGE_SELINUXD_EL10
+          value: quay.io/security-profiles-operator/selinuxd-el10:latest
         - name: RELATED_IMAGE_SELINUXD_FEDORA
           value: quay.io/security-profiles-operator/selinuxd-fedora:latest
         - name: OPERATOR_NAMESPACE
