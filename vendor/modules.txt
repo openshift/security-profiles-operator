@@ -2397,7 +2397,7 @@ k8s.io/component-base/tracing
 k8s.io/component-base/tracing/api/v1
 k8s.io/component-base/version
 k8s.io/component-base/zpages/features
-# k8s.io/gengo/v2 v2.0.0-20251215205346-5ee0d033ba5b
+# k8s.io/gengo/v2 v2.0.0-20260408192533-25e2208e0dc3
 ## explicit; go 1.24.0
 k8s.io/gengo/v2
 k8s.io/gengo/v2/codetags
