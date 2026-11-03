@@ -204,7 +204,7 @@ func replaceImages(m map[string]interface{}) error {
 	defs := []imgDef{
 		{
 			EnvName:    "RELATED_IMAGE_OPERATOR",
-			KonfluxPS:  "quay.io/redhat-user-workloads/ocp-isc-tenant/security-profiles-operator-release@sha256:a2cfc216188152ba8e9b2a4a67afded917473f401516e03d5ba6a4ff9f84c3a9",
+			KonfluxPS:  "quay.io/redhat-user-workloads/ocp-isc-tenant/security-profiles-operator-release@sha256:d6ca02e413968ea4710f7c4bd08a8a5efc09f5122e6d7c66b9112d07d6464190",
 			RedHatBase: "registry.redhat.io/compliance/openshift-security-profiles-rhel8-operator",
 		},
 		{
