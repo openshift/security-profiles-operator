@@ -516,10 +516,6 @@ github.com/docker/docker-credential-helpers/credentials
 # github.com/dustin/go-humanize v1.0.1
 ## explicit; go 1.16
 github.com/dustin/go-humanize
-# github.com/emicklei/go-restful/v3 v3.13.0
-## explicit; go 1.13
-github.com/emicklei/go-restful/v3
-github.com/emicklei/go-restful/v3/log
 # github.com/emicklei/proto v1.14.3
 ## explicit; go 1.12
 github.com/emicklei/proto
@@ -569,10 +565,11 @@ github.com/go-openapi/analysis/internal/flatten/sortref
 # github.com/go-openapi/errors v0.22.7
 ## explicit; go 1.24.0
 github.com/go-openapi/errors
-# github.com/go-openapi/jsonpointer v0.23.1
+# github.com/go-openapi/jsonpointer v1.0.0
 ## explicit; go 1.25.0
 github.com/go-openapi/jsonpointer
-# github.com/go-openapi/jsonreference v0.21.6
+github.com/go-openapi/jsonpointer/jsonname
+# github.com/go-openapi/jsonreference v1.0.0
 ## explicit; go 1.25.0
 github.com/go-openapi/jsonreference
 github.com/go-openapi/jsonreference/internal
@@ -609,7 +606,7 @@ github.com/go-openapi/swag
 # github.com/go-openapi/swag/cmdutils v0.26.0
 ## explicit; go 1.25.0
 github.com/go-openapi/swag/cmdutils
-# github.com/go-openapi/swag/conv v0.26.0
+# github.com/go-openapi/swag/conv v0.27.1
 ## explicit; go 1.25.0
 github.com/go-openapi/swag/conv
 # github.com/go-openapi/swag/fileutils v0.26.0
@@ -618,7 +615,7 @@ github.com/go-openapi/swag/fileutils
 # github.com/go-openapi/swag/jsonname v0.26.0
 ## explicit; go 1.25.0
 github.com/go-openapi/swag/jsonname
-# github.com/go-openapi/swag/jsonutils v0.26.0
+# github.com/go-openapi/swag/jsonutils v0.27.1
 ## explicit; go 1.25.0
 github.com/go-openapi/swag/jsonutils
 github.com/go-openapi/swag/jsonutils/adapters
@@ -633,10 +630,13 @@ github.com/go-openapi/swag/mangling
 # github.com/go-openapi/swag/netutils v0.26.0
 ## explicit; go 1.25.0
 github.com/go-openapi/swag/netutils
+# github.com/go-openapi/swag/pools v0.27.1
+## explicit; go 1.25.0
+github.com/go-openapi/swag/pools
 # github.com/go-openapi/swag/stringutils v0.26.0
 ## explicit; go 1.25.0
 github.com/go-openapi/swag/stringutils
-# github.com/go-openapi/swag/typeutils v0.26.0
+# github.com/go-openapi/swag/typeutils v0.27.1
 ## explicit; go 1.25.0
 github.com/go-openapi/swag/typeutils
 # github.com/go-openapi/swag/yamlutils v0.26.0
@@ -2416,18 +2416,12 @@ k8s.io/klog/v2/internal/severity
 k8s.io/klog/v2/internal/sloghandler
 k8s.io/klog/v2/internal/verbosity
 k8s.io/klog/v2/textlogger
-# k8s.io/kube-openapi v0.0.0-20260603220949-865597e52e25
-## explicit; go 1.24.0
+# k8s.io/kube-openapi v0.0.0-20261014044854-ca3452a79603
+## explicit; go 1.27.0
 k8s.io/kube-openapi/pkg/cached
 k8s.io/kube-openapi/pkg/common
 k8s.io/kube-openapi/pkg/handler3
 k8s.io/kube-openapi/pkg/internal
-k8s.io/kube-openapi/pkg/internal/third_party/go-json-experiment/json
-k8s.io/kube-openapi/pkg/internal/third_party/go-json-experiment/json/internal
-k8s.io/kube-openapi/pkg/internal/third_party/go-json-experiment/json/internal/jsonflags
-k8s.io/kube-openapi/pkg/internal/third_party/go-json-experiment/json/internal/jsonopts
-k8s.io/kube-openapi/pkg/internal/third_party/go-json-experiment/json/internal/jsonwire
-k8s.io/kube-openapi/pkg/internal/third_party/go-json-experiment/json/jsontext
 k8s.io/kube-openapi/pkg/internal/third_party/govalidator
 k8s.io/kube-openapi/pkg/schemaconv
 k8s.io/kube-openapi/pkg/spec3
@@ -2582,6 +2576,9 @@ sigs.k8s.io/structured-merge-diff/v6/merge
 sigs.k8s.io/structured-merge-diff/v6/schema
 sigs.k8s.io/structured-merge-diff/v6/typed
 sigs.k8s.io/structured-merge-diff/v6/value
+# sigs.k8s.io/structured-merge-diff/v7 v7.0.0
+## explicit; go 1.27
+sigs.k8s.io/structured-merge-diff/v7/schema
 # sigs.k8s.io/yaml v1.6.0
 ## explicit; go 1.22
 sigs.k8s.io/yaml
