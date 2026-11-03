@@ -29,15 +29,20 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	certmanagerv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	configv1 "github.com/openshift/api/config/v1"
+	tlspkg "github.com/openshift/controller-runtime-common/pkg/tls"
+	libgocrypto "github.com/openshift/library-go/pkg/crypto"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	"github.com/urfave/cli/v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
 	"k8s.io/klog/v2/textlogger"
@@ -48,13 +53,21 @@ import (
 	metricsfilters "sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	webhookconversion "sigs.k8s.io/controller-runtime/pkg/webhook/conversion"
 
+	apparmorprofilev1 "sigs.k8s.io/security-profiles-operator/api/apparmorprofile/v1"
 	apparmorprofileapi "sigs.k8s.io/security-profiles-operator/api/apparmorprofile/v1alpha1"
+	profilebindingv1 "sigs.k8s.io/security-profiles-operator/api/profilebinding/v1"
 	profilebindingv1alpha1 "sigs.k8s.io/security-profiles-operator/api/profilebinding/v1alpha1"
+	profilerecordingv1 "sigs.k8s.io/security-profiles-operator/api/profilerecording/v1"
 	profilerecording1alpha1 "sigs.k8s.io/security-profiles-operator/api/profilerecording/v1alpha1"
+	seccompprofilev1 "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1"
 	seccompprofileapi "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1beta1"
+	secprofnodestatusv1 "sigs.k8s.io/security-profiles-operator/api/secprofnodestatus/v1"
 	secprofnodestatusv1alpha1 "sigs.k8s.io/security-profiles-operator/api/secprofnodestatus/v1alpha1"
+	selinuxprofilev1 "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1"
 	selxv1alpha2 "sigs.k8s.io/security-profiles-operator/api/selinuxprofile/v1alpha2"
+	spodv1 "sigs.k8s.io/security-profiles-operator/api/spod/v1"
 	spodv1alpha1 "sigs.k8s.io/security-profiles-operator/api/spod/v1alpha1"
 	"sigs.k8s.io/security-profiles-operator/cmd"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/config"
@@ -77,6 +90,7 @@ import (
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/webhooks/binding"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/webhooks/execmetadata"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/webhooks/recording"
+	"sigs.k8s.io/security-profiles-operator/internal/pkg/webhooks/validation"
 )
 
 const (
@@ -90,9 +104,12 @@ const (
 	seccompFlag                  string = "with-seccomp"
 	selinuxFlag                  string = "with-selinux"
 	apparmorFlag                 string = "with-apparmor"
+	rawSelinuxFlag               string = "with-raw-selinux"
 	webhookFlag                  string = "webhook"
 	memOptimFlag                 string = "with-mem-optim"
+	insecureMetricsAccessFlag    string = "with-insecure-metrics-access"
 	defaultWebhookPort           int    = 9443
+	metricsPort                  int    = 8443
 	auditLogIntervalSecondsParam string = "audit-log-interval-seconds"
 	auditLogPathParam            string = "audit-log-path"
 	auditLogMaxSizeParam         string = "audit-log-maxsize"
@@ -101,17 +118,16 @@ const (
 	auditLogMaxAgeParam      string = "audit-log-maxage"
 	enricherFiltersJsonParam string = "enricher-filters-json"
 	enricherLogSourceParam   string = "enricher-log-source"
-	tlsMinVersionParam       string = "tls-min-version"
-	defaultTlsMinVersion     string = "1.2"
+	// Deprecated: TLS version is now managed via OpenShift TLS profiles.
+	tlsMinVersionParam string = "tls-min-version"
 )
 
 var (
-	sync             = time.Second * 30
-	setupLog         = ctrl.Log.WithName("setup")
-	tlsMinVersionMap = map[string]uint16{
-		"1.2": tls.VersionTLS12,
-		"1.3": tls.VersionTLS13,
-	}
+	sync     = time.Second * 30
+	setupLog = ctrl.Log.WithName("setup")
+
+	// ErrTLSConfigChanged is returned when TLS configuration has changed and requires a restart.
+	ErrTLSConfigChanged = errors.New("TLS configuration changed, restart required")
 )
 
 func main() {
@@ -199,6 +215,11 @@ func main() {
 					Value: false,
 				},
 				&cli.BoolFlag{
+					Name:  rawSelinuxFlag,
+					Usage: "Listen for RawSelinuxProfile API resources",
+					Value: false,
+				},
+				&cli.BoolFlag{
 					Name:    recordingFlag,
 					Usage:   "Listen for ProfileRecording API resources",
 					Value:   false,
@@ -208,6 +229,12 @@ func main() {
 					Name:  memOptimFlag,
 					Usage: "Enable memory optimization by watching only labeled pods",
 					Value: false,
+				},
+				&cli.BoolFlag{
+					Name:    insecureMetricsAccessFlag,
+					Usage:   "Allow unauthenticated access to metrics endpoint",
+					Value:   false,
+					EnvVars: []string{config.EnableInsecureMetricsAccessEnvKey},
 				},
 			},
 		},
@@ -232,10 +259,10 @@ func main() {
 					Value:   false,
 					Usage:   "the webhook k8s resources are statically managed (default false)",
 				},
-				&cli.GenericFlag{
-					Name:  tlsMinVersionParam,
-					Value: util.NewEnumValue([]string{"1.2", "1.3"}, "1.2"),
-					Usage: "minimum TLS version to use for the SPO webhooks. Supported values: 1.2, 1.3. (default: 1.2)",
+				&cli.StringFlag{
+					Name:   tlsMinVersionParam,
+					Hidden: true,
+					Usage:  "DEPRECATED: TLS configuration is now managed via OpenShift TLS profiles. This flag is ignored.",
 				},
 			},
 		},
@@ -275,7 +302,7 @@ func main() {
 				&cli.StringFlag{
 					Name:  enricherLogSourceParam,
 					Value: "",
-					Usage: "Log source to ingest (`bpf` or `auditd`)",
+					Usage: "Log source to ingest (`Bpf` or `Auditd`)",
 				},
 			},
 			Action: func(ctx *cli.Context) error {
@@ -365,7 +392,7 @@ func main() {
 	)
 
 	app.Flags = []cli.Flag{
-		&cli.UintFlag{
+		&cli.IntFlag{
 			Name:    "verbosity",
 			Aliases: []string{"V"},
 			Usage:   "the logging verbosity to be used",
@@ -386,14 +413,15 @@ func main() {
 		},
 	}
 
-	if err := app.Run(os.Args); err != nil {
+	if err := app.RunContext(mainctx, os.Args); err != nil {
+		// Check if this is a TLS configuration change requiring restart
+		if errors.Is(err, ErrTLSConfigChanged) {
+			os.Exit(0) // intentional exit to trigger pod restart
+		}
+
 		setupLog.Error(err, "running security-profiles-operator")
 		//nolint:gocritic // this is intentional to return to correct exit code
 		os.Exit(1)
-	}
-
-	if err := app.RunContext(mainctx, os.Args); err != nil {
-		fmt.Printf("application error: %v", err)
 	}
 }
 
@@ -414,14 +442,14 @@ func initLogging(ctx *cli.Context) error {
 	set := flag.NewFlagSet("logging", flag.ContinueOnError)
 	klog.InitFlags(set)
 
-	level := ctx.Uint("verbosity")
+	level := ctx.Int("verbosity")
 	if err := set.Parse([]string{fmt.Sprintf("-v=%d", level)}); err != nil {
 		return fmt.Errorf("parse verbosity flag: %w", err)
 	}
 
-	ctrl.SetLogger(ctrl.Log.V(int(level)))
+	ctrl.SetLogger(ctrl.Log.V(level))
 
-	if err := logConfig.Verbosity().Set(strconv.FormatUint(uint64(level), 10)); err != nil {
+	if err := logConfig.Verbosity().Set(strconv.FormatInt(int64(level), 10)); err != nil {
 		return fmt.Errorf("setting the verbosity flag to level %d: %w", level, err)
 	}
 
@@ -471,12 +499,19 @@ func runManager(ctx *cli.Context, info *version.Info) error {
 		return fmt.Errorf("get config: %w", err)
 	}
 
-	sigHandler := ctrl.SetupSignalHandler()
+	// Fetch initial TLS configuration from OpenShift API Server
+	tlsOpts, initialTLSProfile, initialTLSAdherencePolicy, isOpenShift, err := fetchTLSOptions(
+		ctx.Context, cfg,
+	)
+	if err != nil {
+		return fmt.Errorf("fetch TLS options: %w", err)
+	}
 
 	ctrlOpts := manager.Options{
 		Cache:            cache.Options{SyncPeriod: &sync},
 		LeaderElection:   true,
 		LeaderElectionID: "security-profiles-operator-lock",
+		Metrics:          secureMetricsOptions(tlsOpts),
 	}
 
 	setControllerOptionsForNamespaces(&ctrlOpts)
@@ -498,16 +533,32 @@ func runManager(ctx *cli.Context, info *version.Info) error {
 		return fmt.Errorf("add profilebinding API to scheme: %w", err)
 	}
 
+	if err := profilebindingv1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add profilebinding v1 API to scheme: %w", err)
+	}
+
 	if err := seccompprofileapi.AddToScheme(mgr.GetScheme()); err != nil {
 		return fmt.Errorf("add seccompprofile API to scheme: %w", err)
+	}
+
+	if err := seccompprofilev1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add seccompprofile v1 API to scheme: %w", err)
 	}
 
 	if err := apparmorprofileapi.AddToScheme(mgr.GetScheme()); err != nil {
 		return fmt.Errorf("add apparmorprofile API to scheme: %w", err)
 	}
 
+	if err := apparmorprofilev1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add apparmorprofile v1 API to scheme: %w", err)
+	}
+
 	if err := selxv1alpha2.AddToScheme(mgr.GetScheme()); err != nil {
 		return fmt.Errorf("add selinuxprofile API to scheme: %w", err)
+	}
+
+	if err := selinuxprofilev1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add selinuxprofile v1 API to scheme: %w", err)
 	}
 
 	if err := monitoringv1.AddToScheme(mgr.GetScheme()); err != nil {
@@ -540,15 +591,31 @@ func runManager(ctx *cli.Context, info *version.Info) error {
 		return fmt.Errorf("enable controllers: %w", err)
 	}
 
-	setupLog.Info("starting manager")
+	if manageWebhook(ctx) {
+		// Align the operator managed webhook deployment with the running
+		// operator image before the manager starts. The conversion webhook
+		// for the CRDs is served by the webhook deployment, so after an
+		// upgrade the caches of this manager cannot sync (and the SPOD
+		// controller cannot update the webhook) until the webhook
+		// deployment runs the new image. This uses a direct client because
+		// the manager cache is not started yet.
+		bootstrapClient, err := client.New(cfg, client.Options{Scheme: mgr.GetScheme()})
+		if err != nil {
+			return fmt.Errorf("create webhook bootstrap client: %w", err)
+		}
 
-	if err := mgr.Start(sigHandler); err != nil {
-		return fmt.Errorf("controller manager error: %w", err)
+		if err := bindata.EnsureWebhookImageWithRetry(
+			ctx.Context, setupLog, bootstrapClient, config.GetOperatorNamespace(),
+		); err != nil {
+			setupLog.Error(err, "Unable to bootstrap the webhook deployment image")
+		}
 	}
 
-	setupLog.Info("ending manager")
+	sigHandler := ctrl.SetupSignalHandler()
 
-	return nil
+	return setupManagerWithTLSWatcher(
+		sigHandler, mgr, initialTLSProfile, initialTLSAdherencePolicy, isOpenShift, "manager",
+	)
 }
 
 func setControllerOptionsForNamespaces(opts *ctrl.Options) {
@@ -601,9 +668,11 @@ func getEnabledControllers(ctx *cli.Context) []controller.Controller {
 	}
 
 	if ctx.Bool(selinuxFlag) {
-		controllers = append(controllers,
-			selinuxprofile.NewController(),
-			selinuxprofile.NewRawController())
+		controllers = append(controllers, selinuxprofile.NewController())
+
+		if ctx.Bool(rawSelinuxFlag) {
+			controllers = append(controllers, selinuxprofile.NewRawController())
+		}
 	}
 
 	if ctx.Bool(apparmorFlag) {
@@ -635,6 +704,245 @@ func newMemoryOptimizedCache(ctx *cli.Context) cache.NewCacheFunc {
 	return nil
 }
 
+// fetchTLSOptions fetches TLS configuration from OpenShift APIServer and builds
+// TLS options for controller-runtime servers (webhook/metrics).
+// Returns TLS options slice, profile spec, adherence policy, whether OpenShift is detected, and any error.
+func fetchTLSOptions(ctx context.Context, cfg *rest.Config) (
+	_ []func(*tls.Config),
+	tlsProfile configv1.TLSProfileSpec,
+	tlsAdherence configv1.TLSAdherencePolicy,
+	isOpenShift bool,
+	err error,
+) {
+	setupLog.Info("detecting platform and fetching TLS configuration")
+
+	// Create scheme and register OpenShift config API
+	scheme := runtime.NewScheme()
+	if err := configv1.AddToScheme(scheme); err != nil {
+		return nil, configv1.TLSProfileSpec{}, configv1.TLSAdherencePolicyNoOpinion, false,
+			fmt.Errorf("add OpenShift config API to scheme: %w", err)
+	}
+
+	// Create pre-start client to detect platform and fetch TLS configuration
+	preStartClient, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		return nil, configv1.TLSProfileSpec{}, configv1.TLSAdherencePolicyNoOpinion, false,
+			fmt.Errorf("create pre-start client: %w", err)
+	}
+
+	// Create a timeout context for OpenShift detection to avoid long waits on non-OpenShift clusters
+	// Use 10 seconds to handle slow or loaded API servers during rolling restarts
+	detectCtx, detectCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer detectCancel()
+
+	// Detect if we're running on OpenShift using the same pattern as bindata/ca.go
+	err = preStartClient.Get(detectCtx,
+		types.NamespacedName{Name: "openshift-apiserver"},
+		&configv1.ClusterOperator{},
+	)
+
+	switch {
+	case err == nil:
+		setupLog.Info("OpenShift detected, fetching cluster TLS configuration")
+
+		isOpenShift = true
+	case bindata.IsNotFound(err):
+		setupLog.Info("OpenShift not detected, using default TLS configuration")
+
+		isOpenShift = false
+	default:
+		return nil, configv1.TLSProfileSpec{}, configv1.TLSAdherencePolicyNoOpinion, false,
+			fmt.Errorf("detect OpenShift platform: %w", err)
+	}
+
+	// Fetch TLS profile and adherence policy if on OpenShift
+	var initialTLSProfile configv1.TLSProfileSpec
+
+	var initialTLSAdherencePolicy configv1.TLSAdherencePolicy
+
+	if isOpenShift {
+		profileCtx, profileCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer profileCancel()
+
+		initialTLSProfile, err = tlspkg.FetchAPIServerTLSProfile(profileCtx, preStartClient)
+		if err != nil {
+			// Fall back to default TLS profile if APIServer is temporarily unavailable
+			// This prevents CrashLoopBackOff during API server restarts or upgrades
+			setupLog.Info(
+				"failed to fetch OpenShift TLS profile, falling back to default",
+				"error", err,
+			)
+
+			initialTLSProfile, err = tlspkg.GetTLSProfileSpec(nil)
+			if err != nil {
+				return nil, configv1.TLSProfileSpec{}, configv1.TLSAdherencePolicyNoOpinion, false,
+					fmt.Errorf("get default TLS profile: %w", err)
+			}
+		}
+
+		adherenceCtx, adherenceCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer adherenceCancel()
+
+		initialTLSAdherencePolicy, err = tlspkg.FetchAPIServerTLSAdherencePolicy(
+			adherenceCtx, preStartClient,
+		)
+		if err != nil {
+			// Fall back to NoOpinion if adherence policy fetch fails
+			setupLog.Info(
+				"failed to fetch OpenShift TLS adherence policy, falling back to NoOpinion",
+				"error", err,
+			)
+
+			initialTLSAdherencePolicy = configv1.TLSAdherencePolicyNoOpinion
+		}
+	} else {
+		// Use default TLS profile and adherence policy for non-OpenShift environments
+		initialTLSProfile, err = tlspkg.GetTLSProfileSpec(nil)
+		if err != nil {
+			return nil, configv1.TLSProfileSpec{}, configv1.TLSAdherencePolicyNoOpinion, false,
+				fmt.Errorf("get default TLS profile: %w", err)
+		}
+
+		initialTLSAdherencePolicy = configv1.TLSAdherencePolicyNoOpinion
+	}
+
+	// Build TLS options - always disable HTTP/2
+	tlsOptions := []func(config *tls.Config){
+		func(c *tls.Config) {
+			c.NextProtos = []string{"http/1.1"}
+		},
+	}
+
+	// Apply TLS profile based on platform and adherence policy
+	if isOpenShift {
+		if libgocrypto.ShouldHonorClusterTLSProfile(initialTLSAdherencePolicy) {
+			setupLog.Info(
+				"honoring cluster TLS profile",
+				"adherence-policy",
+				initialTLSAdherencePolicy,
+			)
+
+			tlsConfigFunc, unsupportedCiphers := tlspkg.NewTLSConfigFromProfile(initialTLSProfile)
+			if len(unsupportedCiphers) > 0 {
+				setupLog.Info(
+					"TLS profile contains unsupported ciphers",
+					"ciphers",
+					unsupportedCiphers,
+				)
+			}
+
+			tlsOptions = append(tlsOptions, tlsConfigFunc)
+		} else {
+			setupLog.Info(
+				"using default OpenShift TLS configuration",
+				"adherence-policy",
+				initialTLSAdherencePolicy,
+			)
+			// Apply OpenShift's default TLS profile when adherence policy does not require honoring cluster settings
+			defaultProfile := configv1.TLSProfiles[libgocrypto.DefaultTLSProfileType]
+			if defaultProfile != nil {
+				defaultTLSConfig, unsupportedCiphers := tlspkg.NewTLSConfigFromProfile(
+					*defaultProfile,
+				)
+				if len(unsupportedCiphers) > 0 {
+					setupLog.Info(
+						"default TLS configuration contains unsupported ciphers",
+						"ciphers",
+						unsupportedCiphers,
+					)
+				}
+
+				tlsOptions = append(tlsOptions, defaultTLSConfig)
+			}
+		}
+	} else {
+		// On non-OpenShift clusters, use Go's built-in TLS defaults with minimum TLS 1.2
+		// Don't apply OpenShift's cipher suite list to avoid breaking vanilla Kubernetes clients
+		setupLog.Info("using Go default TLS configuration with TLS 1.2 minimum")
+
+		tlsOptions = append(tlsOptions, func(c *tls.Config) {
+			c.MinVersion = tls.VersionTLS12
+		})
+	}
+
+	return tlsOptions, initialTLSProfile, initialTLSAdherencePolicy, isOpenShift, nil
+}
+
+// secureMetricsOptions returns the metrics server options of the manager and
+// the webhook. The metrics are served via TLS and require an authenticated and
+// authorized client, like the ones of the daemon. No certificate is mounted
+// for these components, so the server uses a self-signed one.
+func secureMetricsOptions(tlsOpts []func(*tls.Config)) metricsserver.Options {
+	return metricsserver.Options{
+		BindAddress:    fmt.Sprintf(":%d", metricsPort),
+		SecureServing:  true,
+		FilterProvider: metricsfilters.WithAuthenticationAndAuthorization,
+		TLSOpts:        tlsOpts,
+	}
+}
+
+// setupManagerWithTLSWatcher sets up TLS watching for a manager and starts it.
+// The sigHandler parameter should be obtained from ctrl.SetupSignalHandler() in the caller.
+func setupManagerWithTLSWatcher(
+	sigHandler context.Context,
+	mgr ctrl.Manager,
+	initialTLSProfile configv1.TLSProfileSpec,
+	initialTLSAdherencePolicy configv1.TLSAdherencePolicy,
+	isOpenShift bool,
+	componentName string,
+) error {
+	// Create a cancellable context derived from sigHandler for graceful shutdown on TLS config changes
+	managerCtx, cancelManager := context.WithCancel(sigHandler)
+	defer cancelManager()
+
+	// Set up TLS profile watcher to trigger graceful shutdown on changes
+	// This is only available in OpenShift environments
+	var tlsConfigChanged atomic.Bool
+
+	if isOpenShift {
+		if err := util.SetupTLSWatcher(mgr, initialTLSProfile, initialTLSAdherencePolicy,
+			func(ctx context.Context, oldProfile, newProfile configv1.TLSProfileSpec) {
+				tlsConfigChanged.Store(true)
+				cancelManager()
+			},
+			func(ctx context.Context, oldPolicy, newPolicy configv1.TLSAdherencePolicy) {
+				tlsConfigChanged.Store(true)
+				cancelManager()
+			}); err != nil {
+			setupLog.Error(
+				err,
+				"TLS profile watcher setup failed, TLS configuration changes will not be detected",
+			)
+		} else {
+			setupLog.Info(
+				"TLS profile watcher enabled - will trigger graceful shutdown on configuration changes",
+			)
+		}
+	} else {
+		setupLog.Info("TLS profile watcher not enabled (OpenShift-only feature)")
+	}
+
+	setupLog.Info("starting " + componentName)
+
+	if err := mgr.Start(managerCtx); err != nil {
+		return fmt.Errorf("%s error: %w", componentName, err)
+	}
+
+	setupLog.Info("ending " + componentName)
+
+	// If TLS config changed, return sentinel error so the pod restarts
+	// This ensures a clean restart with new TLS settings
+	if tlsConfigChanged.Load() {
+		setupLog.Info(
+			"exiting due to TLS configuration change - pod will restart with new settings",
+		)
+
+		return ErrTLSConfigChanged
+	}
+
+	return nil
+}
+
 func runDaemon(ctx *cli.Context, info *version.Info) error {
 	// security-profiles-operator-daemon
 	printInfo("spod", info)
@@ -649,8 +957,6 @@ func runDaemon(ctx *cli.Context, info *version.Info) error {
 		return fmt.Errorf("get config: %w", err)
 	}
 
-	sigHandler := ctrl.SetupSignalHandler()
-
 	// Setup metrics
 	met := metrics.New()
 	if err := met.Register(); err != nil {
@@ -661,8 +967,13 @@ func runDaemon(ctx *cli.Context, info *version.Info) error {
 		return fmt.Errorf("start metrics grpc server: %w", err)
 	}
 
-	disableHTTP2 := func(c *tls.Config) {
-		c.NextProtos = []string{"http/1.1"}
+	// Fetch initial TLS configuration from OpenShift API Server
+	metricsTLSOpts, initialTLSProfile, initialTLSAdherencePolicy, isOpenShift, err := fetchTLSOptions(
+		ctx.Context,
+		cfg,
+	)
+	if err != nil {
+		return fmt.Errorf("fetch TLS options: %w", err)
 	}
 
 	ctrlOpts := ctrl.Options{
@@ -677,8 +988,17 @@ func runDaemon(ctx *cli.Context, info *version.Info) error {
 			ExtraHandlers: map[string]http.Handler{
 				metrics.HandlerPath: met.Handler(),
 			},
-			TLSOpts: []func(*tls.Config){disableHTTP2},
+			TLSOpts: metricsTLSOpts,
 		},
+	}
+
+	if ctx.Bool(insecureMetricsAccessFlag) {
+		setupLog.Info("Insecure metrics access enabled, TLS and authentication are disabled")
+
+		ctrlOpts.Metrics.SecureServing = false
+		ctrlOpts.Metrics.CertDir = ""
+		ctrlOpts.Metrics.FilterProvider = nil
+		ctrlOpts.Metrics.TLSOpts = nil
 	}
 
 	setControllerOptionsForNamespaces(&ctrlOpts)
@@ -688,28 +1008,41 @@ func runDaemon(ctx *cli.Context, info *version.Info) error {
 		return fmt.Errorf("create manager: %w", err)
 	}
 
+	if err := configv1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add OpenShift config API to scheme: %w", err)
+	}
+
 	// This API provides status which is used by both seccomp and selinux
 	if err := secprofnodestatusv1alpha1.AddToScheme(mgr.GetScheme()); err != nil {
 		return fmt.Errorf("add per-node Status API to scheme: %w", err)
+	}
+
+	if err := secprofnodestatusv1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add per-node Status v1 API to scheme: %w", err)
 	}
 
 	if err := spodv1alpha1.AddToScheme(mgr.GetScheme()); err != nil {
 		return fmt.Errorf("add SPOD config API to scheme: %w", err)
 	}
 
+	if err := spodv1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add SPOD config v1 API to scheme: %w", err)
+	}
+
 	if err := setupEnabledControllers(ctx.Context, enabledControllers, mgr, met); err != nil {
 		return fmt.Errorf("enable controllers: %w", err)
 	}
 
-	setupLog.Info("starting daemon")
+	sigHandler := ctrl.SetupSignalHandler()
 
-	if err := mgr.Start(sigHandler); err != nil {
-		return fmt.Errorf("SPOd error: %w", err)
-	}
-
-	setupLog.Info("ending daemon")
-
-	return nil
+	return setupManagerWithTLSWatcher(
+		sigHandler,
+		mgr,
+		initialTLSProfile,
+		initialTLSAdherencePolicy,
+		isOpenShift,
+		"daemon",
+	)
 }
 
 func runBPFRecorder(_ *cli.Context, info *version.Info) error {
@@ -782,7 +1115,7 @@ func runNonRootEnabler(ctx *cli.Context, info *version.Info) error {
 
 	printInfo(component, info)
 
-	runtime := ctx.String("runtime")
+	containerRuntime := ctx.String("runtime")
 	apparmor := ctx.Bool("apparmor")
 
 	cfg, err := ctrl.GetConfig()
@@ -800,11 +1133,19 @@ func runNonRootEnabler(ctx *cli.Context, info *version.Info) error {
 		kubeletDir = config.KubeletDir()
 	}
 
-	return nonrootenabler.New().Run(ctrl.Log.WithName(component), runtime, kubeletDir, apparmor)
+	return nonrootenabler.New().Run(ctrl.Log.WithName(component), containerRuntime, kubeletDir, apparmor)
 }
 
 func runWebhook(ctx *cli.Context, info *version.Info) error {
 	printInfo("security-profiles-operator-webhook", info)
+
+	// Warn if deprecated tls-min-version flag is used
+	if ctx.IsSet(tlsMinVersionParam) {
+		setupLog.Info(
+			"--tls-min-version flag is deprecated and ignored, " +
+				"TLS configuration is now managed via OpenShift TLS profiles",
+		)
+	}
 
 	cfg, err := ctrl.GetConfig()
 	if err != nil {
@@ -813,74 +1154,118 @@ func runWebhook(ctx *cli.Context, info *version.Info) error {
 
 	port := ctx.Int("port")
 
-	var tlsMinVersionStr string
-
-	tlsMinVersion, ok := ctx.Generic(tlsMinVersionParam).(util.EnumValue)
-	if !ok {
-		tlsMinVersionStr = defaultTlsMinVersion
-	} else {
-		tlsMinVersionStr = tlsMinVersion.String()
-	}
-
-	tlsConfig := func(c *tls.Config) {
-		c.NextProtos = []string{"http/1.1"}
-		c.MinVersion = tlsMinVersionMap[tlsMinVersionStr]
+	// Fetch initial TLS configuration from OpenShift API Server
+	webhookTLSOpts, initialTLSProfile, initialTLSAdherencePolicy, isOpenShift, err := fetchTLSOptions(
+		ctx.Context,
+		cfg,
+	)
+	if err != nil {
+		return fmt.Errorf("fetch TLS options: %w", err)
 	}
 
 	webhookServerOptions := webhook.Options{
 		Port:    port,
-		TLSOpts: []func(config *tls.Config){tlsConfig},
+		TLSOpts: webhookTLSOpts,
 	}
 
 	webhookServer := webhook.NewServer(webhookServerOptions)
+
 	ctrlOpts := manager.Options{
 		Cache:            cache.Options{SyncPeriod: &sync},
 		LeaderElection:   true,
 		LeaderElectionID: "security-profiles-operator-webhook-lock",
 		WebhookServer:    webhookServer,
+		Metrics:          secureMetricsOptions(webhookTLSOpts),
 	}
 
 	mgr, err := ctrl.NewManager(cfg, ctrlOpts)
 	if err != nil {
-		return fmt.Errorf("create cluster webhook: %w", err)
+		return fmt.Errorf("create cluster manager: %w", err)
+	}
+
+	// Register OpenShift config API for TLS watcher (watches APIServer resource for TLS profile changes)
+	if err := configv1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add OpenShift config API to scheme: %w", err)
 	}
 
 	if err := profilebindingv1alpha1.AddToScheme(mgr.GetScheme()); err != nil {
 		return fmt.Errorf("add profilebinding API to scheme: %w", err)
 	}
 
+	if err := profilebindingv1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add profilebinding v1 API to scheme: %w", err)
+	}
+
 	if err := seccompprofileapi.AddToScheme(mgr.GetScheme()); err != nil {
 		return fmt.Errorf("add seccompprofile API to scheme: %w", err)
+	}
+
+	if err := seccompprofilev1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add seccompprofile v1 API to scheme: %w", err)
 	}
 
 	if err := apparmorprofileapi.AddToScheme(mgr.GetScheme()); err != nil {
 		return fmt.Errorf("add apparmorprofile API to scheme: %w", err)
 	}
 
+	if err := apparmorprofilev1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add apparmorprofile v1 API to scheme: %w", err)
+	}
+
 	if err := selxv1alpha2.AddToScheme(mgr.GetScheme()); err != nil {
 		return fmt.Errorf("add selinuxprofile API to scheme: %w", err)
+	}
+
+	if err := selinuxprofilev1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add selinuxprofile v1 API to scheme: %w", err)
 	}
 
 	if err := profilerecording1alpha1.AddToScheme(mgr.GetScheme()); err != nil {
 		return fmt.Errorf("add profilerecording API to scheme: %w", err)
 	}
 
+	if err := profilerecordingv1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add profilerecording v1 API to scheme: %w", err)
+	}
+
+	// The conversion webhook (/convert) serves all CRDs of the operator, so
+	// every API version has to be part of the scheme, including the ones not
+	// used by the admission webhooks. Otherwise SPOD and node status objects
+	// stored in a previous API version cannot be read after an upgrade.
+	if err := spodv1alpha1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add spod API to scheme: %w", err)
+	}
+
+	if err := spodv1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add spod v1 API to scheme: %w", err)
+	}
+
+	if err := secprofnodestatusv1alpha1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add per-node Status API to scheme: %w", err)
+	}
+
+	if err := secprofnodestatusv1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("add per-node Status v1 API to scheme: %w", err)
+	}
+
 	setupLog.Info("registering webhooks")
 
 	hookserver := mgr.GetWebhookServer()
 	binding.RegisterWebhook(hookserver, mgr.GetScheme(), mgr.GetClient())
+
+	//nolint:staticcheck,nolintlint // TODO: migrate to GetEventRecorder
 	recording.RegisterWebhook(hookserver, mgr.GetScheme(), mgr.GetEventRecorderFor("recording-webhook"), mgr.GetClient())
 	execmetadata.RegisterWebhook(hookserver)
+	validation.RegisterWebhook(hookserver, mgr.GetScheme())
+
+	hookserver.Register("/convert",
+		webhookconversion.NewWebhookHandler(mgr.GetScheme(), webhookconversion.NewRegistry()))
 
 	sigHandler := ctrl.SetupSignalHandler()
 
-	setupLog.Info("starting webhook")
-
-	if err := mgr.Start(sigHandler); err != nil {
-		return fmt.Errorf("controller manager error: %w", err)
-	}
-
-	return nil
+	return setupManagerWithTLSWatcher(
+		sigHandler, mgr, initialTLSProfile, initialTLSAdherencePolicy, isOpenShift, "webhook",
+	)
 }
 
 func setupEnabledControllers(

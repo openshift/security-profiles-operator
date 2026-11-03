@@ -14,220 +14,23 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package v1alpha1 contains the deprecated v1alpha1 API of the
+// SecurityProfilesOperatorDaemon. The types in this package intentionally
+// keep the exact wire format of the last release which used v1alpha1 as the
+// storage version (v0.10.x). Objects persisted in that format are converted
+// to the v1 API by the conversion webhook, see conversion.go. Changing the
+// JSON layout of these types drops data of existing objects on upgrade
+// because the API server prunes fields unknown to the v1alpha1 schema.
 package v1alpha1
 
 import (
-	"sort"
-
-	"github.com/containers/common/pkg/seccomp"
 	admissionregv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"sigs.k8s.io/security-profiles-operator/api/common"
+	seccompapi "sigs.k8s.io/security-profiles-operator/api/seccomp"
 )
-
-// A ConditionType represents a condition a resource could be in.
-type ConditionType string
-
-// Condition types.
-const (
-	// TypeReady resources are believed to be ready to handle work.
-	TypeReady ConditionType = "Ready"
-)
-
-// A ConditionReason represents the reason a resource is in a condition.
-type ConditionReason string
-
-// Reasons a resource is or is not ready.
-const (
-	ReasonAvailable   ConditionReason = "Available"
-	ReasonUnavailable ConditionReason = "Unavailable"
-	ReasonCreating    ConditionReason = "Creating"
-	ReasonDeleting    ConditionReason = "Deleting"
-	ReasonPending     ConditionReason = "Pending"
-	ReasonUpdating    ConditionReason = "Updating"
-)
-
-// A Condition that may apply to a resource.
-type Condition struct {
-	// Type of this condition. At most one of each condition type may apply to
-	// a resource at any point in time.
-	Type ConditionType `json:"type"`
-
-	// Status of this condition; is it currently True, False, or Unknown?
-	Status corev1.ConditionStatus `json:"status"`
-
-	// LastTransitionTime is the last time this condition transitioned from one
-	// status to another.
-	LastTransitionTime metav1.Time `json:"lastTransitionTime"`
-
-	// A Reason for this condition's last transition from one status to another.
-	Reason ConditionReason `json:"reason"`
-
-	// A Message containing details about this condition's last transition from
-	// one status to another, if any.
-	// +optional
-	Message string `json:"message,omitempty"`
-}
-
-// Equal returns true if the condition is identical to the supplied condition,
-// ignoring the LastTransitionTime.
-//
-//nolint:gocritic // just a few bytes too heavy
-func (c *Condition) Equal(other Condition) bool {
-	return c.Type == other.Type &&
-		c.Status == other.Status &&
-		c.Reason == other.Reason &&
-		c.Message == other.Message
-}
-
-// A ConditionedStatus reflects the observed status of a resource. Only one
-// condition of each type may exist.
-type ConditionedStatus struct {
-	// Conditions of the resource.
-	// +optional
-	Conditions []Condition `json:"conditions,omitempty"`
-}
-
-// GetCondition returns the condition for the given ConditionType if exists,
-// otherwise returns an unknown condition.
-func (s *ConditionedStatus) GetReadyCondition() Condition {
-	for _, c := range s.Conditions {
-		if c.Type == TypeReady {
-			return c
-		}
-	}
-
-	return Condition{
-		Type:   TypeReady,
-		Status: corev1.ConditionUnknown,
-	}
-}
-
-// SetConditions sets the supplied conditions, replacing any existing conditions
-// of the same type. This is a no-op if all supplied conditions are identical,
-// ignoring the last transition time, to those already set.
-func (s *ConditionedStatus) SetConditions(c ...Condition) {
-	for _, new := range c {
-		exists := false
-
-		for i, existing := range s.Conditions {
-			if existing.Type != new.Type {
-				continue
-			}
-
-			if existing.Equal(new) {
-				exists = true
-
-				continue
-			}
-
-			s.Conditions[i] = new
-			exists = true
-		}
-
-		if !exists {
-			s.Conditions = append(s.Conditions, new)
-		}
-	}
-}
-
-// Equal returns true if the status is identical to the supplied status,
-// ignoring the LastTransitionTimes and order of statuses.
-func (s *ConditionedStatus) Equal(other *ConditionedStatus) bool {
-	if s == nil || other == nil {
-		return s == nil && other == nil
-	}
-
-	if len(other.Conditions) != len(s.Conditions) {
-		return false
-	}
-
-	sc := make([]Condition, len(s.Conditions))
-	copy(sc, s.Conditions)
-
-	oc := make([]Condition, len(other.Conditions))
-	copy(oc, other.Conditions)
-
-	// We should not have more than one condition of each type.
-	sort.Slice(sc, func(i, j int) bool { return sc[i].Type < sc[j].Type })
-	sort.Slice(oc, func(i, j int) bool { return oc[i].Type < oc[j].Type })
-
-	for i := range sc {
-		if !sc[i].Equal(oc[i]) {
-			return false
-		}
-	}
-
-	return true
-}
-
-// Creating returns a condition that indicates the resource is currently
-// being created.
-func Creating() Condition {
-	return Condition{
-		Type:               TypeReady,
-		Status:             corev1.ConditionFalse,
-		LastTransitionTime: metav1.Now(),
-		Reason:             ReasonCreating,
-	}
-}
-
-// Deleting returns a condition that indicates the resource is currently
-// being deleted.
-func Deleting() Condition {
-	return Condition{
-		Type:               TypeReady,
-		Status:             corev1.ConditionFalse,
-		LastTransitionTime: metav1.Now(),
-		Reason:             ReasonDeleting,
-	}
-}
-
-// Available returns a condition that indicates the resource is
-// currently observed to be available for use.
-func Available() Condition {
-	return Condition{
-		Type:               TypeReady,
-		Status:             corev1.ConditionTrue,
-		LastTransitionTime: metav1.Now(),
-		Reason:             ReasonAvailable,
-	}
-}
-
-// Unavailable returns a condition that indicates the resource is not
-// currently available for use. Unavailable should be set only when Crossplane
-// expects the resource to be available but knows it is not, for example
-// because its API reports it is unhealthy.
-func Unavailable() Condition {
-	return Condition{
-		Type:               TypeReady,
-		Status:             corev1.ConditionFalse,
-		LastTransitionTime: metav1.Now(),
-		Reason:             ReasonUnavailable,
-	}
-}
-
-// Pending returns a condition that indicates the resource is currently
-// observed to be waiting for creating.
-func Pending() Condition {
-	return Condition{
-		Type:               TypeReady,
-		Status:             corev1.ConditionFalse,
-		LastTransitionTime: metav1.Now(),
-		Reason:             ReasonPending,
-	}
-}
-
-// Updating returns a condition that indicates the resource is currently
-// observed to be updating.
-func Updating() Condition {
-	return Condition{
-		Type:               TypeReady,
-		Status:             corev1.ConditionFalse,
-		LastTransitionTime: metav1.Now(),
-		Reason:             ReasonUpdating,
-	}
-}
 
 // SelinuxOptions defines options specific to the SELinux
 // functionality of the SecurityProfilesOperator.
@@ -240,6 +43,7 @@ type SelinuxOptions struct {
 	AllowedSystemProfiles []string `json:"allowedSystemProfiles,omitempty"`
 }
 
+// JsonEnricherOptions defines options specific to the JSON enricher.
 type JsonEnricherOptions struct {
 	// Specifies the interval, in seconds, at which the accumulated audit log
 	// data is output in JSON format. For each process, syscalls occurring
@@ -266,6 +70,7 @@ type JsonEnricherOptions struct {
 	AuditLogMaxAge *int32 `json:"auditLogMaxAge,omitempty"`
 }
 
+// WebhookOptions allows to customize the webhook configurations.
 type WebhookOptions struct {
 	// Name specifies which webhook do we configure
 	Name string `json:"name,omitempty"`
@@ -280,7 +85,7 @@ type WebhookOptions struct {
 	ObjectSelector *metav1.LabelSelector `json:"objectSelector,omitempty"`
 }
 
-// SPODStatus defines the desired state of SPOD.
+// SPODSpec defines the desired state of SPOD.
 type SPODSpec struct {
 	// Verbosity specifies the logging verbosity of the daemon.
 	Verbosity uint `json:"verbosity,omitempty"`
@@ -342,7 +147,7 @@ type SPODSpec struct {
 	AllowedSyscalls []string `json:"allowedSyscalls,omitempty"`
 	// AllowedSeccompActions if specified, a list of allowed seccomp actions.
 	// +optional
-	AllowedSeccompActions []seccomp.Action `json:"allowedSeccompActions"`
+	AllowedSeccompActions []seccompapi.Action `json:"allowedSeccompActions"`
 	// Affinity if specified, the SPOD's affinity.
 	// +optional
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
@@ -384,6 +189,7 @@ type SPODSpec struct {
 }
 
 // SPODState defines the state that the spod is in.
+// +kubebuilder:validation:Enum=PENDING;CREATING;UPDATING;RUNNING;ERROR
 type SPODState string
 
 const (
@@ -401,7 +207,7 @@ const (
 
 // SPODStatus defines the observed state of SPOD.
 type SPODStatus struct {
-	ConditionedStatus `json:",inline"`
+	common.ConditionedStatus `json:",inline"`
 	// Represents the state that the policy is in. Can be:
 	// PENDING, IN-PROGRESS, RUNNING or ERROR
 	State SPODState `json:"state,omitempty"`
@@ -413,6 +219,7 @@ type SPODStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:path=securityprofilesoperatordaemons,shortName=spod
 // +kubebuilder:printcolumn:name="State",type="string",JSONPath=`.status.state`
+// +kubebuilder:deprecatedversion:warning="v1alpha1 SecurityProfilesOperatorDaemon is deprecated, use v1"
 type SecurityProfilesOperatorDaemon struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -428,26 +235,6 @@ type SecurityProfilesOperatorDaemonList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []SecurityProfilesOperatorDaemon `json:"items"`
-}
-
-func (s *SPODStatus) StatePending() {
-	s.State = SPODStatePending
-	s.SetConditions(Pending())
-}
-
-func (s *SPODStatus) StateCreating() {
-	s.State = SPODStateCreating
-	s.SetConditions(Creating())
-}
-
-func (s *SPODStatus) StateUpdating() {
-	s.State = SPODStateUpdating
-	s.SetConditions(Updating())
-}
-
-func (s *SPODStatus) StateRunning() {
-	s.State = SPODStateRunning
-	s.SetConditions(Available())
 }
 
 func init() { //nolint:gochecknoinits // required to init the scheme

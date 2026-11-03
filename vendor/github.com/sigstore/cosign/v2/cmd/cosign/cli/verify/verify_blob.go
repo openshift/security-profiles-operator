@@ -74,10 +74,16 @@ type VerifyBlobCmd struct {
 	Offline                      bool
 	UseSignedTimestamps          bool
 	IgnoreTlog                   bool
+	HashAlgorithm                crypto.Hash
 }
 
 // nolint
 func (c *VerifyBlobCmd) Exec(ctx context.Context, blobRef string) error {
+	// always default to sha256 if the algorithm hasn't been explicitly set
+	if c.HashAlgorithm == 0 {
+		c.HashAlgorithm = crypto.SHA256
+	}
+
 	// Require a certificate/key OR a local bundle file that has the cert.
 	if options.NOf(c.KeyRef, c.CertRef, c.Sk, c.BundlePath) == 0 {
 		return fmt.Errorf("provide a key with --key or --sk, a certificate to verify against with --certificate, or a bundle with --bundle")
@@ -116,7 +122,7 @@ func (c *VerifyBlobCmd) Exec(ctx context.Context, blobRef string) error {
 	opts := make([]static.Option, 0)
 	switch {
 	case c.KeyRef != "":
-		co.SigVerifier, err = sigs.PublicKeyFromKeyRef(ctx, c.KeyRef)
+		co.SigVerifier, err = sigs.PublicKeyFromKeyRefWithHashAlgo(ctx, c.KeyRef, c.HashAlgorithm)
 		if err != nil {
 			return fmt.Errorf("loading public key: %w", err)
 		}
@@ -243,32 +249,25 @@ func (c *VerifyBlobCmd) Exec(ctx context.Context, blobRef string) error {
 		if err != nil {
 			return err
 		}
-		// A certificate is required in the bundle unless we specified with
-		//  --key, --sk, or --certificate.
-		if b.Cert == "" && co.SigVerifier == nil && cert == nil {
-			return fmt.Errorf("bundle does not contain cert for verification, please provide public key")
-		}
-		// We have to condition on this because sign-blob may not output the signing
-		// key to the bundle when there is no tlog upload.
 		if b.Cert != "" {
-			// b.Cert can either be a certificate or public key
 			certBytes := []byte(b.Cert)
 			if isb64(certBytes) {
 				certBytes, _ = base64.StdEncoding.DecodeString(b.Cert)
 			}
 			bundleCert, err := loadCertFromPEM(certBytes)
 			if err != nil {
-				// check if cert is actually a public key
-				co.SigVerifier, err = sigs.LoadPublicKeyRaw(certBytes, crypto.SHA256)
-				if err != nil {
-					return fmt.Errorf("loading verifier from bundle: %w", err)
-				}
+				return fmt.Errorf("loading verifier certificate from bundle: %w", err)
 			}
 			// if a cert was passed in, make sure it matches the cert in the bundle
 			if cert != nil && !cert.Equal(bundleCert) {
 				return fmt.Errorf("the cert passed in does not match the cert in the provided bundle")
 			}
 			cert = bundleCert
+		}
+		// A verifier must come either from a certificate from the bundle,
+		// or provided via --key, --sk, or --certificate.
+		if co.SigVerifier == nil && cert == nil {
+			return fmt.Errorf("bundle does not contain cert for verification, please provide public key")
 		}
 		opts = append(opts, static.WithBundle(b.Bundle))
 	}

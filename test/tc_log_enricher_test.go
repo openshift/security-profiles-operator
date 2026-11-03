@@ -40,7 +40,7 @@ func (e *e2e) testCaseLogEnricher([]string) {
 	e.logf("Creating test profile")
 
 	profile := fmt.Sprintf(`
-apiVersion: security-profiles-operator.x-k8s.io/v1beta1
+apiVersion: security-profiles-operator.x-k8s.io/v1
 kind: SeccompProfile
 metadata:
   name: %s
@@ -110,7 +110,9 @@ spec:
 	e.waitForEnricherLogs(since, regexp.MustCompile(`(?m)"syscallName"="listen"`))
 
 	e.logf("Checking log enricher output")
-	output := e.kubectlOperatorNS("logs", "-l", "name=spod", "-c", "log-enricher")
+	output := e.kubectlOperatorNS(
+		"logs", "--since-time="+since.Format(time.RFC3339), "-l", "name=spod", "-c", "log-enricher",
+	)
 
 	// then match the rest
 	e.Contains(output, `"audit"`)
@@ -137,7 +139,6 @@ spec:
 		metrics := e.runAndRetryPodCMD(curlSpodCMD)
 		e.Regexp(fmt.Sprintf(`(?m)security_profiles_operator_seccomp_profile_audit_total{`+
 			`container="%s",`+
-			`executable="/usr/sbin/nginx",`+
 			`namespace="%s",`+
 			`node=".*",`+
 			`pod="%s",`+
@@ -161,7 +162,7 @@ func (e *e2e) testCaseLogEnricherWithFilters([]string) {
 	e.logf("Creating test profile")
 
 	profile := fmt.Sprintf(`
-apiVersion: security-profiles-operator.x-k8s.io/v1beta1
+apiVersion: security-profiles-operator.x-k8s.io/v1
 kind: SeccompProfile
 metadata:
   name: %s
@@ -230,7 +231,9 @@ spec:
 	e.waitForEnricherLogs(since, regexp.MustCompile(`(?m)"syscallName"="execve"`))
 
 	e.logf("Checking log enricher output")
-	output := e.kubectlOperatorNS("logs", "-l", "name=spod", "-c", "log-enricher")
+	output := e.kubectlOperatorNS(
+		"logs", "--since-time="+since.Format(time.RFC3339), "-l", "name=spod", "-c", "log-enricher",
+	)
 
 	e.NotContains(output, fmt.Sprintf(`syscallID=%d`, 50))
 }

@@ -22,8 +22,8 @@ import (
 	"path"
 	"time"
 
-	secprofnodestatusv1alpha1 "sigs.k8s.io/security-profiles-operator/api/secprofnodestatus/v1alpha1"
-	spodv1alpha1 "sigs.k8s.io/security-profiles-operator/api/spod/v1alpha1"
+	"sigs.k8s.io/security-profiles-operator/api/common"
+	secprofnodestatusapi "sigs.k8s.io/security-profiles-operator/api/secprofnodestatus/v1"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/config"
 )
 
@@ -40,10 +40,10 @@ func (e *e2e) testCaseAllowedSyscallsValidation(nodes []string) {
 
 	e.logf("Changed allowed syscalls list in spod")
 	e.kubectlOperatorNS("patch", "spod", "spod", "-p",
-		`{"spec":{"allowedSyscalls": ["exit", "exit_group", "futex", "nanosleep"]}}`, "--type=merge")
+		`{"spec":{"security":{"allowedSyscalls": ["exit", "exit_group", "futex", "nanosleep"]}}}`, "--type=merge")
 
 	defer e.kubectlOperatorNS("patch", "spod", "spod", "--type=json",
-		"-p", `[{"op": "remove", "path": "/spec/allowedSyscalls"}]`)
+		"-p", `[{"op": "remove", "path": "/spec/security/allowedSyscalls"}]`)
 
 	time.Sleep(defaultWaitTime)
 	e.waitInOperatorNSFor("condition=ready", "spod", "spod")
@@ -84,7 +84,7 @@ func (e *e2e) testCaseAllowedSyscallsValidation(nodes []string) {
 
 			spns := e.getSeccompProfileNodeStatus(name, node)
 			if e.NotNil(spns) {
-				e.Equal(spns.Status, secprofnodestatusv1alpha1.ProfileStateInstalled)
+				e.Equal(secprofnodestatusapi.ProfileStateInstalled, spns.Status.Status)
 			}
 		}
 
@@ -102,10 +102,10 @@ func (e *e2e) testCaseAllowedSyscallsChange(nodes []string) {
 	// Define an allowed syscalls list in the spod configuration
 	e.logf("Changed allowed syscalls list in spod")
 	e.kubectlOperatorNS("patch", "spod", "spod", "-p",
-		`{"spec":{"allowedSyscalls": ["exit", "exit_group", "futex", "nanosleep"]}}`, "--type=merge")
+		`{"spec":{"security":{"allowedSyscalls": ["exit", "exit_group", "futex", "nanosleep"]}}}`, "--type=merge")
 
 	defer e.kubectlOperatorNS("patch", "spod", "spod",
-		"--type=json", "-p", `[{"op": "remove", "path": "/spec/allowedSyscalls"}]`)
+		"--type=json", "-p", `[{"op": "remove", "path": "/spec/security/allowedSyscalls"}]`)
 
 	time.Sleep(defaultWaitTime)
 	e.waitInOperatorNSFor("condition=ready", "spod", "spod")
@@ -126,7 +126,7 @@ func (e *e2e) testCaseAllowedSyscallsChange(nodes []string) {
 
 		spns := e.getSeccompProfileNodeStatus(name, node)
 		if e.NotNil(spns) {
-			e.Equal(spns.Status, secprofnodestatusv1alpha1.ProfileStateInstalled)
+			e.Equal(secprofnodestatusapi.ProfileStateInstalled, spns.Status.Status)
 		}
 	}
 
@@ -134,7 +134,7 @@ func (e *e2e) testCaseAllowedSyscallsChange(nodes []string) {
 	// should now remove the seccomp profile because is not allowed anymore.
 	e.logf("Changed allowed syscalls list in spod to remove syscall")
 	e.kubectlOperatorNS("patch", "spod", "spod", "-p",
-		`{"spec":{"allowedSyscalls": ["exit", "exit_group", "futex"]}}`, "--type=merge")
+		`{"spec":{"security":{"allowedSyscalls": ["exit", "exit_group", "futex"]}}}`, "--type=merge")
 	time.Sleep(defaultWaitTime)
 	e.waitInOperatorNSFor("condition=ready", "spod", "spod")
 	e.kubectlOperatorNS("rollout", "status", "ds", "spod", "--timeout", defaultBpfRecorderOpTimeout)
@@ -167,7 +167,7 @@ func (e *e2e) testCaseAllowedSyscallsInUse(nodes []string) {
 	const (
 		allowProfileName = "allow-me"
 		allowProfile     = `
-apiVersion: security-profiles-operator.x-k8s.io/v1beta1
+apiVersion: security-profiles-operator.x-k8s.io/v1
 kind: SeccompProfile
 metadata:
   name: allow-me
@@ -201,7 +201,7 @@ spec:
 	)
 
 	sp := e.getSeccompProfile(allowProfileName)
-	e.Equal(sp.Status.Status, secprofnodestatusv1alpha1.ProfileStateInstalled)
+	e.Equal(secprofnodestatusapi.ProfileStateInstalled, sp.Status.Status)
 
 	// Create the pod which reference the allowed profile
 	podCleanup := e.writeAndCreate(allowPod, "allow-pod*.yaml")
@@ -213,10 +213,10 @@ spec:
 	// seccomp profile and trigger a deletion.
 	e.logf("Changed allowed syscalls list in spod")
 	e.kubectlOperatorNS("patch", "spod", "spod", "-p",
-		`{"spec":{"allowedSyscalls": ["exit", "exit_group", "futex", "nanosleep"]}}`, "--type=merge")
+		`{"spec":{"security":{"allowedSyscalls": ["exit", "exit_group", "futex", "nanosleep"]}}}`, "--type=merge")
 
 	defer e.kubectlOperatorNS("patch", "spod", "spod", "--type=json", "-p",
-		`[{"op": "remove", "path": "/spec/allowedSyscalls"}]`)
+		`[{"op": "remove", "path": "/spec/security/allowedSyscalls"}]`)
 
 	time.Sleep(defaultWaitTime)
 	e.waitInOperatorNSFor("condition=ready", "spod", "spod")
@@ -230,7 +230,7 @@ spec:
 		sp := e.getSeccompProfile(allowProfileName)
 
 		conReady := sp.Status.GetReadyCondition()
-		if conReady.Reason == spodv1alpha1.ReasonDeleting {
+		if conReady.Reason == string(common.ReasonDeleting) {
 			break
 		}
 
@@ -238,7 +238,7 @@ spec:
 	}
 
 	sp = e.getSeccompProfile(allowProfileName)
-	e.Equal(sp.Status.Status, secprofnodestatusv1alpha1.ProfileStateTerminating)
+	e.Equal(secprofnodestatusapi.ProfileStateTerminating, sp.Status.Status)
 
 	// Remove the pod, after this point the profile should be complete cleaned-up
 	e.kubectl("delete", "pod", allowPodName)
@@ -269,8 +269,8 @@ func (e *e2e) existsSeccompProfileNodeStatus(id, node string) bool {
 	seccompProfileNodeStatusJSON := e.kubectl(
 		"get", "securityprofilenodestatus", "-l", selector, "-o", "json",
 	)
-	secpolNodeStatusList := &secprofnodestatusv1alpha1.SecurityProfileNodeStatusList{}
-	e.Nil(json.Unmarshal([]byte(seccompProfileNodeStatusJSON), secpolNodeStatusList))
+	secpolNodeStatusList := &secprofnodestatusapi.SecurityProfileNodeStatusList{}
+	e.Require().NoError(json.Unmarshal([]byte(seccompProfileNodeStatusJSON), secpolNodeStatusList))
 
 	return len(secpolNodeStatusList.Items) > 0
 }

@@ -19,7 +19,7 @@ import (
 	"cmp"
 	"encoding"
 	"encoding/json"
-	"math"
+	"math/big"
 	"reflect"
 	"slices"
 	"strconv"
@@ -30,11 +30,18 @@ import (
 
 	"cuelang.org/go/cue/errors"
 	"cuelang.org/go/internal/core/adt"
-	"cuelang.org/go/internal/cueexperiment"
 )
 
 // Decode initializes the value pointed to by x with Value v.
 // An error is returned if x is nil or not a pointer.
+//
+// If x implements any of these interfaces, they will be used for decoding
+// in the following order of precedence:
+//  1. Unmarshaler
+//  2. json.Unmarshaler
+//  3. encoding.TextUnmarshaler
+//
+// If x is a struct, this same applies to all of its fields (matching the behavior of json.Unmarshal)
 //
 // If x is a struct, Decode will validate the constraints specified in the field tags.
 //
@@ -52,6 +59,8 @@ func (v Value) Decode(x interface{}) error {
 	return d.errs
 }
 
+// TODO(mvdan): move decoder to internal/core/convert as ToGoValue
+
 type decoder struct {
 	errs errors.Error
 }
@@ -67,8 +76,8 @@ func incompleteError(v Value) errors.Error {
 		v: v,
 		err: &adt.Bottom{
 			Code: adt.IncompleteError,
-			Err: errors.Newf(v.Pos(),
-				"cannot convert non-concrete value %v", v)},
+			Err:  errors.Newf(v.Pos(), "cannot convert non-concrete value %v", v),
+		},
 	}
 }
 
@@ -79,6 +88,46 @@ func (d *decoder) clear(x reflect.Value) {
 }
 
 var valueType = reflect.TypeFor[Value]()
+
+type valueUnmarshaler interface {
+	unmarshalValue(v Value) error
+}
+
+type cueUnmarshaler struct{ Unmarshaler }
+
+func (u cueUnmarshaler) unmarshalValue(v Value) error {
+	return u.UnmarshalCUE(v)
+}
+
+type jsonUnmarshaler struct{ json.Unmarshaler }
+
+func (u jsonUnmarshaler) unmarshalValue(v Value) error {
+	b, err := v.MarshalJSON()
+	if err != nil {
+		return err
+	}
+	return u.UnmarshalJSON(b)
+}
+
+type textUnmarshaler struct{ encoding.TextUnmarshaler }
+
+func (u textUnmarshaler) unmarshalValue(v Value) error {
+	switch x := u.TextUnmarshaler.(type) {
+	case *big.Float:
+		f, err := v.Float(nil)
+		if err != nil {
+			return errors.Wrapf(err, v.Pos(), "Decode")
+		}
+		*x = *f
+		return nil
+	default:
+		b, err := v.Bytes()
+		if err != nil {
+			return errors.Wrapf(err, v.Pos(), "Decode")
+		}
+		return u.UnmarshalText(b)
+	}
+}
 
 func (d *decoder) decode(x reflect.Value, v Value, isPtr bool) {
 	if !x.IsValid() {
@@ -92,7 +141,7 @@ func (d *decoder) decode(x reflect.Value, v Value, isPtr bool) {
 		return
 	}
 
-	if err := v.Err(); err != nil {
+	if err := v.Err(); err != nil && !IsIncomplete(err) {
 		d.addErr(err)
 		return
 	}
@@ -101,8 +150,15 @@ func (d *decoder) decode(x reflect.Value, v Value, isPtr bool) {
 		return
 	}
 
-	switch x.Kind() {
-	case reflect.Ptr, reflect.Map, reflect.Slice, reflect.Interface:
+	unmarshaler, x := indirect(x, v.IsNull())
+	if unmarshaler != nil {
+		d.addErr(unmarshaler.unmarshalValue(v))
+		return
+	}
+
+	kind := x.Kind()
+	switch kind {
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Interface:
 		// nullable types
 		if v.IsNull() || !v.IsConcrete() {
 			d.clear(x)
@@ -117,28 +173,6 @@ func (d *decoder) decode(x reflect.Value, v Value, isPtr bool) {
 		}
 	}
 
-	ij, it, x := indirect(x, v.IsNull())
-
-	if ij != nil {
-		b, err := v.MarshalJSON()
-		d.addErr(err)
-		d.addErr(ij.UnmarshalJSON(b))
-		return
-	}
-
-	if it != nil {
-		b, err := v.Bytes()
-		if err != nil {
-			err = errors.Wrapf(err, v.Pos(), "Decode")
-			d.addErr(err)
-			return
-		}
-		d.addErr(it.UnmarshalText(b))
-		return
-	}
-
-	kind := x.Kind()
-
 	if kind == reflect.Interface {
 		value := d.interfaceValue(v)
 		x.Set(reflect.ValueOf(value))
@@ -146,7 +180,7 @@ func (d *decoder) decode(x reflect.Value, v Value, isPtr bool) {
 	}
 
 	switch kind {
-	case reflect.Ptr:
+	case reflect.Pointer:
 		d.decode(x.Elem(), v, true)
 
 	case reflect.Bool:
@@ -270,22 +304,15 @@ func (d *decoder) interfaceValue(v Value) (x interface{}) {
 
 	case IntKind:
 		if i, err := v.Int64(); err == nil {
-			cueexperiment.Init()
-			if cueexperiment.Flags.DecodeInt64 {
-				return i
-			}
-			// When the decodeint64 experiment is not enabled, we want to return the value
-			// as `int`, but that's not possible for large values on 32-bit architectures.
-			// To avoid overflows causing entirely wrong values to be returned to the user,
-			// let the logic continue below so that we return a *big.Int instead.
-			if i <= math.MaxInt && i >= math.MinInt {
-				return int(i)
-			}
+			return i
 		}
 		x, err = v.Int(nil)
 
 	case FloatKind:
-		x, err = v.Float64() // or big int or
+		if f, err := v.Float64(); err == nil {
+			return f
+		} // or big int or
+		x, err = v.Float(nil)
 
 	case StringKind:
 		x, err = v.String()
@@ -331,7 +358,7 @@ func (d *decoder) convertMap(x reflect.Value, v Value) {
 	t := x.Type()
 
 	// Map key must either have string kind, have an integer kind,
-	// or be an encoding.TextUnmarshaler.
+	// or be an [encoding.TextUnmarshaler].
 	switch t.Key().Kind() {
 	case reflect.String,
 		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
@@ -358,7 +385,8 @@ func (d *decoder) convertMap(x reflect.Value, v Value) {
 		kt := t.Key()
 		if reflect.PointerTo(kt).Implements(textUnmarshalerType) {
 			kv = reflect.New(kt)
-			err := kv.Interface().(encoding.TextUnmarshaler).UnmarshalText([]byte(key))
+			u, _ := reflect.TypeAssert[encoding.TextUnmarshaler](kv)
+			err := u.UnmarshalText([]byte(key))
 			d.addErr(err)
 			kv = kv.Elem()
 		} else {
@@ -368,7 +396,7 @@ func (d *decoder) convertMap(x reflect.Value, v Value) {
 			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 				n, err := strconv.ParseInt(key, 10, 64)
 				d.addErr(err)
-				if reflect.Zero(kt).OverflowInt(n) {
+				if kt.OverflowInt(n) {
 					d.addErr(errors.Newf(v.Pos(), "key integer %d overflows %s", n, kt))
 					break
 				}
@@ -377,7 +405,7 @@ func (d *decoder) convertMap(x reflect.Value, v Value) {
 			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
 				n, err := strconv.ParseUint(key, 10, 64)
 				d.addErr(err)
-				if reflect.Zero(kt).OverflowUint(n) {
+				if kt.OverflowUint(n) {
 					d.addErr(errors.Newf(v.Pos(), "key integer %d overflows %s", n, kt))
 					break
 				}
@@ -433,7 +461,7 @@ func (d *decoder) convertStruct(x reflect.Value, v Value) {
 		// Figure out field corresponding to key.
 		subv := x
 		for _, i := range f.index {
-			if subv.Kind() == reflect.Ptr {
+			if subv.Kind() == reflect.Pointer {
 				if subv.IsNil() {
 					// If a struct embeds a pointer to an unexported type,
 					// it is not possible to set a newly allocated value
@@ -537,12 +565,12 @@ func typeFields(t reflect.Type) structFields {
 			visited[f.typ] = true
 
 			// Scan f.typ for fields to include.
-			for i := 0; i < f.typ.NumField(); i++ {
+			for i := range f.typ.NumField() {
 				sf := f.typ.Field(i)
 				isUnexported := sf.PkgPath != ""
 				if sf.Anonymous {
 					t := sf.Type
-					if t.Kind() == reflect.Ptr {
+					if t.Kind() == reflect.Pointer {
 						t = t.Elem()
 					}
 					if isUnexported && t.Kind() != reflect.Struct {
@@ -559,7 +587,7 @@ func typeFields(t reflect.Type) structFields {
 				if tag == "-" {
 					continue
 				}
-				name, opts := parseTag(tag)
+				name, opts, _ := strings.Cut(tag, ",")
 				if !isValidTag(name) {
 					name = ""
 				}
@@ -568,7 +596,7 @@ func typeFields(t reflect.Type) structFields {
 				index[len(f.index)] = i
 
 				ft := sf.Type
-				if ft.Name() == "" && ft.Kind() == reflect.Ptr {
+				if ft.Name() == "" && ft.Kind() == reflect.Pointer {
 					// Follow pointer.
 					ft = ft.Elem()
 				}
@@ -584,7 +612,7 @@ func typeFields(t reflect.Type) structFields {
 						tag:       tagged,
 						index:     index,
 						typ:       ft,
-						omitEmpty: opts.Contains("omitempty"),
+						omitEmpty: tagOptions(opts).Contains("omitempty"),
 					}
 					field.nameBytes = []byte(field.name)
 					field.equalFold = foldFunc(field.nameBytes)
@@ -698,15 +726,6 @@ func cachedTypeFields(t reflect.Type) structFields {
 // tag, or the empty string. It does not include the leading comma.
 type tagOptions string
 
-// parseTag splits a struct field's json tag into its name and
-// comma-separated options.
-func parseTag(tag string) (string, tagOptions) {
-	if idx := strings.Index(tag, ","); idx != -1 {
-		return tag[:idx], tagOptions(tag[idx+1:])
-	}
-	return tag, tagOptions("")
-}
-
 // Contains reports whether a comma-separated list of options
 // contains a particular substr flag. substr must be surrounded by a
 // string boundary or commas.
@@ -717,10 +736,7 @@ func (o tagOptions) Contains(optionName string) bool {
 	s := string(o)
 	for s != "" {
 		var next string
-		i := strings.Index(s, ",")
-		if i >= 0 {
-			s, next = s[:i], s[i+1:]
-		}
+		s, next, _ = strings.Cut(s, ",")
 		if s == optionName {
 			return true
 		}
@@ -865,7 +881,7 @@ func simpleLetterEqualFold(s, t []byte) bool {
 // If it encounters an Unmarshaler, indirect stops and returns that.
 // If decodingNull is true, indirect stops at the first settable pointer so it
 // can be set to nil.
-func indirect(v reflect.Value, decodingNull bool) (json.Unmarshaler, encoding.TextUnmarshaler, reflect.Value) {
+func indirect(v reflect.Value, decodingNull bool) (valueUnmarshaler, reflect.Value) {
 	// Issue #24153 indicates that it is generally not a guaranteed property
 	// that you may round-trip a reflect.Value by calling Value.Addr().Elem()
 	// and expect the value to still be settable for values derived from
@@ -883,7 +899,7 @@ func indirect(v reflect.Value, decodingNull bool) (json.Unmarshaler, encoding.Te
 	// If v is a named type and is addressable,
 	// start with its address, so that if the type has pointer methods,
 	// we find them.
-	if v.Kind() != reflect.Ptr && v.Type().Name() != "" && v.CanAddr() {
+	if v.Kind() != reflect.Pointer && v.Type().Name() != "" && v.CanAddr() {
 		haveAddr = true
 		v = v.Addr()
 	}
@@ -892,14 +908,14 @@ func indirect(v reflect.Value, decodingNull bool) (json.Unmarshaler, encoding.Te
 		// usefully addressable.
 		if v.Kind() == reflect.Interface && !v.IsNil() {
 			e := v.Elem()
-			if e.Kind() == reflect.Ptr && !e.IsNil() && (!decodingNull || e.Elem().Kind() == reflect.Ptr) {
+			if e.Kind() == reflect.Pointer && !e.IsNil() && (!decodingNull || e.Elem().Kind() == reflect.Pointer) {
 				haveAddr = false
 				v = e
 				continue
 			}
 		}
 
-		if v.Kind() != reflect.Ptr {
+		if v.Kind() != reflect.Pointer {
 			break
 		}
 
@@ -918,12 +934,14 @@ func indirect(v reflect.Value, decodingNull bool) (json.Unmarshaler, encoding.Te
 			v.Set(reflect.New(v.Type().Elem()))
 		}
 		if v.Type().NumMethod() > 0 && v.CanInterface() {
-			if u, ok := v.Interface().(json.Unmarshaler); ok {
-				return u, nil, reflect.Value{}
-			}
-			if !decodingNull {
-				if u, ok := v.Interface().(encoding.TextUnmarshaler); ok {
-					return nil, u, reflect.Value{}
+			switch u := v.Interface().(type) {
+			case Unmarshaler:
+				return cueUnmarshaler{u}, v
+			case json.Unmarshaler:
+				return jsonUnmarshaler{u}, v
+			case encoding.TextUnmarshaler:
+				if !decodingNull {
+					return textUnmarshaler{u}, v
 				}
 			}
 		}
@@ -935,5 +953,5 @@ func indirect(v reflect.Value, decodingNull bool) (json.Unmarshaler, encoding.Te
 			v = v.Elem()
 		}
 	}
-	return nil, nil, v
+	return nil, v
 }

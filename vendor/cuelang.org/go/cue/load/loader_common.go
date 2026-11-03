@@ -16,6 +16,7 @@ package load
 
 import (
 	"cmp"
+	"maps"
 	pathpkg "path"
 	"path/filepath"
 	"slices"
@@ -146,13 +147,17 @@ func (fp *fileProcessor) finalize(p *build.Instance) errors.Error {
 		return fp.err
 	}
 
-	p.ImportPaths, _ = cleanImports(fp.imported)
+	p.ImportPaths = slices.Sorted(maps.Keys(fp.imported))
 
 	return nil
 }
 
 // add adds the given file to the appropriate package in fp.
-func (fp *fileProcessor) add(root string, file *build.File, mode importMode) {
+// It reports whether the file might be considered part of the
+// package being loaded, even if it ends up not added to
+// the build files, for example because of an @if constraint or
+// it's a tool file.
+func (fp *fileProcessor) add(root string, file *build.File, mode importMode) bool {
 	fullPath := file.Filename
 	if fullPath != "-" {
 		if !filepath.IsAbs(fullPath) {
@@ -182,7 +187,7 @@ func (fp *fileProcessor) add(root string, file *build.File, mode importMode) {
 	}
 	if err := setFileSource(fp.c, file); err != nil {
 		badFile(errors.Promote(err, ""))
-		return
+		return false
 	}
 
 	if file.Encoding != build.CUE {
@@ -190,7 +195,7 @@ func (fp *fileProcessor) add(root string, file *build.File, mode importMode) {
 		if sameDir {
 			p.OrphanedFiles = append(p.OrphanedFiles, file)
 		}
-		return
+		return false
 	}
 	if (mode & allowExcludedFiles) == 0 {
 		var badPrefix string
@@ -201,7 +206,7 @@ func (fp *fileProcessor) add(root string, file *build.File, mode importMode) {
 		}
 		if badPrefix != "" {
 			if !sameDir {
-				return
+				return false
 			}
 			file.ExcludeReason = errors.Newf(token.NoPos, "filename starts with a '%s'", badPrefix)
 			if file.Interpretation == "" {
@@ -209,16 +214,16 @@ func (fp *fileProcessor) add(root string, file *build.File, mode importMode) {
 			} else {
 				p.OrphanedFiles = append(p.OrphanedFiles, file)
 			}
-			return
+			return false
 		}
 	}
 	// Note: when path is "-" (stdin), it will already have
 	// been read and file.Source set to the resulting data
 	// by setFileSource.
-	pf, perr := fp.c.fileSystem.getCUESyntax(file)
+	pf, perr := fp.c.fileSystem.getCUESyntax(file, fp.c.parserConfig)
 	if perr != nil {
 		badFile(errors.Promote(perr, "add failed"))
-		return
+		return false
 	}
 
 	pkg := pf.PackageName()
@@ -238,7 +243,7 @@ func (fp *fileProcessor) add(root string, file *build.File, mode importMode) {
 		if q == nil && !sameDir {
 			// It's a file in a parent directory that doesn't correspond
 			// to a package in the original directory.
-			return
+			return false
 		}
 		if q == nil {
 			q = fp.c.Context.NewInstance(p.Dir, nil)
@@ -247,6 +252,7 @@ func (fp *fileProcessor) add(root string, file *build.File, mode importMode) {
 			q.ImportPath = p.ImportPath + ":" + pkg
 			q.Root = p.Root
 			q.Module = p.Module
+			q.ModuleFile = p.ModuleFile
 			fp.pkgs[pkg] = q
 		}
 		p = q
@@ -260,7 +266,7 @@ func (fp *fileProcessor) add(root string, file *build.File, mode importMode) {
 			file.ExcludeReason = excludeError{errors.Newf(pos, "no package name")}
 			p.IgnoredFiles = append(p.IgnoredFiles, file)
 		}
-		return
+		return false
 	}
 
 	if !fp.c.AllCUEFiles {
@@ -280,7 +286,7 @@ func (fp *fileProcessor) add(root string, file *build.File, mode importMode) {
 			}
 			file.ExcludeReason = err
 			p.IgnoredFiles = append(p.IgnoredFiles, file)
-			return
+			return true
 		}
 	}
 
@@ -293,7 +299,7 @@ func (fp *fileProcessor) add(root string, file *build.File, mode importMode) {
 				file.ExcludeReason = excludeError{errors.Newf(pos,
 					"package is %s, want %s", pkg, p.PkgName)}
 				p.IgnoredFiles = append(p.IgnoredFiles, file)
-				return
+				return false
 			}
 			if !fp.allPackages {
 				badFile(&MultiplePackageError{
@@ -301,7 +307,7 @@ func (fp *fileProcessor) add(root string, file *build.File, mode importMode) {
 					Packages: []string{p.PkgName, pkg},
 					Files:    []string{fp.firstFile, base},
 				})
-				return
+				return false
 			}
 		}
 	}
@@ -309,7 +315,7 @@ func (fp *fileProcessor) add(root string, file *build.File, mode importMode) {
 	isTest := strings.HasSuffix(base, "_test"+cueSuffix)
 	isTool := strings.HasSuffix(base, "_tool"+cueSuffix)
 
-	for _, spec := range pf.Imports {
+	for spec := range pf.ImportSpecs() {
 		quoted := spec.Path.Value
 		path, err := strconv.Unquote(quoted)
 		if err != nil {
@@ -342,15 +348,7 @@ func (fp *fileProcessor) add(root string, file *build.File, mode importMode) {
 	default:
 		p.BuildFiles = append(p.BuildFiles, file)
 	}
-}
-
-func cleanImports(m map[string][]token.Pos) ([]string, map[string][]token.Pos) {
-	all := make([]string, 0, len(m))
-	for path := range m {
-		all = append(all, path)
-	}
-	slices.Sort(all)
-	return all, m
+	return true
 }
 
 // isLocalImport reports whether the import path is

@@ -1,0 +1,673 @@
+/*
+Copyright The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+// Package apparmor provides merge operations for AppArmor profiles.
+package apparmor
+
+import (
+	"fmt"
+	"path/filepath"
+	"slices"
+
+	"github.com/saschagrunert/security-profiles-merger/internal/merge"
+)
+
+var (
+	// ErrNoProfiles is returned when no profiles are provided.
+	ErrNoProfiles = merge.ErrNoProfiles
+	// ErrNilProfile is returned when a nil profile is provided.
+	ErrNilProfile = merge.ErrNilProfile
+)
+
+// Intersect merges multiple AppArmor profiles via intersection: the resulting
+// profile permits an operation only if all input profiles permit it.
+// Capabilities are intersected, file access rules are intersected, and network
+// permissions use AND semantics.
+//
+// This implements the profile merging semantics defined in KEP-6061 for CRI
+// runtimes merging OCI-pulled profiles with node baselines.
+func Intersect(profiles ...*Profile) (*Profile, error) {
+	return foldProfiles(profiles, intersectStrategy{})
+}
+
+// Union merges multiple AppArmor profiles via union: the resulting profile
+// permits an operation if any input profile permits it. Capabilities are
+// combined, file access rules are combined, and network permissions use OR
+// semantics.
+//
+// This implements the merge semantics used by the Security Profiles Operator
+// for combining recorded profiles.
+func Union(profiles ...*Profile) (*Profile, error) {
+	return foldProfiles(profiles, unionStrategy{})
+}
+
+type strategy interface {
+	mergeStrings(left, right []string) []string
+	mergePaths(left, right []string) []string
+	mergeBool(left, right *bool) *bool
+	mergeFilesystem(left, right *FilesystemRules) *FilesystemRules
+}
+
+func foldProfiles(profiles []*Profile, mergeOp strategy) (*Profile, error) {
+	for _, profile := range profiles {
+		err := validateEmptyPathsInProfile(profile)
+		if err != nil {
+			return nil, fmt.Errorf("validate: %w", err)
+		}
+	}
+
+	normalized := make([]*Profile, len(profiles))
+	for idx, profile := range profiles {
+		normalized[idx] = normalizeProfile(profile)
+		deduplicateProfile(normalized[idx])
+	}
+
+	for _, profile := range normalized {
+		err := Validate(profile)
+		if err != nil {
+			return nil, fmt.Errorf("validate: %w", err)
+		}
+	}
+
+	result, err := merge.Fold(normalized, cloneProfile, func(a, b *Profile) (*Profile, error) {
+		return mergeTwo(a, b, mergeOp), nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("fold: %w", err)
+	}
+
+	sortProfile(result)
+
+	return result, nil
+}
+
+func sortProfile(profile *Profile) {
+	if profile.Executable != nil {
+		slices.Sort(profile.Executable.AllowedExecutables)
+		slices.Sort(profile.Executable.AllowedLibraries)
+	}
+
+	if profile.Filesystem != nil {
+		slices.Sort(profile.Filesystem.ReadOnlyPaths)
+		slices.Sort(profile.Filesystem.WriteOnlyPaths)
+		slices.Sort(profile.Filesystem.ReadWritePaths)
+	}
+
+	if profile.Capabilities != nil {
+		slices.Sort(profile.Capabilities.AllowedCapabilities)
+	}
+}
+
+func mergeTwo(left, right *Profile, mergeStrategy strategy) *Profile {
+	return &Profile{
+		Executable:   mergeExecutable(left.Executable, right.Executable, mergeStrategy),
+		Filesystem:   mergeFilesystem(left.Filesystem, right.Filesystem, mergeStrategy),
+		Network:      mergeNetwork(left.Network, right.Network, mergeStrategy),
+		Capabilities: mergeCapabilities(left.Capabilities, right.Capabilities, mergeStrategy),
+	}
+}
+
+func mergeOptional[T any](
+	left, right *T,
+	cloneFn func(*T) *T,
+	mergeFn func(*T, *T) *T,
+) *T {
+	if left == nil && right == nil {
+		return nil
+	}
+
+	if left == nil {
+		return cloneFn(right)
+	}
+
+	if right == nil {
+		return cloneFn(left)
+	}
+
+	return mergeFn(left, right)
+}
+
+func mergeExecutable(left, right *ExecutableRules, mergeStrategy strategy) *ExecutableRules {
+	return mergeOptional(
+		left,
+		right,
+		cloneExecutable,
+		func(lhs, rhs *ExecutableRules) *ExecutableRules {
+			return &ExecutableRules{
+				AllowedExecutables: mergeStrategy.mergePaths(
+					lhs.AllowedExecutables,
+					rhs.AllowedExecutables,
+				),
+				AllowedLibraries: mergeStrategy.mergePaths(
+					lhs.AllowedLibraries,
+					rhs.AllowedLibraries,
+				),
+			}
+		},
+	)
+}
+
+func mergeFilesystem(left, right *FilesystemRules, mergeStrategy strategy) *FilesystemRules {
+	return mergeOptional(
+		left,
+		right,
+		cloneFilesystem,
+		func(lhs, rhs *FilesystemRules) *FilesystemRules {
+			return mergeStrategy.mergeFilesystem(lhs, rhs)
+		},
+	)
+}
+
+func mergeNetwork(left, right *NetworkRules, mergeStrategy strategy) *NetworkRules {
+	return mergeOptional(left, right, cloneNetwork, func(lhs, rhs *NetworkRules) *NetworkRules {
+		result := &NetworkRules{
+			AllowRaw:  mergeStrategy.mergeBool(lhs.AllowRaw, rhs.AllowRaw),
+			Protocols: nil,
+		}
+
+		switch {
+		case lhs.Protocols != nil && rhs.Protocols != nil:
+			result.Protocols = &AllowedProtocols{
+				AllowTCP: mergeStrategy.mergeBool(lhs.Protocols.AllowTCP, rhs.Protocols.AllowTCP),
+				AllowUDP: mergeStrategy.mergeBool(lhs.Protocols.AllowUDP, rhs.Protocols.AllowUDP),
+			}
+		case lhs.Protocols != nil:
+			result.Protocols = cloneProtocols(lhs.Protocols)
+		case rhs.Protocols != nil:
+			result.Protocols = cloneProtocols(rhs.Protocols)
+		}
+
+		return result
+	})
+}
+
+func mergeCapabilities(left, right *CapabilityRules, mergeStrategy strategy) *CapabilityRules {
+	return mergeOptional(
+		left,
+		right,
+		cloneCapabilities,
+		func(lhs, rhs *CapabilityRules) *CapabilityRules {
+			return &CapabilityRules{
+				AllowedCapabilities: mergeStrategy.mergeStrings(
+					lhs.AllowedCapabilities,
+					rhs.AllowedCapabilities,
+				),
+			}
+		},
+	)
+}
+
+// intersectStrategy implements intersection (AND) semantics.
+type intersectStrategy struct{}
+
+func (intersectStrategy) mergeStrings(left, right []string) []string {
+	return merge.IntersectSlice(left, right)
+}
+
+func (intersectStrategy) mergePaths(left, right []string) []string {
+	return intersectPaths(left, right)
+}
+
+func (intersectStrategy) mergeBool(left, right *bool) *bool {
+	if left == nil {
+		return merge.ClonePtr(right)
+	}
+
+	if right == nil {
+		return merge.ClonePtr(left)
+	}
+
+	val := *left && *right
+
+	return &val
+}
+
+func (intersectStrategy) mergeFilesystem(left, right *FilesystemRules) *FilesystemRules {
+	leftPerms := expandFsPerms(left)
+	rightPerms := expandFsPerms(right)
+
+	merged := make(map[string]fsPermission)
+
+	// Literal-vs-literal intersection via map lookup: O(n+m).
+	for path, leftPerm := range leftPerms {
+		if globTokenRe.MatchString(path) {
+			continue
+		}
+
+		if rightPerm, ok := rightPerms[path]; ok {
+			intersected := leftPerm.intersect(rightPerm)
+			if intersected.read || intersected.write {
+				merged[path] = intersected
+			}
+		}
+	}
+
+	// Glob entries need pairwise matching against all entries on the other side.
+	leftEntries := buildFsEntries(leftPerms)
+	rightEntries := buildFsEntries(rightPerms)
+
+	leftGlobs, leftLiterals := splitGlobEntries(leftEntries)
+	rightGlobs, _ := splitGlobEntries(rightEntries)
+
+	// Glob-vs-literal, glob-vs-glob, and literal-vs-glob.
+	matchFsEntries(leftGlobs, rightEntries, merged)
+	matchFsEntries(leftLiterals, rightGlobs, merged)
+
+	return collapseFsPerms(merged)
+}
+
+func splitGlobEntries(entries []fsPathEntry) ([]fsPathEntry, []fsPathEntry) {
+	var globs, literals []fsPathEntry
+
+	for _, entry := range entries {
+		if entry.expr != nil {
+			globs = append(globs, entry)
+		} else {
+			literals = append(literals, entry)
+		}
+	}
+
+	return globs, literals
+}
+
+func matchFsEntries(
+	leftEntries, rightEntries []fsPathEntry,
+	merged map[string]fsPermission,
+) {
+	for _, leftEntry := range leftEntries {
+		for _, rightEntry := range rightEntries {
+			key := matchIntersectPaths(leftEntry, rightEntry)
+			if key == "" {
+				continue
+			}
+
+			intersected := leftEntry.perm.intersect(rightEntry.perm)
+			if !intersected.read && !intersected.write {
+				continue
+			}
+
+			if existing, ok := merged[key]; ok {
+				merged[key] = existing.union(intersected)
+			} else {
+				merged[key] = intersected
+			}
+		}
+	}
+}
+
+// unionStrategy implements union (OR) semantics.
+type unionStrategy struct{}
+
+func (unionStrategy) mergeStrings(left, right []string) []string {
+	return merge.UnionSlice(left, right)
+}
+
+func (unionStrategy) mergePaths(left, right []string) []string {
+	set := newPathSet(left)
+
+	for _, path := range right {
+		if globTokenRe.MatchString(path) || !set.matches(path) {
+			set.add(path)
+		}
+	}
+
+	return set.patterns()
+}
+
+func (unionStrategy) mergeBool(left, right *bool) *bool {
+	if left == nil {
+		return merge.ClonePtr(right)
+	}
+
+	if right == nil {
+		return merge.ClonePtr(left)
+	}
+
+	val := *left || *right
+
+	return &val
+}
+
+func (unionStrategy) mergeFilesystem(left, right *FilesystemRules) *FilesystemRules {
+	readSet := newPathSet(left.ReadOnlyPaths)
+	writeSet := newPathSet(left.WriteOnlyPaths)
+	rwSet := newPathSet(left.ReadWritePaths)
+
+	addReadWritePaths(right.ReadWritePaths, &readSet, &writeSet, &rwSet)
+	addReadOnlyPaths(right.ReadOnlyPaths, &readSet, &writeSet, &rwSet)
+	addWriteOnlyPaths(right.WriteOnlyPaths, &readSet, &writeSet, &rwSet)
+
+	return &FilesystemRules{
+		ReadOnlyPaths:  readSet.patterns(),
+		WriteOnlyPaths: writeSet.patterns(),
+		ReadWritePaths: rwSet.patterns(),
+	}
+}
+
+func promoteCoveredLiterals(glob string, source, target *pathSet) {
+	for _, lit := range source.popCoveredLiterals(glob) {
+		target.add(lit)
+	}
+}
+
+func addReadWritePaths(
+	additions []string,
+	readSet, writeSet, rwSet *pathSet,
+) {
+	for _, path := range additions {
+		if rwSet.matches(path) {
+			continue
+		}
+
+		if readSet.popExact(path) || writeSet.popExact(path) {
+			rwSet.add(path)
+
+			continue
+		}
+
+		isGlob := globTokenRe.MatchString(path)
+
+		if !isGlob && (readSet.matches(path) || writeSet.matches(path)) {
+			rwSet.add(path)
+
+			continue
+		}
+
+		if isGlob {
+			promoteCoveredLiterals(path, readSet, rwSet)
+			promoteCoveredLiterals(path, writeSet, rwSet)
+		}
+
+		rwSet.add(path)
+	}
+}
+
+func addReadOnlyPaths(
+	additions []string,
+	readSet, writeSet, rwSet *pathSet,
+) {
+	for _, path := range additions {
+		if rwSet.matches(path) || readSet.matches(path) {
+			continue
+		}
+
+		if writeSet.popExact(path) {
+			rwSet.add(path)
+
+			continue
+		}
+
+		isGlob := globTokenRe.MatchString(path)
+
+		if !isGlob && writeSet.matches(path) {
+			rwSet.add(path)
+
+			continue
+		}
+
+		if isGlob {
+			promoteCoveredLiterals(path, writeSet, rwSet)
+		}
+
+		readSet.add(path)
+	}
+}
+
+func addWriteOnlyPaths(
+	additions []string,
+	readSet, writeSet, rwSet *pathSet,
+) {
+	for _, path := range additions {
+		if rwSet.matches(path) {
+			continue
+		}
+
+		if readSet.popExact(path) {
+			rwSet.add(path)
+
+			continue
+		}
+
+		isGlob := globTokenRe.MatchString(path)
+
+		if !isGlob && readSet.matches(path) {
+			rwSet.add(path)
+
+			continue
+		}
+
+		if isGlob {
+			promoteCoveredLiterals(path, readSet, rwSet)
+		}
+
+		if !writeSet.matches(path) {
+			writeSet.add(path)
+		}
+	}
+}
+
+// fsPermission tracks read/write permissions for a single path.
+type fsPermission struct {
+	read  bool
+	write bool
+}
+
+func (perm fsPermission) intersect(other fsPermission) fsPermission {
+	return fsPermission{
+		read:  perm.read && other.read,
+		write: perm.write && other.write,
+	}
+}
+
+func (perm fsPermission) union(other fsPermission) fsPermission {
+	return fsPermission{
+		read:  perm.read || other.read,
+		write: perm.write || other.write,
+	}
+}
+
+func expandFsPerms(rules *FilesystemRules) map[string]fsPermission {
+	capacity := len(rules.ReadOnlyPaths) + len(rules.WriteOnlyPaths) + len(rules.ReadWritePaths)
+	perms := make(map[string]fsPermission, capacity)
+
+	for _, path := range rules.ReadOnlyPaths {
+		entry := perms[path]
+		entry.read = true
+		perms[path] = entry
+	}
+
+	for _, path := range rules.WriteOnlyPaths {
+		entry := perms[path]
+		entry.write = true
+		perms[path] = entry
+	}
+
+	for _, path := range rules.ReadWritePaths {
+		entry := perms[path]
+		entry.read = true
+		entry.write = true
+		perms[path] = entry
+	}
+
+	return perms
+}
+
+func collapseFsPerms(perms map[string]fsPermission) *FilesystemRules {
+	var readOnly, writeOnly, readWrite []string
+
+	for path, perm := range perms {
+		switch {
+		case perm.read && perm.write:
+			readWrite = append(readWrite, path)
+		case perm.read:
+			readOnly = append(readOnly, path)
+		case perm.write:
+			writeOnly = append(writeOnly, path)
+		}
+	}
+
+	return &FilesystemRules{
+		ReadOnlyPaths:  readOnly,
+		WriteOnlyPaths: writeOnly,
+		ReadWritePaths: readWrite,
+	}
+}
+
+func cloneProfile(profile *Profile) *Profile {
+	clone := &Profile{
+		Executable:   nil,
+		Filesystem:   nil,
+		Network:      nil,
+		Capabilities: nil,
+	}
+
+	if profile.Executable != nil {
+		clone.Executable = cloneExecutable(profile.Executable)
+	}
+
+	if profile.Filesystem != nil {
+		clone.Filesystem = cloneFilesystem(profile.Filesystem)
+	}
+
+	if profile.Network != nil {
+		clone.Network = cloneNetwork(profile.Network)
+	}
+
+	if profile.Capabilities != nil {
+		clone.Capabilities = cloneCapabilities(profile.Capabilities)
+	}
+
+	return clone
+}
+
+func cloneExecutable(exec *ExecutableRules) *ExecutableRules {
+	return &ExecutableRules{
+		AllowedExecutables: slices.Clone(exec.AllowedExecutables),
+		AllowedLibraries:   slices.Clone(exec.AllowedLibraries),
+	}
+}
+
+func cloneFilesystem(fsRules *FilesystemRules) *FilesystemRules {
+	return &FilesystemRules{
+		ReadOnlyPaths:  slices.Clone(fsRules.ReadOnlyPaths),
+		WriteOnlyPaths: slices.Clone(fsRules.WriteOnlyPaths),
+		ReadWritePaths: slices.Clone(fsRules.ReadWritePaths),
+	}
+}
+
+func cloneNetwork(network *NetworkRules) *NetworkRules {
+	clone := &NetworkRules{
+		AllowRaw:  merge.ClonePtr(network.AllowRaw),
+		Protocols: nil,
+	}
+
+	if network.Protocols != nil {
+		clone.Protocols = cloneProtocols(network.Protocols)
+	}
+
+	return clone
+}
+
+func cloneProtocols(proto *AllowedProtocols) *AllowedProtocols {
+	return &AllowedProtocols{
+		AllowTCP: merge.ClonePtr(proto.AllowTCP),
+		AllowUDP: merge.ClonePtr(proto.AllowUDP),
+	}
+}
+
+func cloneCapabilities(caps *CapabilityRules) *CapabilityRules {
+	return &CapabilityRules{
+		AllowedCapabilities: slices.Clone(caps.AllowedCapabilities),
+	}
+}
+
+func normalizeProfile(profile *Profile) *Profile {
+	result := cloneProfile(profile)
+
+	if result.Executable != nil {
+		result.Executable.AllowedExecutables = normalizePaths(result.Executable.AllowedExecutables)
+		result.Executable.AllowedLibraries = normalizePaths(result.Executable.AllowedLibraries)
+	}
+
+	if result.Filesystem != nil {
+		result.Filesystem.ReadOnlyPaths = normalizePaths(result.Filesystem.ReadOnlyPaths)
+		result.Filesystem.WriteOnlyPaths = normalizePaths(result.Filesystem.WriteOnlyPaths)
+		result.Filesystem.ReadWritePaths = normalizePaths(result.Filesystem.ReadWritePaths)
+	}
+
+	return result
+}
+
+func deduplicateProfile(profile *Profile) {
+	if profile.Executable != nil {
+		profile.Executable.AllowedExecutables = merge.DeduplicateSlice(
+			profile.Executable.AllowedExecutables,
+		)
+		profile.Executable.AllowedLibraries = merge.DeduplicateSlice(
+			profile.Executable.AllowedLibraries,
+		)
+	}
+
+	if profile.Filesystem != nil {
+		profile.Filesystem.ReadOnlyPaths = merge.DeduplicateSlice(
+			profile.Filesystem.ReadOnlyPaths,
+		)
+		profile.Filesystem.WriteOnlyPaths = merge.DeduplicateSlice(
+			profile.Filesystem.WriteOnlyPaths,
+		)
+		profile.Filesystem.ReadWritePaths = merge.DeduplicateSlice(
+			profile.Filesystem.ReadWritePaths,
+		)
+	}
+
+	if profile.Capabilities != nil {
+		profile.Capabilities.AllowedCapabilities = merge.DeduplicateSlice(
+			profile.Capabilities.AllowedCapabilities,
+		)
+	}
+}
+
+func normalizeGlobPath(path string) string {
+	prefix := globLiteralPrefix(path)
+	if prefix == "" {
+		return path
+	}
+
+	cleaned := filepath.Clean(prefix)
+	if cleaned != "/" {
+		cleaned += "/"
+	}
+
+	return cleaned + path[len(prefix):]
+}
+
+func normalizePaths(paths []string) []string {
+	if paths == nil {
+		return nil
+	}
+
+	result := make([]string, len(paths))
+
+	for idx, p := range paths {
+		if globTokenRe.MatchString(p) {
+			result[idx] = normalizeGlobPath(p)
+		} else {
+			result[idx] = filepath.Clean(p)
+		}
+	}
+
+	return result
+}

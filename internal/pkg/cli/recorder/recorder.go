@@ -1,5 +1,4 @@
 //go:build linux && !no_bpf
-// +build linux,!no_bpf
 
 /*
 Copyright 2023 The Kubernetes Authors.
@@ -33,15 +32,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containers/common/pkg/seccomp"
 	"github.com/go-logr/logr"
 	libseccomp "github.com/seccomp/libseccomp-golang"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/cli-runtime/pkg/printers"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	apparmorprofileapi "sigs.k8s.io/security-profiles-operator/api/apparmorprofile/v1alpha1"
-	seccompprofileapi "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1beta1"
+	apparmorprofileapi "sigs.k8s.io/security-profiles-operator/api/apparmorprofile/v1"
+	seccompprofileapi "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/cli"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/cli/command"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/daemon/apparmorprofile/crd2armor"
@@ -250,14 +248,14 @@ func (r *Recorder) generateAppArmorProfile(mntns uint32) apparmorprofileapi.AppA
 			sort.Strings(processed.FileProcessed.AllowedExecutables)
 			ExecutableAllowedExecCopy := make([]string, len(processed.FileProcessed.AllowedExecutables))
 			copy(ExecutableAllowedExecCopy, processed.FileProcessed.AllowedExecutables)
-			abstract.Executable.AllowedExecutables = &ExecutableAllowedExecCopy
+			abstract.Executable.AllowedExecutables = ExecutableAllowedExecCopy
 		}
 
 		if len(processed.FileProcessed.AllowedLibraries) != 0 {
 			sort.Strings(processed.FileProcessed.AllowedLibraries)
 			ExecutableAllowedLibCopy := make([]string, len(processed.FileProcessed.AllowedLibraries))
 			copy(ExecutableAllowedLibCopy, processed.FileProcessed.AllowedLibraries)
-			abstract.Executable.AllowedLibraries = &ExecutableAllowedLibCopy
+			abstract.Executable.AllowedLibraries = ExecutableAllowedLibCopy
 		}
 	}
 
@@ -270,21 +268,21 @@ func (r *Recorder) generateAppArmorProfile(mntns uint32) apparmorprofileapi.AppA
 			sort.Strings(processed.FileProcessed.ReadOnlyPaths)
 			FileReadOnlyCopy := make([]string, len(processed.FileProcessed.ReadOnlyPaths))
 			copy(FileReadOnlyCopy, processed.FileProcessed.ReadOnlyPaths)
-			files.ReadOnlyPaths = &FileReadOnlyCopy
+			files.ReadOnlyPaths = FileReadOnlyCopy
 		}
 
 		if len(processed.FileProcessed.WriteOnlyPaths) != 0 {
 			sort.Strings(processed.FileProcessed.WriteOnlyPaths)
 			FileWriteOnlyCopy := make([]string, len(processed.FileProcessed.WriteOnlyPaths))
 			copy(FileWriteOnlyCopy, processed.FileProcessed.WriteOnlyPaths)
-			files.WriteOnlyPaths = &FileWriteOnlyCopy
+			files.WriteOnlyPaths = FileWriteOnlyCopy
 		}
 
 		if len(processed.FileProcessed.ReadWritePaths) != 0 {
 			sort.Strings(processed.FileProcessed.ReadWritePaths)
 			FileReadWriteCopy := make([]string, len(processed.FileProcessed.ReadWritePaths))
 			copy(FileReadWriteCopy, processed.FileProcessed.ReadWritePaths)
-			files.ReadWritePaths = &FileReadWriteCopy
+			files.ReadWritePaths = FileReadWriteCopy
 		}
 
 		abstract.Filesystem = &files
@@ -388,10 +386,10 @@ func (r *Recorder) buildProfile(writer io.Writer, names []string) error {
 	sort.Strings(names)
 
 	spec := seccompprofileapi.SeccompProfileSpec{
-		DefaultAction: seccomp.ActErrno,
+		DefaultAction: seccompprofileapi.ActErrno,
 		Architectures: []seccompprofileapi.Arch{arch},
-		Syscalls: []*seccompprofileapi.Syscall{{
-			Action: seccomp.ActAllow,
+		Syscalls: []seccompprofileapi.Syscall{{
+			Action: seccompprofileapi.ActAllow,
 			Names:  names,
 		}},
 	}
@@ -474,7 +472,7 @@ func (r *Recorder) buildAppArmorProfileRaw(writer io.Writer, spec *apparmorprofi
 
 	abstract := spec.Abstract
 
-	raw, err := crd2armor.GenerateProfile(programName, spec.ComplainMode, &abstract)
+	raw, err := crd2armor.GenerateProfile(programName, spec.Mode, &abstract)
 	if err != nil {
 		return fmt.Errorf("build raw apparmor profile: %w", err)
 	}

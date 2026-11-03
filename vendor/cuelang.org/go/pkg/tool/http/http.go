@@ -29,6 +29,7 @@ import (
 
 func init() {
 	task.Register("tool/http.Do", newHTTPCmd)
+	task.Register("tool/http.Serve", newServeCmd)
 
 	// For backwards compatibility.
 	task.Register("http", newHTTPCmd)
@@ -116,6 +117,29 @@ func (c *httpCmd) Run(ctx *task.Context) (res interface{}, err error) {
 		// TODO: timeout
 	}
 
+	// Rather clumsily, we need to also default followRedirects here because
+	// it's still valid for tasks to be specified via the special $id field, in
+	// which case we cannot be clear that the documented CUE-based defaults have
+	// been applied.
+	//
+	// This is noted as something to fix, more precisely a mistake not to make
+	// again, in https://cuelang.org/issue/1325
+	followRedirects := true
+	followRedirectsValue := ctx.Obj.LookupPath(cue.MakePath(cue.Str("followRedirects")))
+	if followRedirectsValue.Exists() {
+		var err error
+		followRedirects, err = followRedirectsValue.Bool()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if !followRedirects {
+		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+	}
+
 	req, err := http.NewRequest(method, u, r)
 	if err != nil {
 		return nil, err
@@ -153,11 +177,27 @@ func parseHeaders(obj cue.Value, label string) (http.Header, error) {
 	}
 	h := http.Header{}
 	for iter.Next() {
-		str, err := iter.Value().String()
+		key := iter.Selector().Unquoted()
+		val := iter.Value()
+
+		// Handle single string value
+		if s, err := val.String(); err == nil {
+			h.Add(key, s)
+			continue
+		}
+
+		// Each header value is a list of strings [string, ...string]
+		list, err := val.List()
 		if err != nil {
 			return nil, err
 		}
-		h.Add(iter.Selector().Unquoted(), str)
+		for list.Next() {
+			str, err := list.Value().String()
+			if err != nil {
+				return nil, err
+			}
+			h.Add(key, str)
+		}
 	}
 	return h, nil
 }

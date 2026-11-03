@@ -1,8 +1,10 @@
 { pkgs, buildGoModule, arch ? "x86" }:
 with pkgs; buildGoModule rec {
   name = "security-profiles-operator";
-  # Use Pure to avoid exuding the .git directory
-  src = nix-gitignore.gitignoreSourcePure [ ../.gitignore ] ./..;
+  src = lib.cleanSourceWith {
+    src = nix-gitignore.gitignoreSourcePure [ ../.gitignore ] ./..;
+    filter = path: type: builtins.match ".*\\.bpf\\.o\\.[a-z0-9]+" path == null;
+  };
   vendorHash = null;
   doCheck = false;
   outputs = [ "out" ];
@@ -16,7 +18,7 @@ with pkgs; buildGoModule rec {
   buildInputs = [
     glibc
     glibc.static
-    libbpf_1
+    libbpf
     libseccomp
     zlib.static
   ];

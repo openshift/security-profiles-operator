@@ -1,4 +1,4 @@
-apiVersion: security-profiles-operator.x-k8s.io/v1alpha1
+apiVersion: security-profiles-operator.x-k8s.io/v1
 kind: SecurityProfilesOperatorDaemon
 metadata:
   labels:
@@ -6,20 +6,32 @@ metadata:
   name: spod
   namespace: {{ .Release.Namespace }}
 spec:
-  {{- with .Values.daemon.affinity }}
-  affinity:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
+  scheduling:
+    {{- with .Values.daemon.affinity }}
+    affinity:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.daemon.tolerations }}
+    tolerations:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
   daemonResourceRequirements:
     {{- toYaml .Values.daemon.resources | nindent 4 }}
-  enableSelinux: {{ .Values.enableSelinux }}
-  enableLogEnricher: {{ .Values.enableLogEnricher }}
-  enableJsonEnricher: {{ .Values.enableJsonEnricher }}
+  selinux:
+    enable: {{ hasKey .Values.selinux "enable" | ternary .Values.selinux.enable .Values.enableSelinux }}
+    enableRawSelinuxProfiles: {{ .Values.selinux.enableRawSelinuxProfiles }}
+    typeTag: {{ .Values.selinux.typeTag | quote }}
+    {{- with .Values.selinux.options }}
+    options:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.selinux.customTemplatesConfigMap }}
+    customTemplatesConfigMap: {{ . | quote }}
+    {{- end }}
+  enricher:
+    enableLogEnricher: {{ .Values.enableLogEnricher }}
+    enableJsonEnricher: {{ .Values.enableJsonEnricher }}
+    enableBpfRecorder: {{ .Values.enableBpfRecorder }}
   enableAppArmor: {{ .Values.enableAppArmor }}
-  enableBpfRecorder: {{ .Values.enableBpfRecorder }}
   enableProfiling: {{ .Values.enableProfiling }}
-  {{- with .Values.daemon.tolerations }}
-  tolerations:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
   verbosity: {{ .Values.verbosity }}

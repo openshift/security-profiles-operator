@@ -47,7 +47,11 @@ func (p *Puller) Run() error {
 		p.options.username,
 		p.options.password,
 		p.options.platform,
-		p.options.disableSignatureVerification,
+		&artifact.PullSignatureOptions{
+			DisableSignatureVerification: p.options.disableSignatureVerification,
+			AllowedIdentityRegexp:        p.options.allowedIdentityRegexp,
+			AllowedOidcIssuerRegexp:      p.options.allowedOidcIssuerRegexp,
+		},
 	)
 	if err != nil {
 		return fmt.Errorf("pull profile: %w", err)
@@ -62,7 +66,7 @@ func (p *Puller) Run() error {
 	case artifact.PullResultTypeSelinuxProfile:
 		name = result.SelinuxProfile().GetName()
 
-	case artifact.PullResultTypeApparmorProfile:
+	case artifact.PullResultTypeAppArmorProfile:
 		name = result.ApparmorProfile().GetName()
 	}
 

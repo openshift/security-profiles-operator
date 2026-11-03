@@ -34,7 +34,7 @@ const (
 	// SPOdName is the name of the default SPOd config instance.
 	SPOdName = "spod"
 
-	// Service Account for the security-profiles-operator daemon.
+	// SPOdServiceAccount is the service account for the security-profiles-operator daemon.
 	SPOdServiceAccount = SPOdName
 
 	// SPOdNameEnvKey allows one to query the name of the SPOd instance
@@ -94,6 +94,10 @@ const (
 	// EnableRecordingEnvKey is the environment variable key to enabling profile recording.
 	EnableRecordingEnvKey = "ENABLE_RECORDING"
 
+	// EnableInsecureMetricsAccessEnvKey is the environment variable key for allowing unauthenticated
+	// access to metrics endpoint.
+	EnableInsecureMetricsAccessEnvKey = "ENABLE_INSECURE_METRICS_ACCESS"
+
 	// VerboseLevel is the increased verbosity log level.
 	VerboseLevel = 1
 
@@ -125,7 +129,7 @@ const (
 	// creates a seccomp profile.
 	SeccompProfileRecordBpfAnnotationKey = "io.containers.trace-bpf/"
 
-	// ApparmorProfilerRecordBpfAnnotationKey is the annotation on a Pod that
+	// ApparmorProfileRecordBpfAnnotationKey is the annotation on a Pod that
 	// triggers the internal bpf module to trace the apparmor profile of a Pod
 	// and creates a apparmor profile.
 	ApparmorProfileRecordBpfAnnotationKey = "io.containers.trace-bpf-apparmor/"

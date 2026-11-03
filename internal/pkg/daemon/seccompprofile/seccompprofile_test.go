@@ -23,9 +23,9 @@ import (
 	"path"
 	"testing"
 
-	"github.com/containers/common/pkg/seccomp"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
+	"go.podman.io/common/pkg/seccomp"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -35,10 +35,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	seccompprofileapi "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1beta1"
-	spodapi "sigs.k8s.io/security-profiles-operator/api/spod/v1alpha1"
+	seccompprofileapi "sigs.k8s.io/security-profiles-operator/api/seccompprofile/v1"
+	spodapi "sigs.k8s.io/security-profiles-operator/api/spod/v1"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/artifact"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/config"
+	"sigs.k8s.io/security-profiles-operator/internal/pkg/daemon/common"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/daemon/metrics"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/daemon/seccompprofile/seccompprofilefakes"
 	"sigs.k8s.io/security-profiles-operator/internal/pkg/util"
@@ -85,7 +86,7 @@ func TestReconcile(t *testing.T) {
 			wantResult: reconcile.Result{},
 			wantErr: func() error {
 				if seccomp.IsEnabled() {
-					return fmt.Errorf("%s: %w", errGetProfile, errOops)
+					return fmt.Errorf("%s: %w", common.ErrGetProfile, errOops)
 				}
 
 				return nil
@@ -275,26 +276,28 @@ func TestAllowProfile(t *testing.T) {
 	cases := []struct {
 		name                  string
 		allowedSyscalls       []string
-		allowedSeccompActions []seccomp.Action
+		allowedSeccompActions []seccompprofileapi.Action
 		profile               *seccompprofileapi.SeccompProfile
 		want                  error
 	}{
 		{
-			name:                  "EmptyProfile",
-			allowedSyscalls:       []string{"a", "b", "c"},
-			allowedSeccompActions: []seccomp.Action{seccomp.ActAllow, seccomp.ActLog, seccomp.ActTrace},
-			profile:               &seccompprofileapi.SeccompProfile{},
-			want:                  nil,
+			name:            "EmptyProfile",
+			allowedSyscalls: []string{"a", "b", "c"},
+			allowedSeccompActions: []seccompprofileapi.Action{
+				seccompprofileapi.ActAllow, seccompprofileapi.ActLog, seccompprofileapi.ActTrace,
+			},
+			profile: &seccompprofileapi.SeccompProfile{},
+			want:    nil,
 		},
 		{
 			name:                  "EmptyAllowedList",
 			allowedSyscalls:       []string{},
-			allowedSeccompActions: []seccomp.Action{},
+			allowedSeccompActions: []seccompprofileapi.Action{},
 			profile: &seccompprofileapi.SeccompProfile{
 				Spec: seccompprofileapi.SeccompProfileSpec{
-					Syscalls: []*seccompprofileapi.Syscall{
+					Syscalls: []seccompprofileapi.Syscall{
 						{
-							Action: seccomp.ActAllow,
+							Action: seccompprofileapi.ActAllow,
 							Names:  []string{"a"},
 						},
 					},
@@ -303,14 +306,16 @@ func TestAllowProfile(t *testing.T) {
 			want: fmt.Errorf("%s: %s", errForbiddenSyscall, "a"),
 		},
 		{
-			name:                  "ProfileWithEmptySyscalls",
-			allowedSyscalls:       []string{"a", "b", "c"},
-			allowedSeccompActions: []seccomp.Action{seccomp.ActAllow, seccomp.ActLog, seccomp.ActTrace},
+			name:            "ProfileWithEmptySyscalls",
+			allowedSyscalls: []string{"a", "b", "c"},
+			allowedSeccompActions: []seccompprofileapi.Action{
+				seccompprofileapi.ActAllow, seccompprofileapi.ActLog, seccompprofileapi.ActTrace,
+			},
 			profile: &seccompprofileapi.SeccompProfile{
 				Spec: seccompprofileapi.SeccompProfileSpec{
-					Syscalls: []*seccompprofileapi.Syscall{
+					Syscalls: []seccompprofileapi.Syscall{
 						{
-							Action: seccomp.ActAllow,
+							Action: seccompprofileapi.ActAllow,
 							Names:  []string{},
 						},
 					},
@@ -319,14 +324,16 @@ func TestAllowProfile(t *testing.T) {
 			want: nil,
 		},
 		{
-			name:                  "AllowProfile",
-			allowedSyscalls:       []string{"a", "b", "c"},
-			allowedSeccompActions: []seccomp.Action{seccomp.ActAllow, seccomp.ActLog, seccomp.ActTrace},
+			name:            "AllowProfile",
+			allowedSyscalls: []string{"a", "b", "c"},
+			allowedSeccompActions: []seccompprofileapi.Action{
+				seccompprofileapi.ActAllow, seccompprofileapi.ActLog, seccompprofileapi.ActTrace,
+			},
 			profile: &seccompprofileapi.SeccompProfile{
 				Spec: seccompprofileapi.SeccompProfileSpec{
-					Syscalls: []*seccompprofileapi.Syscall{
+					Syscalls: []seccompprofileapi.Syscall{
 						{
-							Action: seccomp.ActAllow,
+							Action: seccompprofileapi.ActAllow,
 							Names:  []string{"b"},
 						},
 					},
@@ -335,14 +342,16 @@ func TestAllowProfile(t *testing.T) {
 			want: nil,
 		},
 		{
-			name:                  "RejectProfile",
-			allowedSyscalls:       []string{"a", "b", "c"},
-			allowedSeccompActions: []seccomp.Action{seccomp.ActAllow, seccomp.ActLog, seccomp.ActTrace},
+			name:            "RejectProfile",
+			allowedSyscalls: []string{"a", "b", "c"},
+			allowedSeccompActions: []seccompprofileapi.Action{
+				seccompprofileapi.ActAllow, seccompprofileapi.ActLog, seccompprofileapi.ActTrace,
+			},
 			profile: &seccompprofileapi.SeccompProfile{
 				Spec: seccompprofileapi.SeccompProfileSpec{
-					Syscalls: []*seccompprofileapi.Syscall{
+					Syscalls: []seccompprofileapi.Syscall{
 						{
-							Action: seccomp.ActAllow,
+							Action: seccompprofileapi.ActAllow,
 							Names:  []string{"d"},
 						},
 					},
@@ -351,22 +360,24 @@ func TestAllowProfile(t *testing.T) {
 			want: fmt.Errorf("%s: %s", errForbiddenSyscall, "d"),
 		},
 		{
-			name:                  "AllAllowedActions",
-			allowedSyscalls:       []string{"a", "b", "c"},
-			allowedSeccompActions: []seccomp.Action{seccomp.ActAllow, seccomp.ActLog, seccomp.ActTrace},
+			name:            "AllAllowedActions",
+			allowedSyscalls: []string{"a", "b", "c"},
+			allowedSeccompActions: []seccompprofileapi.Action{
+				seccompprofileapi.ActAllow, seccompprofileapi.ActLog, seccompprofileapi.ActTrace,
+			},
 			profile: &seccompprofileapi.SeccompProfile{
 				Spec: seccompprofileapi.SeccompProfileSpec{
-					Syscalls: []*seccompprofileapi.Syscall{
+					Syscalls: []seccompprofileapi.Syscall{
 						{
-							Action: seccomp.ActAllow,
+							Action: seccompprofileapi.ActAllow,
 							Names:  []string{"a"},
 						},
 						{
-							Action: seccomp.ActLog,
+							Action: seccompprofileapi.ActLog,
 							Names:  []string{"b"},
 						},
 						{
-							Action: seccomp.ActTrace,
+							Action: seccompprofileapi.ActTrace,
 							Names:  []string{"c"},
 						},
 					},
@@ -375,34 +386,36 @@ func TestAllowProfile(t *testing.T) {
 			want: nil,
 		},
 		{
-			name:                  "AllForbiddenActions",
-			allowedSyscalls:       []string{"a", "b", "c"},
-			allowedSeccompActions: []seccomp.Action{seccomp.ActAllow, seccomp.ActLog, seccomp.ActTrace},
+			name:            "AllForbiddenActions",
+			allowedSyscalls: []string{"a", "b", "c"},
+			allowedSeccompActions: []seccompprofileapi.Action{
+				seccompprofileapi.ActAllow, seccompprofileapi.ActLog, seccompprofileapi.ActTrace,
+			},
 			profile: &seccompprofileapi.SeccompProfile{
 				Spec: seccompprofileapi.SeccompProfileSpec{
-					Syscalls: []*seccompprofileapi.Syscall{
+					Syscalls: []seccompprofileapi.Syscall{
 						{
-							Action: seccomp.ActErrno,
+							Action: seccompprofileapi.ActErrno,
 							Names:  []string{"a"},
 						},
 						{
-							Action: seccomp.ActTrap,
+							Action: seccompprofileapi.ActTrap,
 							Names:  []string{"d"},
 						},
 						{
-							Action: seccomp.ActKillThread,
+							Action: seccompprofileapi.ActKillThread,
 							Names:  []string{"e"},
 						},
 						{
-							Action: seccomp.ActKillThread,
+							Action: seccompprofileapi.ActKillThread,
 							Names:  []string{"f"},
 						},
 						{
-							Action: seccomp.ActKillProcess,
+							Action: seccompprofileapi.ActKillProcess,
 							Names:  []string{"g"},
 						},
 						{
-							Action: seccomp.ActKill,
+							Action: seccompprofileapi.ActKill,
 							Names:  []string{"b"},
 						},
 					},
@@ -411,23 +424,27 @@ func TestAllowProfile(t *testing.T) {
 			want: nil,
 		},
 		{
-			name:                  "AllowedAll",
-			allowedSyscalls:       []string{"a"},
-			allowedSeccompActions: []seccomp.Action{seccomp.ActAllow, seccomp.ActLog, seccomp.ActTrace},
+			name:            "AllowedAll",
+			allowedSyscalls: []string{"a"},
+			allowedSeccompActions: []seccompprofileapi.Action{
+				seccompprofileapi.ActAllow, seccompprofileapi.ActLog, seccompprofileapi.ActTrace,
+			},
 			profile: &seccompprofileapi.SeccompProfile{
 				Spec: seccompprofileapi.SeccompProfileSpec{
-					DefaultAction: seccomp.ActAllow,
+					DefaultAction: seccompprofileapi.ActAllow,
 				},
 			},
 			want: errors.New(errForbiddenProfile),
 		},
 		{
-			name:                  "DeniedAll",
-			allowedSyscalls:       []string{"a"},
-			allowedSeccompActions: []seccomp.Action{seccomp.ActAllow, seccomp.ActLog, seccomp.ActTrace},
+			name:            "DeniedAll",
+			allowedSyscalls: []string{"a"},
+			allowedSeccompActions: []seccompprofileapi.Action{
+				seccompprofileapi.ActAllow, seccompprofileapi.ActLog, seccompprofileapi.ActTrace,
+			},
 			profile: &seccompprofileapi.SeccompProfile{
 				Spec: seccompprofileapi.SeccompProfileSpec{
-					DefaultAction: seccomp.ActErrno,
+					DefaultAction: seccompprofileapi.ActErrno,
 				},
 			},
 			want: nil,
@@ -435,22 +452,22 @@ func TestAllowProfile(t *testing.T) {
 		{
 			name:                  "DeniedAction",
 			allowedSyscalls:       []string{"a", "b", "c"},
-			allowedSeccompActions: []seccomp.Action{seccomp.ActErrno},
+			allowedSeccompActions: []seccompprofileapi.Action{seccompprofileapi.ActErrno},
 			profile: &seccompprofileapi.SeccompProfile{
 				Spec: seccompprofileapi.SeccompProfileSpec{
-					Syscalls: []*seccompprofileapi.Syscall{
+					Syscalls: []seccompprofileapi.Syscall{
 						{
-							Action: seccomp.ActAllow,
+							Action: seccompprofileapi.ActAllow,
 							Names:  []string{"a"},
 						},
 						{
-							Action: seccomp.ActTrace,
+							Action: seccompprofileapi.ActTrace,
 							Names:  []string{"b"},
 						},
 					},
 				},
 			},
-			want: fmt.Errorf("%s: %s", errForbiddenAction, seccomp.ActErrno),
+			want: fmt.Errorf("%s: %s", errForbiddenAction, seccompprofileapi.ActErrno),
 		},
 	}
 
@@ -499,12 +516,12 @@ func TestAllowedSyscallsChangedPredicate(t *testing.T) {
 			event: event.UpdateEvent{
 				ObjectOld: &spodapi.SecurityProfilesOperatorDaemon{
 					Spec: spodapi.SPODSpec{
-						AllowedSyscalls: []string{"a"},
+						Security: spodapi.SPODSecurityConfig{AllowedSyscalls: []string{"a"}},
 					},
 				},
 				ObjectNew: &spodapi.SecurityProfilesOperatorDaemon{
 					Spec: spodapi.SPODSpec{
-						AllowedSyscalls: []string{"a", "b"},
+						Security: spodapi.SPODSecurityConfig{AllowedSyscalls: []string{"a", "b"}},
 					},
 				},
 			},
@@ -515,12 +532,12 @@ func TestAllowedSyscallsChangedPredicate(t *testing.T) {
 			event: event.UpdateEvent{
 				ObjectOld: &spodapi.SecurityProfilesOperatorDaemon{
 					Spec: spodapi.SPODSpec{
-						AllowedSyscalls: []string{"a", "c"},
+						Security: spodapi.SPODSecurityConfig{AllowedSyscalls: []string{"a", "c"}},
 					},
 				},
 				ObjectNew: &spodapi.SecurityProfilesOperatorDaemon{
 					Spec: spodapi.SPODSpec{
-						AllowedSyscalls: []string{"a", "b"},
+						Security: spodapi.SPODSecurityConfig{AllowedSyscalls: []string{"a", "b"}},
 					},
 				},
 			},
@@ -531,12 +548,12 @@ func TestAllowedSyscallsChangedPredicate(t *testing.T) {
 			event: event.UpdateEvent{
 				ObjectOld: &spodapi.SecurityProfilesOperatorDaemon{
 					Spec: spodapi.SPODSpec{
-						AllowedSyscalls: []string{"a", "b"},
+						Security: spodapi.SPODSecurityConfig{AllowedSyscalls: []string{"a", "b"}},
 					},
 				},
 				ObjectNew: &spodapi.SecurityProfilesOperatorDaemon{
 					Spec: spodapi.SPODSpec{
-						AllowedSyscalls: []string{"a", "b"},
+						Security: spodapi.SPODSecurityConfig{AllowedSyscalls: []string{"a", "b"}},
 					},
 				},
 			},
@@ -547,12 +564,12 @@ func TestAllowedSyscallsChangedPredicate(t *testing.T) {
 			event: event.UpdateEvent{
 				ObjectOld: &spodapi.SecurityProfilesOperatorDaemon{
 					Spec: spodapi.SPODSpec{
-						AllowedSyscalls: []string{"b", "a"},
+						Security: spodapi.SPODSecurityConfig{AllowedSyscalls: []string{"b", "a"}},
 					},
 				},
 				ObjectNew: &spodapi.SecurityProfilesOperatorDaemon{
 					Spec: spodapi.SPODSpec{
-						AllowedSyscalls: []string{"a", "b"},
+						Security: spodapi.SPODSecurityConfig{AllowedSyscalls: []string{"a", "b"}},
 					},
 				},
 			},
@@ -580,14 +597,14 @@ func TestResolveSyscallsForProfile(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		prepare func(mock *seccompprofilefakes.FakeImpl) *seccompprofileapi.SeccompProfile
-		assert  func([]*seccompprofileapi.Syscall, error)
+		assert  func([]seccompprofileapi.Syscall, error)
 	}{
 		{
 			name: "success no base profile",
 			prepare: func(mock *seccompprofilefakes.FakeImpl) *seccompprofileapi.SeccompProfile {
 				return &seccompprofileapi.SeccompProfile{}
 			},
-			assert: func(syscalls []*seccompprofileapi.Syscall, err error) {
+			assert: func(syscalls []seccompprofileapi.Syscall, err error) {
 				require.NoError(t, err)
 				require.Empty(t, syscalls)
 			},
@@ -600,8 +617,8 @@ func TestResolveSyscallsForProfile(t *testing.T) {
 					&seccompprofileapi.SeccompProfile{
 						Spec: seccompprofileapi.SeccompProfileSpec{
 							BaseProfileName: "test",
-							Syscalls: []*seccompprofileapi.Syscall{
-								{Names: []string{"second"}},
+							Syscalls: []seccompprofileapi.Syscall{
+								{Names: []string{"second"}, Action: seccompprofileapi.ActAllow},
 							},
 						},
 					}, nil,
@@ -610,8 +627,8 @@ func TestResolveSyscallsForProfile(t *testing.T) {
 					1,
 					&seccompprofileapi.SeccompProfile{
 						Spec: seccompprofileapi.SeccompProfileSpec{
-							Syscalls: []*seccompprofileapi.Syscall{
-								{Names: []string{"third"}},
+							Syscalls: []seccompprofileapi.Syscall{
+								{Names: []string{"third"}, Action: seccompprofileapi.ActAllow},
 							},
 						},
 					}, nil,
@@ -620,21 +637,21 @@ func TestResolveSyscallsForProfile(t *testing.T) {
 				return &seccompprofileapi.SeccompProfile{
 					Spec: seccompprofileapi.SeccompProfileSpec{
 						BaseProfileName: "test",
-						Syscalls: []*seccompprofileapi.Syscall{
-							{Names: []string{"first"}},
+						Syscalls: []seccompprofileapi.Syscall{
+							{Names: []string{"first"}, Action: seccompprofileapi.ActAllow},
 						},
 					},
 				}
 			},
-			assert: func(syscalls []*seccompprofileapi.Syscall, err error) {
+			assert: func(syscalls []seccompprofileapi.Syscall, err error) {
 				require.NoError(t, err)
 				require.Len(t, syscalls, 3)
 				require.Len(t, syscalls[0].Names, 1)
 				require.Len(t, syscalls[1].Names, 1)
 				require.Len(t, syscalls[2].Names, 1)
-				require.Equal(t, "third", syscalls[0].Names[0])
+				require.Equal(t, "first", syscalls[0].Names[0])
 				require.Equal(t, "second", syscalls[1].Names[0])
-				require.Equal(t, "first", syscalls[2].Names[0])
+				require.Equal(t, "third", syscalls[2].Names[0])
 			},
 		},
 		{
@@ -644,15 +661,15 @@ func TestResolveSyscallsForProfile(t *testing.T) {
 				mock.PullResultSeccompProfileReturnsOnCall(0, &seccompprofileapi.SeccompProfile{
 					Spec: seccompprofileapi.SeccompProfileSpec{
 						BaseProfileName: config.OCIProfilePrefix + "test-1",
-						Syscalls: []*seccompprofileapi.Syscall{
-							{Names: []string{"second"}},
+						Syscalls: []seccompprofileapi.Syscall{
+							{Names: []string{"second"}, Action: seccompprofileapi.ActAllow},
 						},
 					},
 				})
 				mock.PullResultSeccompProfileReturnsOnCall(1, &seccompprofileapi.SeccompProfile{
 					Spec: seccompprofileapi.SeccompProfileSpec{
-						Syscalls: []*seccompprofileapi.Syscall{
-							{Names: []string{"third"}},
+						Syscalls: []seccompprofileapi.Syscall{
+							{Names: []string{"third"}, Action: seccompprofileapi.ActAllow},
 						},
 					},
 				})
@@ -660,21 +677,21 @@ func TestResolveSyscallsForProfile(t *testing.T) {
 				return &seccompprofileapi.SeccompProfile{
 					Spec: seccompprofileapi.SeccompProfileSpec{
 						BaseProfileName: config.OCIProfilePrefix + "test-0",
-						Syscalls: []*seccompprofileapi.Syscall{
-							{Names: []string{"first"}},
+						Syscalls: []seccompprofileapi.Syscall{
+							{Names: []string{"first"}, Action: seccompprofileapi.ActAllow},
 						},
 					},
 				}
 			},
-			assert: func(syscalls []*seccompprofileapi.Syscall, err error) {
+			assert: func(syscalls []seccompprofileapi.Syscall, err error) {
 				require.NoError(t, err)
 				require.Len(t, syscalls, 3)
 				require.Len(t, syscalls[0].Names, 1)
 				require.Len(t, syscalls[1].Names, 1)
 				require.Len(t, syscalls[2].Names, 1)
-				require.Equal(t, "third", syscalls[0].Names[0])
+				require.Equal(t, "first", syscalls[0].Names[0])
 				require.Equal(t, "second", syscalls[1].Names[0])
-				require.Equal(t, "first", syscalls[2].Names[0])
+				require.Equal(t, "third", syscalls[2].Names[0])
 			},
 		},
 		{
@@ -688,7 +705,7 @@ func TestResolveSyscallsForProfile(t *testing.T) {
 					},
 				}
 			},
-			assert: func(syscalls []*seccompprofileapi.Syscall, err error) {
+			assert: func(syscalls []seccompprofileapi.Syscall, err error) {
 				require.Error(t, err)
 			},
 		},
@@ -703,7 +720,7 @@ func TestResolveSyscallsForProfile(t *testing.T) {
 					},
 				}
 			},
-			assert: func(syscalls []*seccompprofileapi.Syscall, err error) {
+			assert: func(syscalls []seccompprofileapi.Syscall, err error) {
 				require.Error(t, err)
 				require.ErrorIs(t, err, errTest)
 			},
@@ -721,13 +738,13 @@ func TestResolveSyscallsForProfile(t *testing.T) {
 				return &seccompprofileapi.SeccompProfile{
 					Spec: seccompprofileapi.SeccompProfileSpec{
 						BaseProfileName: config.OCIProfilePrefix + "test",
-						Syscalls: []*seccompprofileapi.Syscall{
+						Syscalls: []seccompprofileapi.Syscall{
 							{Names: []string{"first"}},
 						},
 					},
 				}
 			},
-			assert: func(syscalls []*seccompprofileapi.Syscall, err error) {
+			assert: func(syscalls []seccompprofileapi.Syscall, err error) {
 				require.Error(t, err)
 			},
 		},
@@ -742,7 +759,7 @@ func TestResolveSyscallsForProfile(t *testing.T) {
 					},
 				}
 			},
-			assert: func(syscalls []*seccompprofileapi.Syscall, err error) {
+			assert: func(syscalls []seccompprofileapi.Syscall, err error) {
 				require.ErrorIs(t, err, errTest)
 			},
 		},

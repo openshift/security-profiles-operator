@@ -17,6 +17,7 @@ package verify
 
 import (
 	"context"
+	"crypto"
 	"errors"
 	"flag"
 	"fmt"
@@ -73,12 +74,18 @@ type VerifyAttestationCommand struct {
 	IgnoreTlog                   bool
 	MaxWorkers                   int
 	UseSignedTimestamps          bool
+	HashAlgorithm                crypto.Hash
 }
 
 // Exec runs the verification command
 func (c *VerifyAttestationCommand) Exec(ctx context.Context, images []string) (err error) {
 	if len(images) == 0 {
 		return flag.ErrHelp
+	}
+
+	// always default to sha256 if the algorithm hasn't been explicitly set
+	if c.HashAlgorithm == 0 {
+		c.HashAlgorithm = crypto.SHA256
 	}
 
 	// We can't have both a key and a security key
@@ -99,21 +106,6 @@ func (c *VerifyAttestationCommand) Exec(ctx context.Context, images []string) (e
 		return fmt.Errorf("constructing client options: %w", err)
 	}
 
-	trustedMaterial, err := cosign.TrustedRoot()
-	if err != nil {
-		ui.Warnf(ctx, "Could not fetch trusted_root.json from the TUF repository. Continuing with individual targets. Error from TUF: %v", err)
-	}
-
-	if options.NOf(c.CertChain, c.CARoots, c.CAIntermediates, c.TSACertChainPath) > 0 ||
-		env.Getenv(env.VariableSigstoreCTLogPublicKeyFile) != "" ||
-		env.Getenv(env.VariableSigstoreRootFile) != "" ||
-		env.Getenv(env.VariableSigstoreRekorPublicKey) != "" ||
-		env.Getenv(env.VariableSigstoreTSACertificateFile) != "" {
-		// trusted_root.json was found, but a cert chain was explicitly provided, or environment variables point to the key material,
-		// so don't overrule the user's intentions.
-		trustedMaterial = nil
-	}
-
 	co := &cosign.CheckOpts{
 		RegistryClientOpts:           ociremoteOpts,
 		CertGithubWorkflowTrigger:    c.CertGithubWorkflowTrigger,
@@ -128,8 +120,19 @@ func (c *VerifyAttestationCommand) Exec(ctx context.Context, images []string) (e
 		MaxWorkers:                   c.MaxWorkers,
 		UseSignedTimestamps:          c.TSACertChainPath != "" || c.UseSignedTimestamps,
 		NewBundleFormat:              c.NewBundleFormat,
-		TrustedMaterial:              trustedMaterial,
 	}
+
+	// Check to see if we are using the new bundle format or not
+	if !c.LocalImage {
+		ref, err := name.ParseReference(images[0], c.NameOptions...)
+		if err == nil && !c.NewBundleFormat {
+			newBundles, _, err := cosign.GetBundles(ctx, ref, co)
+			if len(newBundles) > 0 && err == nil {
+				co.NewBundleFormat = true
+			}
+		}
+	}
+
 	if c.CheckClaims {
 		co.ClaimVerifier = cosign.IntotoSubjectClaimVerifier
 	}
@@ -150,7 +153,7 @@ func (c *VerifyAttestationCommand) Exec(ctx context.Context, images []string) (e
 		}
 	}
 
-	if c.NewBundleFormat {
+	if co.NewBundleFormat {
 		if err = checkSigstoreBundleUnsupportedOptions(c); err != nil {
 			return err
 		}
@@ -160,7 +163,7 @@ func (c *VerifyAttestationCommand) Exec(ctx context.Context, images []string) (e
 	}
 
 	// Ignore Signed Certificate Timestamp if the flag is set or a key is provided
-	if co.TrustedMaterial == nil && shouldVerifySCT(c.IgnoreSCT, c.KeyRef, c.Sk) && !c.NewBundleFormat {
+	if co.TrustedMaterial == nil && shouldVerifySCT(c.IgnoreSCT, c.KeyRef, c.Sk) && !co.NewBundleFormat {
 		co.CTLogPubKeys, err = cosign.GetCTLogPubs(ctx)
 		if err != nil {
 			return fmt.Errorf("getting ctlog public keys: %w", err)
@@ -168,7 +171,7 @@ func (c *VerifyAttestationCommand) Exec(ctx context.Context, images []string) (e
 	}
 
 	// If we are using signed timestamps, we need to load the TSA certificates
-	if co.UseSignedTimestamps && co.TrustedMaterial == nil && !c.NewBundleFormat {
+	if co.UseSignedTimestamps && co.TrustedMaterial == nil && !co.NewBundleFormat {
 		tsaCertificates, err := cosign.GetTSACerts(ctx, c.TSACertChainPath, cosign.GetTufTargets)
 		if err != nil {
 			return fmt.Errorf("unable to load TSA certificates: %w", err)
@@ -207,7 +210,7 @@ func (c *VerifyAttestationCommand) Exec(ctx context.Context, images []string) (e
 	// Keys are optional!
 	switch {
 	case keyRef != "":
-		co.SigVerifier, err = sigs.PublicKeyFromKeyRef(ctx, keyRef)
+		co.SigVerifier, err = sigs.PublicKeyFromKeyRefWithHashAlgo(ctx, keyRef, c.HashAlgorithm)
 		if err != nil {
 			return fmt.Errorf("loading public key: %w", err)
 		}
@@ -226,7 +229,7 @@ func (c *VerifyAttestationCommand) Exec(ctx context.Context, images []string) (e
 			return fmt.Errorf("initializing piv token verifier: %w", err)
 		}
 	case c.CertRef != "":
-		if c.NewBundleFormat {
+		if co.NewBundleFormat {
 			// This shouldn't happen because we already checked for this above in checkSigstoreBundleUnsupportedOptions
 			return fmt.Errorf("unsupported: certificate reference currently not supported with --new-bundle-format")
 		}
@@ -269,7 +272,7 @@ func (c *VerifyAttestationCommand) Exec(ctx context.Context, images []string) (e
 			co.SCT = sct
 		}
 	case c.TrustedRootPath != "":
-		if !c.NewBundleFormat {
+		if !co.NewBundleFormat {
 			return fmt.Errorf("unsupported: trusted root path currently only supported with --new-bundle-format")
 		}
 

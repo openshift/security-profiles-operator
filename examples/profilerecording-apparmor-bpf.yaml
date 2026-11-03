@@ -1,15 +1,15 @@
 ---
-apiVersion: security-profiles-operator.x-k8s.io/v1alpha1
+apiVersion: security-profiles-operator.x-k8s.io/v1
 kind: ProfileRecording
 metadata:
-  # The name of the Recording is the same as the resulting `ApparmorProfile` CRD
+  # The name of the Recording is the same as the resulting `AppArmorProfile` CRD
   # after reconciliation.
   name: test-recording
 spec:
-  kind: ApparmorProfile
-  recorder: bpf
+  kind: AppArmorProfile
+  recorder: Bpf
   # uncomment to merge recordings of the same containers
-  # mergeStrategy: containers
+  # mergeStrategy: Containers
   podSelector:
     matchLabels:
       app: alpine

@@ -40,16 +40,19 @@ var (
 )
 
 type PolicyRef struct {
-	// The Kind of the policy that this inherits from.
-	// Can be a SelinuxProfile object Or "System" if an already
+	// kind specifies the type of policy that this inherits from.
+	// Can be a SelinuxProfile object or "System" if an already
 	// installed policy will be used.
 	// The allowed "System" policies are available in the
 	// SecurityProfilesOperatorDaemon instance.
-	// +kubebuilder:default="System"
+	// +optional
+	// +default="System"
 	// +kubebuilder:validation:Enum=System;SelinuxProfile;
 	Kind string `json:"kind,omitempty"`
-	// The name of the policy that this inherits from.
-	Name string `json:"name"`
+	// name is the name of the policy that this inherits from.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name,omitempty"`
 }
 
 // SelinuxProfileSpec defines the desired state of SelinuxProfile.
@@ -57,17 +60,19 @@ type SelinuxProfileSpec struct {
 	// Common spec fields for all profiles.
 	profilebasev1alpha1.SpecBase `json:",inline"`
 
-	// A SELinuxProfile or set of profiles that this inherits from.
+	// inherit specifies a SELinuxProfile or set of profiles that this inherits from.
 	// Note that they need to be in the same namespace.
 	// +optional
-	// +kubebuilder:default={{kind:"System",name:"container"}}
+	// +default=[{"kind":"System","name":"container"}]
+	// +listType=atomic
 	Inherit []PolicyRef `json:"inherit,omitempty"`
 	// Permissive, when true will cause the SELinux profile to only
 	// log violations instead of enforcing them.
 	// +optional
 	// +kubebuilder:default=false
 	Permissive bool `json:"permissive,omitempty"`
-	// Defines the allow policy for the profile
+	// allow defines the allow policy for the profile.
+	// +optional
 	Allow Allow `json:"allow,omitempty"`
 }
 
@@ -111,25 +116,34 @@ type SelinuxProfileStatus struct {
 	// Common status fields for all profiles.
 	profilebasev1alpha1.StatusBase `json:",inline"`
 
-	// Represents the string that the SelinuxProfile object can be
+	// usage represents the string that the SelinuxProfile object can be
 	// referenced as in a pod seLinuxOptions section.
-	Usage           string   `json:"usage,omitempty"`
+	// +optional
+	Usage string `json:"usage,omitempty"`
+	// activeWorkloads lists the workloads currently using this profile.
+	// +optional
+	// +listType=set
 	ActiveWorkloads []string `json:"activeWorkloads,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // SelinuxProfile is the Schema for the selinuxprofiles API.
-// +kubebuilder:storageversion
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:path=selinuxprofiles,scope=Cluster
 // +kubebuilder:printcolumn:name="Usage",type="string",JSONPath=`.status.usage`
 // +kubebuilder:printcolumn:name="State",type="string",JSONPath=`.status.status`
 type SelinuxProfile struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+	// metadata contains the object metadata.
+	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   SelinuxProfileSpec   `json:"spec,omitempty"`
+	// spec defines the desired state of the SelinuxProfile.
+	// +optional
+	Spec SelinuxProfileSpec `json:"spec,omitempty"`
+	// status contains the observed state of the SelinuxProfile.
+	// +optional
 	Status SelinuxProfileStatus `json:"status,omitempty"`
 }
 
