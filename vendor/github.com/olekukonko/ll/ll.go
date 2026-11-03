@@ -597,6 +597,17 @@ func (l *Logger) FieldOne(key string, value any) *FieldBuilder {
 	return fb
 }
 
+// FieldSet avoids variadic allocation overhead by accepting a slice of strongly typed fields.
+// Ideally, lx.Field is struct{Key string, Value any}
+func (l *Logger) FieldSet(fields []lx.Field) *FieldBuilder {
+	fb := getFieldBuilder(l, len(fields))
+	if l.suspend.Load() {
+		return fb
+	}
+	fb.fields = append(fb.fields, fields...)
+	return fb
+}
+
 // Field starts a fluent chain for adding fields from a map, creating a FieldBuilder
 // for type-safe field addition. It is thread-safe via the FieldBuilderâ   s logger.
 // Example:
@@ -1279,6 +1290,18 @@ func (l *Logger) Warnf(format string, args ...any) {
 		return
 	}
 	l.Warn(fmt.Sprintf(format, args...))
+}
+
+// Warning is an alias for Warn that logs a message or object at the warning level
+// using variadic arguments.
+func (l *Logger) Warning(args ...any) {
+	l.Warn(args...)
+}
+
+// Warningf is an alias for Warnf that logs a formatted warning-level message
+// using the provided format and arguments.
+func (l *Logger) Warningf(format string, args ...any) {
+	l.Warnf(format, args...)
 }
 
 // joinPath joins a base path and a relative path using the logger's separator, handling
