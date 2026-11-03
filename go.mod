@@ -13,7 +13,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/hairyhenderson/go-which v0.2.3
 	github.com/jellydator/ttlcache/v3 v3.4.1
-	github.com/maxbrunsfeld/counterfeiter/v6 v6.12.2
+	github.com/maxbrunsfeld/counterfeiter/v6 v6.14.0
 	github.com/mogensen/kubernetes-split-yaml v0.4.0
 	github.com/nxadm/tail v1.4.11
 	github.com/opencontainers/go-digest v1.0.0
@@ -51,7 +51,7 @@ require (
 	oras.land/oras-go/v2 v2.6.2
 	sigs.k8s.io/controller-runtime v0.24.1
 	sigs.k8s.io/controller-tools v0.21.0
-	sigs.k8s.io/release-utils v0.12.4
+	sigs.k8s.io/release-utils v0.12.5
 	sigs.k8s.io/yaml v1.6.0
 )
 
@@ -227,7 +227,7 @@ require (
 	github.com/olekukonko/cat v0.0.0-20250911104152-50322a0618f6 // indirect
 	github.com/olekukonko/errors v1.2.0 // indirect
 	github.com/olekukonko/ll v0.1.7 // indirect
-	github.com/olekukonko/tablewriter v1.1.4 // indirect
+	github.com/olekukonko/tablewriter v1.1.5 // indirect
 	github.com/open-policy-agent/opa v1.14.0 // indirect
 	github.com/opencontainers/cgroups v0.0.8 // indirect
 	github.com/pborman/uuid v1.2.1 // indirect
@@ -253,7 +253,7 @@ require (
 	github.com/sigstore/sigstore v1.10.8 // indirect
 	github.com/sigstore/sigstore-go v1.2.1 // indirect
 	github.com/sigstore/timestamp-authority/v2 v2.1.2 // indirect
-	github.com/sirupsen/logrus v1.9.4 // indirect
+	github.com/sirupsen/logrus v1.10.2 // indirect
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/spf13/cobra v1.10.2 // indirect
