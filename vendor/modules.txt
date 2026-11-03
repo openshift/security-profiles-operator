@@ -213,7 +213,7 @@ github.com/ThalesIgnite/crypto11
 # github.com/acobaugh/osrelease v0.1.0
 ## explicit; go 1.17
 github.com/acobaugh/osrelease
-# github.com/agnivade/levenshtein v1.2.1
+# github.com/agnivade/levenshtein v1.2.2
 ## explicit; go 1.21
 github.com/agnivade/levenshtein
 # github.com/alibabacloud-go/alibabacloud-gateway-spi v0.0.4
@@ -1492,8 +1492,8 @@ github.com/urfave/cli/v2
 ## explicit; go 1.24
 github.com/valyala/fastjson
 github.com/valyala/fastjson/fastfloat
-# github.com/vektah/gqlparser/v2 v2.5.32
-## explicit; go 1.22
+# github.com/vektah/gqlparser/v2 v2.5.64
+## explicit; go 1.25
 github.com/vektah/gqlparser/v2/ast
 github.com/vektah/gqlparser/v2/gqlerror
 github.com/vektah/gqlparser/v2/lexer
