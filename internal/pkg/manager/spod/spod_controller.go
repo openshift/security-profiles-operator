@@ -135,6 +135,9 @@ func (r *ReconcileSPOd) Healthz(*http.Request) error {
 // +kubebuilder:rbac:groups=authentication.k8s.io,resources=tokenreviews,verbs=create
 // +kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create
 //
+// Required by Red Hat release policy (olm.required_network_policy_rbac_for_operands):
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
+//
 // Needed to detect which runtime is active
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;get
 //
