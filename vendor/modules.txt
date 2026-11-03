@@ -216,18 +216,21 @@ github.com/acobaugh/osrelease
 # github.com/agnivade/levenshtein v1.2.1
 ## explicit; go 1.21
 github.com/agnivade/levenshtein
-# github.com/alibabacloud-go/alibabacloud-gateway-spi v0.0.4
+# github.com/alibabacloud-go/alibabacloud-gateway-spi v0.0.5
 ## explicit; go 1.14
 github.com/alibabacloud-go/alibabacloud-gateway-spi/client
-# github.com/alibabacloud-go/cr-20160607 v1.0.1
+# github.com/alibabacloud-go/cr-20160607/v2 v2.0.0
 ## explicit; go 1.15
-github.com/alibabacloud-go/cr-20160607/client
-# github.com/alibabacloud-go/cr-20181201 v1.0.10
-## explicit; go 1.15
-github.com/alibabacloud-go/cr-20181201/client
-# github.com/alibabacloud-go/darabonba-openapi v0.2.1
+github.com/alibabacloud-go/cr-20160607/v2/client
+# github.com/alibabacloud-go/cr-20181201/v3 v3.2.3
 ## explicit; go 1.14
-github.com/alibabacloud-go/darabonba-openapi/client
+github.com/alibabacloud-go/cr-20181201/v3/client
+# github.com/alibabacloud-go/darabonba-openapi/v2 v2.2.4
+## explicit; go 1.14
+github.com/alibabacloud-go/darabonba-openapi/v2/client
+github.com/alibabacloud-go/darabonba-openapi/v2/models
+github.com/alibabacloud-go/darabonba-openapi/v2/utils
+github.com/alibabacloud-go/darabonba-openapi/v2/websocketUtils
 # github.com/alibabacloud-go/debug v1.0.1
 ## explicit; go 1.18
 github.com/alibabacloud-go/debug/debug
@@ -237,16 +240,17 @@ github.com/alibabacloud-go/endpoint-util/service
 # github.com/alibabacloud-go/openapi-util v0.1.0
 ## explicit; go 1.14
 github.com/alibabacloud-go/openapi-util/service
-# github.com/alibabacloud-go/tea v1.4.0
+# github.com/alibabacloud-go/tea v1.5.3
 ## explicit; go 1.14
+github.com/alibabacloud-go/tea/dara
 github.com/alibabacloud-go/tea/tea
 github.com/alibabacloud-go/tea/utils
 # github.com/alibabacloud-go/tea-utils v1.4.5
 ## explicit; go 1.14
 github.com/alibabacloud-go/tea-utils/service
-# github.com/alibabacloud-go/tea-xml v1.1.3
+# github.com/alibabacloud-go/tea-utils/v2 v2.0.9
 ## explicit; go 1.14
-github.com/alibabacloud-go/tea-xml/service
+github.com/alibabacloud-go/tea-utils/v2/service
 # github.com/aliyun/credentials-go v1.4.11
 ## explicit; go 1.14
 github.com/aliyun/credentials-go
@@ -509,7 +513,7 @@ github.com/docker/cli/cli/config/configfile
 github.com/docker/cli/cli/config/credentials
 github.com/docker/cli/cli/config/memorystore
 github.com/docker/cli/cli/config/types
-# github.com/docker/docker-credential-helpers v0.9.8
+# github.com/docker/docker-credential-helpers v0.9.9
 ## explicit; go 1.21
 github.com/docker/docker-credential-helpers/client
 github.com/docker/docker-credential-helpers/credentials
@@ -818,6 +822,9 @@ github.com/googleapis/gax-go/v2/callctx
 github.com/googleapis/gax-go/v2/internal
 github.com/googleapis/gax-go/v2/internallog
 github.com/googleapis/gax-go/v2/internallog/internal
+# github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
+## explicit; go 1.20
+github.com/gorilla/websocket
 # github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0
 ## explicit; go 1.25.0
 github.com/grpc-ecosystem/grpc-gateway/v2/internal/httprule
@@ -973,11 +980,13 @@ github.com/modern-go/reflect2
 # github.com/mogensen/kubernetes-split-yaml v0.4.0
 ## explicit; go 1.19
 github.com/mogensen/kubernetes-split-yaml
-# github.com/mozillazg/docker-credential-acr-helper v0.4.0
-## explicit; go 1.18
-github.com/mozillazg/docker-credential-acr-helper/pkg/acr
+# github.com/mozillazg/docker-credential-acr-helper v0.4.2
+## explicit; go 1.25.0
 github.com/mozillazg/docker-credential-acr-helper/pkg/credhelper
 github.com/mozillazg/docker-credential-acr-helper/pkg/version
+# github.com/mozillazg/docker-credential-acr-helper/pkg/acr v0.2.3
+## explicit; go 1.25.0
+github.com/mozillazg/docker-credential-acr-helper/pkg/acr
 # github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822
 ## explicit
 github.com/munnerz/goautoneg
@@ -1129,6 +1138,9 @@ github.com/pelletier/go-toml/v2/internal/characters
 github.com/pelletier/go-toml/v2/internal/danger
 github.com/pelletier/go-toml/v2/internal/tracker
 github.com/pelletier/go-toml/v2/unstable
+# github.com/phuslu/lru v1.0.18
+## explicit; go 1.18
+github.com/phuslu/lru
 # github.com/pjbgf/go-apparmor v0.1.3-0.20241107184909-1375e5e7aa89
 ## explicit; go 1.21
 github.com/pjbgf/go-apparmor/pkg/apparmor
@@ -1374,8 +1386,8 @@ github.com/sigstore/sigstore-go/pkg/verify
 # github.com/sigstore/timestamp-authority/v2 v2.1.2
 ## explicit; go 1.25.0
 github.com/sigstore/timestamp-authority/v2/pkg/verification
-# github.com/sirupsen/logrus v1.9.4
-## explicit; go 1.17
+# github.com/sirupsen/logrus v1.10.2
+## explicit; go 1.23
 github.com/sirupsen/logrus
 # github.com/spf13/afero v1.15.0
 ## explicit; go 1.23.0

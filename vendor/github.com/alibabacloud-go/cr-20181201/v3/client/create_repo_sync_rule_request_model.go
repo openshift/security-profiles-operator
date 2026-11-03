@@ -1,0 +1,333 @@
+// This file is auto-generated, don't edit it. Thanks.
+package client
+
+import (
+	"github.com/alibabacloud-go/tea/dara"
+)
+
+type iCreateRepoSyncRuleRequest interface {
+	dara.Model
+	String() string
+	GoString() string
+	SetInstanceId(v string) *CreateRepoSyncRuleRequest
+	GetInstanceId() *string
+	SetLinkId(v string) *CreateRepoSyncRuleRequest
+	GetLinkId() *string
+	SetNamespaceName(v string) *CreateRepoSyncRuleRequest
+	GetNamespaceName() *string
+	SetNamespaceNameFilter(v string) *CreateRepoSyncRuleRequest
+	GetNamespaceNameFilter() *string
+	SetPriority(v int32) *CreateRepoSyncRuleRequest
+	GetPriority() *int32
+	SetRepoName(v string) *CreateRepoSyncRuleRequest
+	GetRepoName() *string
+	SetRepoNameFilter(v string) *CreateRepoSyncRuleRequest
+	GetRepoNameFilter() *string
+	SetSyncRuleName(v string) *CreateRepoSyncRuleRequest
+	GetSyncRuleName() *string
+	SetSyncScope(v string) *CreateRepoSyncRuleRequest
+	GetSyncScope() *string
+	SetSyncTrigger(v string) *CreateRepoSyncRuleRequest
+	GetSyncTrigger() *string
+	SetTagFilter(v string) *CreateRepoSyncRuleRequest
+	GetTagFilter() *string
+	SetTargetInstanceId(v string) *CreateRepoSyncRuleRequest
+	GetTargetInstanceId() *string
+	SetTargetNamespaceName(v string) *CreateRepoSyncRuleRequest
+	GetTargetNamespaceName() *string
+	SetTargetRegionId(v string) *CreateRepoSyncRuleRequest
+	GetTargetRegionId() *string
+	SetTargetRepoName(v string) *CreateRepoSyncRuleRequest
+	GetTargetRepoName() *string
+	SetTargetUserId(v string) *CreateRepoSyncRuleRequest
+	GetTargetUserId() *string
+}
+
+type CreateRepoSyncRuleRequest struct {
+	// The ID of the source instance.
+	//
+	// This parameter is required.
+	//
+	// example:
+	//
+	// cri-hpdfkc6utbaq****
+	InstanceId *string `json:"InstanceId,omitempty" xml:"InstanceId,omitempty"`
+	// The ID of the custom synchronization link.
+	//
+	// example:
+	//
+	// stl-72cjfd3fayno8***
+	LinkId *string `json:"LinkId,omitempty" xml:"LinkId,omitempty"`
+	// The namespace name of the source instance.
+	//
+	// example:
+	//
+	// ns1
+	NamespaceName *string `json:"NamespaceName,omitempty" xml:"NamespaceName,omitempty"`
+	// The instance-level namespace regex filter.
+	//
+	// > This parameter takes effect only when SyncScope is set to `INSTANCE`.
+	//
+	// example:
+	//
+	// .*
+	NamespaceNameFilter *string `json:"NamespaceNameFilter,omitempty" xml:"NamespaceNameFilter,omitempty"`
+	// The execution priority of the synchronization task. Synchronization tasks are executed in descending order of priority. Tasks with the same priority are executed in random order.
+	//
+	// Valid values: 1 to 5.
+	//
+	// Default value: 3.
+	//
+	// example:
+	//
+	// 3
+	Priority *int32 `json:"Priority,omitempty" xml:"Priority,omitempty"`
+	// The repository name of the source instance.
+	//
+	// example:
+	//
+	// repo1
+	RepoName *string `json:"RepoName,omitempty" xml:"RepoName,omitempty"`
+	// The repository filter rule.
+	//
+	// > This parameter takes effect only when SyncScope is set to `INSTANCE` or `NAMESPACE`.
+	//
+	// example:
+	//
+	// .*
+	RepoNameFilter *string `json:"RepoNameFilter,omitempty" xml:"RepoNameFilter,omitempty"`
+	// The name of the synchronization rule.
+	//
+	// This parameter is required.
+	//
+	// example:
+	//
+	// rule
+	SyncRuleName *string `json:"SyncRuleName,omitempty" xml:"SyncRuleName,omitempty"`
+	// The synchronization type. Valid values:
+	//
+	// - `REPO`: Synchronizes by image repository.
+	//
+	// - `NAMESPACE`: Synchronizes by namespace.
+	//
+	// - `INSTANCE`: Synchronizes by namespace regex and repository regex.
+	//
+	// This parameter is required.
+	//
+	// example:
+	//
+	// REPO
+	SyncScope *string `json:"SyncScope,omitempty" xml:"SyncScope,omitempty"`
+	// The trigger for the synchronization action. Valid values:
+	//
+	// - `INITIATIVE`: Manual trigger.
+	//
+	//
+	//
+	// - `PASSIVE`: Automatic trigger.
+	//
+	// example:
+	//
+	// PASSIVE
+	SyncTrigger *string `json:"SyncTrigger,omitempty" xml:"SyncTrigger,omitempty"`
+	// The tag filter rule.
+	//
+	// This parameter is required.
+	//
+	// example:
+	//
+	// .*
+	TagFilter *string `json:"TagFilter,omitempty" xml:"TagFilter,omitempty"`
+	// The ID of the target instance.
+	//
+	// This parameter is required.
+	//
+	// example:
+	//
+	// cri-ibxs3piklys3****
+	TargetInstanceId *string `json:"TargetInstanceId,omitempty" xml:"TargetInstanceId,omitempty"`
+	// The namespace name of the target instance.
+	//
+	// example:
+	//
+	// ns1
+	TargetNamespaceName *string `json:"TargetNamespaceName,omitempty" xml:"TargetNamespaceName,omitempty"`
+	// The region ID of the target instance.
+	//
+	// This parameter is required.
+	//
+	// example:
+	//
+	// cn-shanghai
+	TargetRegionId *string `json:"TargetRegionId,omitempty" xml:"TargetRegionId,omitempty"`
+	// The image repository name of the target instance.
+	//
+	// example:
+	//
+	// repo1
+	TargetRepoName *string `json:"TargetRepoName,omitempty" xml:"TargetRepoName,omitempty"`
+	// The UID of the account to which the target instance belongs.
+	//
+	// > This parameter is required for cross-account image synchronization.
+	//
+	// example:
+	//
+	// 12645940***
+	TargetUserId *string `json:"TargetUserId,omitempty" xml:"TargetUserId,omitempty"`
+}
+
+func (s CreateRepoSyncRuleRequest) String() string {
+	return dara.Prettify(s)
+}
+
+func (s CreateRepoSyncRuleRequest) GoString() string {
+	return s.String()
+}
+
+func (s *CreateRepoSyncRuleRequest) GetInstanceId() *string {
+	return s.InstanceId
+}
+
+func (s *CreateRepoSyncRuleRequest) GetLinkId() *string {
+	return s.LinkId
+}
+
+func (s *CreateRepoSyncRuleRequest) GetNamespaceName() *string {
+	return s.NamespaceName
+}
+
+func (s *CreateRepoSyncRuleRequest) GetNamespaceNameFilter() *string {
+	return s.NamespaceNameFilter
+}
+
+func (s *CreateRepoSyncRuleRequest) GetPriority() *int32 {
+	return s.Priority
+}
+
+func (s *CreateRepoSyncRuleRequest) GetRepoName() *string {
+	return s.RepoName
+}
+
+func (s *CreateRepoSyncRuleRequest) GetRepoNameFilter() *string {
+	return s.RepoNameFilter
+}
+
+func (s *CreateRepoSyncRuleRequest) GetSyncRuleName() *string {
+	return s.SyncRuleName
+}
+
+func (s *CreateRepoSyncRuleRequest) GetSyncScope() *string {
+	return s.SyncScope
+}
+
+func (s *CreateRepoSyncRuleRequest) GetSyncTrigger() *string {
+	return s.SyncTrigger
+}
+
+func (s *CreateRepoSyncRuleRequest) GetTagFilter() *string {
+	return s.TagFilter
+}
+
+func (s *CreateRepoSyncRuleRequest) GetTargetInstanceId() *string {
+	return s.TargetInstanceId
+}
+
+func (s *CreateRepoSyncRuleRequest) GetTargetNamespaceName() *string {
+	return s.TargetNamespaceName
+}
+
+func (s *CreateRepoSyncRuleRequest) GetTargetRegionId() *string {
+	return s.TargetRegionId
+}
+
+func (s *CreateRepoSyncRuleRequest) GetTargetRepoName() *string {
+	return s.TargetRepoName
+}
+
+func (s *CreateRepoSyncRuleRequest) GetTargetUserId() *string {
+	return s.TargetUserId
+}
+
+func (s *CreateRepoSyncRuleRequest) SetInstanceId(v string) *CreateRepoSyncRuleRequest {
+	s.InstanceId = &v
+	return s
+}
+
+func (s *CreateRepoSyncRuleRequest) SetLinkId(v string) *CreateRepoSyncRuleRequest {
+	s.LinkId = &v
+	return s
+}
+
+func (s *CreateRepoSyncRuleRequest) SetNamespaceName(v string) *CreateRepoSyncRuleRequest {
+	s.NamespaceName = &v
+	return s
+}
+
+func (s *CreateRepoSyncRuleRequest) SetNamespaceNameFilter(v string) *CreateRepoSyncRuleRequest {
+	s.NamespaceNameFilter = &v
+	return s
+}
+
+func (s *CreateRepoSyncRuleRequest) SetPriority(v int32) *CreateRepoSyncRuleRequest {
+	s.Priority = &v
+	return s
+}
+
+func (s *CreateRepoSyncRuleRequest) SetRepoName(v string) *CreateRepoSyncRuleRequest {
+	s.RepoName = &v
+	return s
+}
+
+func (s *CreateRepoSyncRuleRequest) SetRepoNameFilter(v string) *CreateRepoSyncRuleRequest {
+	s.RepoNameFilter = &v
+	return s
+}
+
+func (s *CreateRepoSyncRuleRequest) SetSyncRuleName(v string) *CreateRepoSyncRuleRequest {
+	s.SyncRuleName = &v
+	return s
+}
+
+func (s *CreateRepoSyncRuleRequest) SetSyncScope(v string) *CreateRepoSyncRuleRequest {
+	s.SyncScope = &v
+	return s
+}
+
+func (s *CreateRepoSyncRuleRequest) SetSyncTrigger(v string) *CreateRepoSyncRuleRequest {
+	s.SyncTrigger = &v
+	return s
+}
+
+func (s *CreateRepoSyncRuleRequest) SetTagFilter(v string) *CreateRepoSyncRuleRequest {
+	s.TagFilter = &v
+	return s
+}
+
+func (s *CreateRepoSyncRuleRequest) SetTargetInstanceId(v string) *CreateRepoSyncRuleRequest {
+	s.TargetInstanceId = &v
+	return s
+}
+
+func (s *CreateRepoSyncRuleRequest) SetTargetNamespaceName(v string) *CreateRepoSyncRuleRequest {
+	s.TargetNamespaceName = &v
+	return s
+}
+
+func (s *CreateRepoSyncRuleRequest) SetTargetRegionId(v string) *CreateRepoSyncRuleRequest {
+	s.TargetRegionId = &v
+	return s
+}
+
+func (s *CreateRepoSyncRuleRequest) SetTargetRepoName(v string) *CreateRepoSyncRuleRequest {
+	s.TargetRepoName = &v
+	return s
+}
+
+func (s *CreateRepoSyncRuleRequest) SetTargetUserId(v string) *CreateRepoSyncRuleRequest {
+	s.TargetUserId = &v
+	return s
+}
+
+func (s *CreateRepoSyncRuleRequest) Validate() error {
+	return dara.Validate(s)
+}

@@ -1,0 +1,501 @@
+// This file is auto-generated, don't edit it. Thanks.
+package client
+
+import (
+	"github.com/alibabacloud-go/tea/dara"
+)
+
+type iGetArtifactLifecycleRuleResponseBody interface {
+	dara.Model
+	String() string
+	GoString() string
+	SetAuto(v bool) *GetArtifactLifecycleRuleResponseBody
+	GetAuto() *bool
+	SetCode(v string) *GetArtifactLifecycleRuleResponseBody
+	GetCode() *string
+	SetCreateTime(v int64) *GetArtifactLifecycleRuleResponseBody
+	GetCreateTime() *int64
+	SetDryRun(v bool) *GetArtifactLifecycleRuleResponseBody
+	GetDryRun() *bool
+	SetEnableDeleteTag(v bool) *GetArtifactLifecycleRuleResponseBody
+	GetEnableDeleteTag() *bool
+	SetEnableDeleteUntaggedManifest(v bool) *GetArtifactLifecycleRuleResponseBody
+	GetEnableDeleteUntaggedManifest() *bool
+	SetInstanceId(v string) *GetArtifactLifecycleRuleResponseBody
+	GetInstanceId() *string
+	SetIsSuccess(v bool) *GetArtifactLifecycleRuleResponseBody
+	GetIsSuccess() *bool
+	SetModifiedTime(v int64) *GetArtifactLifecycleRuleResponseBody
+	GetModifiedTime() *int64
+	SetNamespaceName(v string) *GetArtifactLifecycleRuleResponseBody
+	GetNamespaceName() *string
+	SetNextTime(v int64) *GetArtifactLifecycleRuleResponseBody
+	GetNextTime() *int64
+	SetPolicies(v []*GetArtifactLifecycleRuleResponseBodyPolicies) *GetArtifactLifecycleRuleResponseBody
+	GetPolicies() []*GetArtifactLifecycleRuleResponseBodyPolicies
+	SetRepoName(v string) *GetArtifactLifecycleRuleResponseBody
+	GetRepoName() *string
+	SetRequestId(v string) *GetArtifactLifecycleRuleResponseBody
+	GetRequestId() *string
+	SetRetentionTagCount(v int64) *GetArtifactLifecycleRuleResponseBody
+	GetRetentionTagCount() *int64
+	SetRuleId(v string) *GetArtifactLifecycleRuleResponseBody
+	GetRuleId() *string
+	SetScheduleTime(v string) *GetArtifactLifecycleRuleResponseBody
+	GetScheduleTime() *string
+	SetScope(v string) *GetArtifactLifecycleRuleResponseBody
+	GetScope() *string
+	SetTagRegexp(v string) *GetArtifactLifecycleRuleResponseBody
+	GetTagRegexp() *string
+}
+
+type GetArtifactLifecycleRuleResponseBody struct {
+	// Indicates whether automatic execution is enabled.
+	//
+	// example:
+	//
+	// true
+	Auto *bool `json:"Auto,omitempty" xml:"Auto,omitempty"`
+	// The return value.
+	//
+	// example:
+	//
+	// success
+	Code *string `json:"Code,omitempty" xml:"Code,omitempty"`
+	// The creation time. This value is a UNIX timestamp in milliseconds.
+	//
+	// example:
+	//
+	// 1571926439000
+	CreateTime *int64 `json:"CreateTime,omitempty" xml:"CreateTime,omitempty"`
+	// example:
+	//
+	// false
+	DryRun *bool `json:"DryRun,omitempty" xml:"DryRun,omitempty"`
+	// Indicates whether lifecycle management is enabled.
+	//
+	// Only one of this parameter and EnableDeleteUntaggedManifest can be set to true.
+	//
+	// example:
+	//
+	// true
+	EnableDeleteTag *bool `json:"EnableDeleteTag,omitempty" xml:"EnableDeleteTag,omitempty"`
+	// example:
+	//
+	// False
+	EnableDeleteUntaggedManifest *bool `json:"EnableDeleteUntaggedManifest,omitempty" xml:"EnableDeleteUntaggedManifest,omitempty"`
+	// The instance ID.
+	//
+	// example:
+	//
+	// cri-xkx6vujuhay0****
+	InstanceId *string `json:"InstanceId,omitempty" xml:"InstanceId,omitempty"`
+	// Indicates whether the API call is successful. Valid values:
+	//
+	// - `true`: The API call is successful.
+	//
+	// - `false`: The API call failed.
+	//
+	// example:
+	//
+	// true
+	IsSuccess *bool `json:"IsSuccess,omitempty" xml:"IsSuccess,omitempty"`
+	// The last modification time. This value is a UNIX timestamp in milliseconds.
+	//
+	// example:
+	//
+	// 1638259914000
+	ModifiedTime *int64 `json:"ModifiedTime,omitempty" xml:"ModifiedTime,omitempty"`
+	// The namespace name.
+	//
+	// example:
+	//
+	// test-namespace
+	NamespaceName *string `json:"NamespaceName,omitempty" xml:"NamespaceName,omitempty"`
+	// The next execution time. This value is a UNIX timestamp in milliseconds.
+	//
+	// example:
+	//
+	// 1701878400000
+	NextTime *int64 `json:"NextTime,omitempty" xml:"NextTime,omitempty"`
+	// The list of lifecycle policies.
+	Policies []*GetArtifactLifecycleRuleResponseBodyPolicies `json:"Policies,omitempty" xml:"Policies,omitempty" type:"Repeated"`
+	// The image repository name.
+	//
+	// example:
+	//
+	// test-repo
+	RepoName *string `json:"RepoName,omitempty" xml:"RepoName,omitempty"`
+	// The request ID.
+	//
+	// example:
+	//
+	// 724402D0-75CD-4794-BC20-7D37208****
+	RequestId *string `json:"RequestId,omitempty" xml:"RequestId,omitempty"`
+	// The number of images to retain.
+	//
+	// example:
+	//
+	// 30
+	RetentionTagCount *int64 `json:"RetentionTagCount,omitempty" xml:"RetentionTagCount,omitempty"`
+	// The rule ID.
+	//
+	// example:
+	//
+	// cralr-a18bkiajy8****
+	RuleId *string `json:"RuleId,omitempty" xml:"RuleId,omitempty"`
+	// The execution cycle.
+	//
+	// example:
+	//
+	// WEEK
+	ScheduleTime *string `json:"ScheduleTime,omitempty" xml:"ScheduleTime,omitempty"`
+	// The cleanup scope.
+	//
+	// example:
+	//
+	// INSTANCE
+	Scope *string `json:"Scope,omitempty" xml:"Scope,omitempty"`
+	// The regular expression used to match image versions to retain.
+	//
+	// example:
+	//
+	// .*-alpine
+	TagRegexp *string `json:"TagRegexp,omitempty" xml:"TagRegexp,omitempty"`
+}
+
+func (s GetArtifactLifecycleRuleResponseBody) String() string {
+	return dara.Prettify(s)
+}
+
+func (s GetArtifactLifecycleRuleResponseBody) GoString() string {
+	return s.String()
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) GetAuto() *bool {
+	return s.Auto
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) GetCode() *string {
+	return s.Code
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) GetCreateTime() *int64 {
+	return s.CreateTime
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) GetDryRun() *bool {
+	return s.DryRun
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) GetEnableDeleteTag() *bool {
+	return s.EnableDeleteTag
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) GetEnableDeleteUntaggedManifest() *bool {
+	return s.EnableDeleteUntaggedManifest
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) GetInstanceId() *string {
+	return s.InstanceId
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) GetIsSuccess() *bool {
+	return s.IsSuccess
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) GetModifiedTime() *int64 {
+	return s.ModifiedTime
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) GetNamespaceName() *string {
+	return s.NamespaceName
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) GetNextTime() *int64 {
+	return s.NextTime
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) GetPolicies() []*GetArtifactLifecycleRuleResponseBodyPolicies {
+	return s.Policies
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) GetRepoName() *string {
+	return s.RepoName
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) GetRequestId() *string {
+	return s.RequestId
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) GetRetentionTagCount() *int64 {
+	return s.RetentionTagCount
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) GetRuleId() *string {
+	return s.RuleId
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) GetScheduleTime() *string {
+	return s.ScheduleTime
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) GetScope() *string {
+	return s.Scope
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) GetTagRegexp() *string {
+	return s.TagRegexp
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) SetAuto(v bool) *GetArtifactLifecycleRuleResponseBody {
+	s.Auto = &v
+	return s
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) SetCode(v string) *GetArtifactLifecycleRuleResponseBody {
+	s.Code = &v
+	return s
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) SetCreateTime(v int64) *GetArtifactLifecycleRuleResponseBody {
+	s.CreateTime = &v
+	return s
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) SetDryRun(v bool) *GetArtifactLifecycleRuleResponseBody {
+	s.DryRun = &v
+	return s
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) SetEnableDeleteTag(v bool) *GetArtifactLifecycleRuleResponseBody {
+	s.EnableDeleteTag = &v
+	return s
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) SetEnableDeleteUntaggedManifest(v bool) *GetArtifactLifecycleRuleResponseBody {
+	s.EnableDeleteUntaggedManifest = &v
+	return s
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) SetInstanceId(v string) *GetArtifactLifecycleRuleResponseBody {
+	s.InstanceId = &v
+	return s
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) SetIsSuccess(v bool) *GetArtifactLifecycleRuleResponseBody {
+	s.IsSuccess = &v
+	return s
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) SetModifiedTime(v int64) *GetArtifactLifecycleRuleResponseBody {
+	s.ModifiedTime = &v
+	return s
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) SetNamespaceName(v string) *GetArtifactLifecycleRuleResponseBody {
+	s.NamespaceName = &v
+	return s
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) SetNextTime(v int64) *GetArtifactLifecycleRuleResponseBody {
+	s.NextTime = &v
+	return s
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) SetPolicies(v []*GetArtifactLifecycleRuleResponseBodyPolicies) *GetArtifactLifecycleRuleResponseBody {
+	s.Policies = v
+	return s
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) SetRepoName(v string) *GetArtifactLifecycleRuleResponseBody {
+	s.RepoName = &v
+	return s
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) SetRequestId(v string) *GetArtifactLifecycleRuleResponseBody {
+	s.RequestId = &v
+	return s
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) SetRetentionTagCount(v int64) *GetArtifactLifecycleRuleResponseBody {
+	s.RetentionTagCount = &v
+	return s
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) SetRuleId(v string) *GetArtifactLifecycleRuleResponseBody {
+	s.RuleId = &v
+	return s
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) SetScheduleTime(v string) *GetArtifactLifecycleRuleResponseBody {
+	s.ScheduleTime = &v
+	return s
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) SetScope(v string) *GetArtifactLifecycleRuleResponseBody {
+	s.Scope = &v
+	return s
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) SetTagRegexp(v string) *GetArtifactLifecycleRuleResponseBody {
+	s.TagRegexp = &v
+	return s
+}
+
+func (s *GetArtifactLifecycleRuleResponseBody) Validate() error {
+	if s.Policies != nil {
+		for _, item := range s.Policies {
+			if item != nil {
+				if err := item.Validate(); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+type GetArtifactLifecycleRuleResponseBodyPolicies struct {
+	// The trigger condition of the lifecycle policy.
+	Condition *GetArtifactLifecycleRuleResponseBodyPoliciesCondition `json:"Condition,omitempty" xml:"Condition,omitempty" type:"Struct"`
+	// The image version filter condition.
+	Filter *GetArtifactLifecycleRuleResponseBodyPoliciesFilter `json:"Filter,omitempty" xml:"Filter,omitempty" type:"Struct"`
+	// The lifecycle policy type.
+	Type *string `json:"Type,omitempty" xml:"Type,omitempty"`
+}
+
+func (s GetArtifactLifecycleRuleResponseBodyPolicies) String() string {
+	return dara.Prettify(s)
+}
+
+func (s GetArtifactLifecycleRuleResponseBodyPolicies) GoString() string {
+	return s.String()
+}
+
+func (s *GetArtifactLifecycleRuleResponseBodyPolicies) GetCondition() *GetArtifactLifecycleRuleResponseBodyPoliciesCondition {
+	return s.Condition
+}
+
+func (s *GetArtifactLifecycleRuleResponseBodyPolicies) GetFilter() *GetArtifactLifecycleRuleResponseBodyPoliciesFilter {
+	return s.Filter
+}
+
+func (s *GetArtifactLifecycleRuleResponseBodyPolicies) GetType() *string {
+	return s.Type
+}
+
+func (s *GetArtifactLifecycleRuleResponseBodyPolicies) SetCondition(v *GetArtifactLifecycleRuleResponseBodyPoliciesCondition) *GetArtifactLifecycleRuleResponseBodyPolicies {
+	s.Condition = v
+	return s
+}
+
+func (s *GetArtifactLifecycleRuleResponseBodyPolicies) SetFilter(v *GetArtifactLifecycleRuleResponseBodyPoliciesFilter) *GetArtifactLifecycleRuleResponseBodyPolicies {
+	s.Filter = v
+	return s
+}
+
+func (s *GetArtifactLifecycleRuleResponseBodyPolicies) SetType(v string) *GetArtifactLifecycleRuleResponseBodyPolicies {
+	s.Type = &v
+	return s
+}
+
+func (s *GetArtifactLifecycleRuleResponseBodyPolicies) Validate() error {
+	if s.Condition != nil {
+		if err := s.Condition.Validate(); err != nil {
+			return err
+		}
+	}
+	if s.Filter != nil {
+		if err := s.Filter.Validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type GetArtifactLifecycleRuleResponseBodyPoliciesCondition struct {
+	// The number of days since the last pull.
+	//
+	// example:
+	//
+	// 0
+	LastPullOlderThanDays *int32 `json:"LastPullOlderThanDays,omitempty" xml:"LastPullOlderThanDays,omitempty"`
+	// The number of days since the last push.
+	//
+	// example:
+	//
+	// 0
+	LastPushOlderThanDays *int32 `json:"LastPushOlderThanDays,omitempty" xml:"LastPushOlderThanDays,omitempty"`
+	// The number of latest image versions to retain.
+	//
+	// example:
+	//
+	// 0
+	LatestTagCount *int32 `json:"LatestTagCount,omitempty" xml:"LatestTagCount,omitempty"`
+}
+
+func (s GetArtifactLifecycleRuleResponseBodyPoliciesCondition) String() string {
+	return dara.Prettify(s)
+}
+
+func (s GetArtifactLifecycleRuleResponseBodyPoliciesCondition) GoString() string {
+	return s.String()
+}
+
+func (s *GetArtifactLifecycleRuleResponseBodyPoliciesCondition) GetLastPullOlderThanDays() *int32 {
+	return s.LastPullOlderThanDays
+}
+
+func (s *GetArtifactLifecycleRuleResponseBodyPoliciesCondition) GetLastPushOlderThanDays() *int32 {
+	return s.LastPushOlderThanDays
+}
+
+func (s *GetArtifactLifecycleRuleResponseBodyPoliciesCondition) GetLatestTagCount() *int32 {
+	return s.LatestTagCount
+}
+
+func (s *GetArtifactLifecycleRuleResponseBodyPoliciesCondition) SetLastPullOlderThanDays(v int32) *GetArtifactLifecycleRuleResponseBodyPoliciesCondition {
+	s.LastPullOlderThanDays = &v
+	return s
+}
+
+func (s *GetArtifactLifecycleRuleResponseBodyPoliciesCondition) SetLastPushOlderThanDays(v int32) *GetArtifactLifecycleRuleResponseBodyPoliciesCondition {
+	s.LastPushOlderThanDays = &v
+	return s
+}
+
+func (s *GetArtifactLifecycleRuleResponseBodyPoliciesCondition) SetLatestTagCount(v int32) *GetArtifactLifecycleRuleResponseBodyPoliciesCondition {
+	s.LatestTagCount = &v
+	return s
+}
+
+func (s *GetArtifactLifecycleRuleResponseBodyPoliciesCondition) Validate() error {
+	return dara.Validate(s)
+}
+
+type GetArtifactLifecycleRuleResponseBodyPoliciesFilter struct {
+	// The wildcard used to match image versions.
+	TagWildcard *string `json:"TagWildcard,omitempty" xml:"TagWildcard,omitempty"`
+}
+
+func (s GetArtifactLifecycleRuleResponseBodyPoliciesFilter) String() string {
+	return dara.Prettify(s)
+}
+
+func (s GetArtifactLifecycleRuleResponseBodyPoliciesFilter) GoString() string {
+	return s.String()
+}
+
+func (s *GetArtifactLifecycleRuleResponseBodyPoliciesFilter) GetTagWildcard() *string {
+	return s.TagWildcard
+}
+
+func (s *GetArtifactLifecycleRuleResponseBodyPoliciesFilter) SetTagWildcard(v string) *GetArtifactLifecycleRuleResponseBodyPoliciesFilter {
+	s.TagWildcard = &v
+	return s
+}
+
+func (s *GetArtifactLifecycleRuleResponseBodyPoliciesFilter) Validate() error {
+	return dara.Validate(s)
+}
