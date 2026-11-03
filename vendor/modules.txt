@@ -1167,11 +1167,10 @@ github.com/prometheus/common/model
 github.com/prometheus/procfs
 github.com/prometheus/procfs/internal/fs
 github.com/prometheus/procfs/internal/util
-# github.com/protocolbuffers/txtpbfmt v0.0.0-20260217160748-a481f6a22f94
+# github.com/protocolbuffers/txtpbfmt v0.0.0-20261013103202-7c8a61a7a736
 ## explicit; go 1.19
 github.com/protocolbuffers/txtpbfmt/ast
 github.com/protocolbuffers/txtpbfmt/config
-github.com/protocolbuffers/txtpbfmt/descriptor
 github.com/protocolbuffers/txtpbfmt/impl
 github.com/protocolbuffers/txtpbfmt/logger
 github.com/protocolbuffers/txtpbfmt/parser
