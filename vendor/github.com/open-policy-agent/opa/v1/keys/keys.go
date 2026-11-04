@@ -33,6 +33,9 @@ type Config struct {
 
 // Equal returns true if this key config is equal to the other.
 func (k *Config) Equal(other *Config) bool {
+	if k == other {
+		return true
+	}
 	return other != nil && *k == *other
 }
 
@@ -60,7 +63,7 @@ func NewKeyConfig(key, alg, scope string) (*Config, error) {
 		if err != nil {
 			return nil, err
 		}
-		pubKey = string(bs)
+		pubKey = util.ByteSliceToString(bs)
 	} else if os.IsNotExist(err) {
 		pubKey = key
 	} else {

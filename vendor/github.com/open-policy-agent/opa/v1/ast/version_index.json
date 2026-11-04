@@ -845,6 +845,11 @@
       "Minor": 36,
       "Patch": 0
     },
+    "strings.split_n": {
+      "Major": 1,
+      "Minor": 19,
+      "Patch": 0
+    },
     "substring": {
       "Major": 0,
       "Minor": 17,
@@ -970,6 +975,16 @@
       "Minor": 17,
       "Patch": 0
     },
+    "uri.is_valid": {
+      "Major": 1,
+      "Minor": 16,
+      "Patch": 0
+    },
+    "uri.parse": {
+      "Major": 1,
+      "Minor": 16,
+      "Patch": 0
+    },
     "urlquery.decode": {
       "Major": 0,
       "Minor": 17,
@@ -1038,6 +1053,16 @@
       "Minor": 59,
       "Patch": 0
     },
+    "rego_v2": {
+      "Major": 1,
+      "Minor": 22,
+      "Patch": 0
+    },
+    "rego_v2_import": {
+      "Major": 1,
+      "Minor": 22,
+      "Patch": 0
+    },
     "rule_head_ref_string_prefixes": {
       "Major": 0,
       "Minor": 46,
@@ -1055,6 +1080,11 @@
     }
   },
   "keywords": {
+    "and": {
+      "Major": 1,
+      "Minor": 20,
+      "Patch": 0
+    },
     "contains": {
       "Major": 0,
       "Minor": 42,
@@ -1073,6 +1103,16 @@
     "in": {
       "Major": 0,
       "Minor": 34,
+      "Patch": 0
+    },
+    "not": {
+      "Major": 1,
+      "Minor": 17,
+      "Patch": 0
+    },
+    "or": {
+      "Major": 1,
+      "Minor": 20,
       "Patch": 0
     }
   }

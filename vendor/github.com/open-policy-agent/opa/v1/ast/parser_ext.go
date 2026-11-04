@@ -46,6 +46,16 @@ func MustParseExpr(input string) *Expr {
 	return parsed
 }
 
+// MustParseExprWithOpts returns a parsed expression.
+// If an error occurs during parsing, panic.
+func MustParseExprWithOpts(input string, opts ParserOptions) *Expr {
+	parsed, err := ParseExprWithOpts(input, opts)
+	if err != nil {
+		panic(err)
+	}
+	return parsed
+}
+
 // MustParseImports returns a slice of imports.
 // If an error occurs during parsing, panic.
 func MustParseImports(input string) []*Import {
@@ -153,7 +163,6 @@ func MustParseTerm(input string) *Term {
 // ParseRuleFromBody returns a rule if the body can be interpreted as a rule
 // definition. Otherwise, an error is returned.
 func ParseRuleFromBody(module *Module, body Body) (*Rule, error) {
-
 	if len(body) != 1 {
 		return nil, errors.New("multiple expressions cannot be used for rule head")
 	}
@@ -164,7 +173,6 @@ func ParseRuleFromBody(module *Module, body Body) (*Rule, error) {
 // ParseRuleFromExpr returns a rule if the expression can be interpreted as a
 // rule definition.
 func ParseRuleFromExpr(module *Module, expr *Expr) (*Rule, error) {
-
 	if len(expr.With) > 0 {
 		return nil, errors.New("expressions using with keyword cannot be used for rule head")
 	}
@@ -214,7 +222,6 @@ func ParseRuleFromExpr(module *Module, expr *Expr) (*Rule, error) {
 }
 
 func parseCompleteRuleFromEq(module *Module, expr *Expr) (rule *Rule, err error) {
-
 	// ensure the rule location is set to the expr location
 	// the helper functions called below try to set the location based
 	// on the terms they've been provided but that is not as accurate.
@@ -247,15 +254,11 @@ func parseCompleteRuleFromEq(module *Module, expr *Expr) (rule *Rule, err error)
 // be interpreted as a complete document definition declared with the assignment
 // operator.
 func ParseCompleteDocRuleFromAssignmentExpr(module *Module, lhs, rhs *Term) (*Rule, error) {
-
 	rule, err := ParseCompleteDocRuleFromEqExpr(module, lhs, rhs)
-	if err != nil {
-		return nil, err
+	if err == nil {
+		rule.Head.Assign = true
 	}
-
-	rule.Head.Assign = true
-
-	return rule, nil
+	return rule, err
 }
 
 // ParseCompleteDocRuleFromEqExpr returns a rule if the expression can be
@@ -280,7 +283,7 @@ func ParseCompleteDocRuleFromEqExpr(module *Module, lhs, rhs *Term) (*Rule, erro
 	head.Value = rhs
 	head.Location = lhs.Location
 
-	body := NewBody(NewExpr(BooleanTerm(true).SetLocation(rhs.Location)).SetLocation(rhs.Location))
+	body := implicitTrueBody(rhs.Location)
 
 	return &Rule{
 		Location:      lhs.Location,
@@ -304,7 +307,7 @@ func ParseCompleteDocRuleWithDotsFromTerm(module *Module, term *Term) (*Rule, er
 	head.generatedValue = true
 	head.Location = term.Location
 
-	body := NewBody(NewExpr(BooleanTerm(true).SetLocation(term.Location)).SetLocation(term.Location))
+	body := implicitTrueBody(term.Location)
 
 	return &Rule{
 		Location: term.Location,
@@ -333,13 +336,14 @@ func ParsePartialObjectDocRuleFromEqExpr(module *Module, lhs, rhs *Term) (*Rule,
 	}
 	head.Location = rhs.Location
 
-	body := NewBody(NewExpr(BooleanTerm(true).SetLocation(rhs.Location)).SetLocation(rhs.Location))
+	body := implicitTrueBody(rhs.Location)
 
 	rule := &Rule{
-		Location: rhs.Location,
-		Head:     head,
-		Body:     body,
-		Module:   module,
+		Location:      rhs.Location,
+		Head:          head,
+		Body:          body,
+		Module:        module,
+		generatedBody: true,
 	}
 
 	return rule, nil
@@ -369,7 +373,7 @@ func ParsePartialSetDocRuleFromTerm(module *Module, term *Term) (*Rule, error) {
 	}
 	head.Location = term.Location
 
-	body := NewBody(NewExpr(BooleanTerm(true).SetLocation(term.Location)).SetLocation(term.Location))
+	body := implicitTrueBody(term.Location)
 
 	rule := &Rule{
 		Location: term.Location,
@@ -402,7 +406,7 @@ func ParseRuleFromCallEqExpr(module *Module, lhs, rhs *Term) (*Rule, error) {
 	head.Location = lhs.Location
 	head.Args = Args(call[1:])
 
-	body := NewBody(NewExpr(BooleanTerm(true).SetLocation(rhs.Location)).SetLocation(rhs.Location))
+	body := implicitTrueBody(rhs.Location)
 
 	rule := &Rule{
 		Location: lhs.Location,
@@ -431,7 +435,7 @@ func ParseRuleFromCallExpr(module *Module, terms []*Term) (*Rule, error) {
 	head.Location = loc
 	head.Args = terms[1:]
 
-	body := NewBody(NewExpr(BooleanTerm(true).SetLocation(loc)).SetLocation(loc))
+	body := implicitTrueBody(loc)
 
 	rule := &Rule{
 		Location: loc,
@@ -448,7 +452,7 @@ func ParseImports(input string) ([]*Import, error) {
 	if err != nil {
 		return nil, err
 	}
-	result := []*Import{}
+	result := make([]*Import, 0, len(stmts))
 	for _, stmt := range stmts {
 		if imp, ok := stmt.(*Import); ok {
 			result = append(result, imp)
@@ -486,10 +490,15 @@ func ParseBody(input string) (Body, error) {
 // ParseBodyWithOpts returns exactly one body. It does _not_ set SkipRules: true on its own,
 // but respects whatever ParserOptions it's been given.
 func ParseBodyWithOpts(input string, popts ParserOptions) (Body, error) {
-
 	stmts, _, err := ParseStatementsWithOpts("", input, popts)
 	if err != nil {
 		return nil, err
+	}
+
+	if len(stmts) == 1 {
+		if body, ok := stmts[0].(Body); ok {
+			return body, nil
+		}
 	}
 
 	result := Body{}
@@ -514,6 +523,20 @@ func ParseBodyWithOpts(input string, popts ParserOptions) (Body, error) {
 // If multiple expressions are parsed, an error is returned.
 func ParseExpr(input string) (*Expr, error) {
 	body, err := ParseBody(input)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse expression: %w", err)
+	}
+	if len(body) != 1 {
+		return nil, fmt.Errorf("expected exactly one expression but got: %v", body)
+	}
+	return body[0], nil
+}
+
+// ParseExprWithOpts returns exactly one expression.
+// If multiple expressions are parsed, an error is returned.
+// It does _not_ set SkipRules: true on its own, but respects whatever ParserOptions it's been given.
+func ParseExprWithOpts(input string, popts ParserOptions) (*Expr, error) {
+	body, err := ParseBodyWithOpts(input, popts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse expression: %w", err)
 	}
@@ -595,14 +618,7 @@ func ParseRule(input string) (*Rule, error) {
 // this function expects *exactly* one statement. If multiple
 // statements are parsed, an error is returned.
 func ParseStatement(input string) (Statement, error) {
-	stmts, _, err := ParseStatements("", input)
-	if err != nil {
-		return nil, err
-	}
-	if len(stmts) != 1 {
-		return nil, errors.New("expected exactly one statement")
-	}
-	return stmts[0], nil
+	return ParseStatementWithOpts(input, ParserOptions{})
 }
 
 func ParseStatementWithOpts(input string, popts ParserOptions) (Statement, error) {
@@ -616,24 +632,30 @@ func ParseStatementWithOpts(input string, popts ParserOptions) (Statement, error
 	return stmts[0], nil
 }
 
-// ParseStatements is deprecated. Use ParseStatementWithOpts instead.
+// ParseStatements returns a slice of parsed statements.
+//
+// Deprecated: Use [ParseStatementsWithOpts] instead.
 func ParseStatements(filename, input string) ([]Statement, []*Comment, error) {
 	return ParseStatementsWithOpts(filename, input, ParserOptions{})
 }
 
-// ParseStatementsWithOpts returns a slice of parsed statements. This is the
-// default return value from the parser.
+// ParseStatementsWithOpts returns a slice of parsed statements.
+// This is the default return value from [*Parser.Parse].
 func ParseStatementsWithOpts(filename, input string, popts ParserOptions) ([]Statement, []*Comment, error) {
+	sr := StringReaderPool.Get()
+	defer StringReaderPool.Put(sr)
+
+	sr.Reset(input)
+
 	parser := NewParser().
 		WithFilename(filename).
-		WithReader(strings.NewReader(input)).
+		WithReader(sr).
 		WithProcessAnnotation(popts.ProcessAnnotation).
 		WithFutureKeywords(popts.FutureKeywords...).
 		WithAllFutureKeywords(popts.AllFutureKeywords).
 		WithCapabilities(popts.Capabilities).
 		WithSkipRules(popts.SkipRules).
-		WithRegoVersion(popts.RegoVersion).
-		withUnreleasedKeywords(popts.unreleasedKeywords)
+		WithRegoVersion(popts.RegoVersion)
 
 	stmts, comments, errs := parser.Parse()
 	if len(errs) > 0 {
@@ -660,20 +682,28 @@ func parseModule(filename string, stmts []Statement, comments []*Comment, regoCo
 		Package: pkg,
 		// The comments slice only holds comments that were not their own statements.
 		Comments: comments,
-		stmts:    stmts,
 	}
 
-	mod.regoVersion = regoCompatibilityMode
 	if regoCompatibilityMode == RegoUndefined {
-		mod.regoVersion = DefaultRegoVersion
+		mod.regoVersion = RegoVersionSpanOf(DefaultRegoVersion)
+	} else {
+		mod.regoVersion = RegoVersionSpanOf(regoCompatibilityMode)
 	}
 
 	for i, stmt := range stmts[1:] {
 		switch stmt := stmt.(type) {
 		case *Import:
 			mod.Imports = append(mod.Imports, stmt)
-			if mod.regoVersion == RegoV0 && RegoV1CompatibleRef.Equal(stmt.Path.Value) {
-				mod.regoVersion = RegoV0CompatV1
+			var err error
+			switch {
+			case RegoV1CompatibleRef.Equal(stmt.Path.Value):
+				mod.regoVersion, err = mod.regoVersion.RaisedTo(RegoV1)
+			case RegoV2CompatibleRef.Equal(stmt.Path.Value):
+				mod.regoVersion, err = mod.regoVersion.RaisedTo(RegoV2)
+			}
+			if err != nil {
+				// Unreachable; indicates mod.regoVersion was invalid
+				panic(fmt.Sprintf("illegal %s import", stmt))
 			}
 		case *Rule:
 			setRuleModule(stmt, mod)
@@ -681,16 +711,16 @@ func parseModule(filename string, stmts []Statement, comments []*Comment, regoCo
 		case Body:
 			rule, err := ParseRuleFromBody(mod, stmt)
 			if err != nil {
-				errs = append(errs, NewError(ParseErr, stmt[0].Location, "%s", err.Error()))
+				msg := err.Error()
+				if kw, ok := missingHeadKeyword(mod.regoVersion, stmt, stmts, i+1); ok {
+					msg = fmt.Sprintf("%s (hint: `import future.keywords.%s` for `%s` rules)",
+						msg, kw, headFutureKeywords[kw])
+				}
+				errs = append(errs, NewError(ParseErr, stmt[0].Location, "%s", msg))
 				continue
 			}
 			rule.generatedBody = true
 			mod.Rules = append(mod.Rules, rule)
-
-			// NOTE(tsandall): the statement should now be interpreted as a
-			// rule so update the statement list. This is important for the
-			// logic below that associates annotations with statements.
-			stmts[i+1] = rule
 		case *Package:
 			errs = append(errs, NewError(ParseErr, stmt.Loc(), "unexpected package"))
 		case *Annotations:
@@ -702,7 +732,7 @@ func parseModule(filename string, stmts []Statement, comments []*Comment, regoCo
 		}
 	}
 
-	if mod.regoVersion == RegoV0CompatV1 || mod.regoVersion == RegoV1 {
+	if mod.regoVersion.Max().level() >= RegoV1.level() {
 		for _, rule := range mod.Rules {
 			for r := rule; r != nil; r = r.Else {
 				errs = append(errs, CheckRegoV1(r)...)
@@ -723,6 +753,66 @@ func parseModule(filename string, stmts []Statement, comments []*Comment, regoCo
 	attachRuleAnnotations(mod)
 
 	return mod, nil
+}
+
+// headFutureKeywords are the future keywords used in a rule head, mapped to an
+// example of the rule form each enables.
+var headFutureKeywords = map[string]string{
+	"if":       "p if { ... }",
+	"contains": "p contains x",
+}
+
+// missingHeadKeyword reports the rule-head future keyword a statement was
+// misparsed around. Unimported, the keyword is just a var, so `p if { ... }`
+// parses as the body `p` followed by a rule named `if`. idx is stmt's index
+// within stmts.
+func missingHeadKeyword(v RegoVersionSpan, stmt Body, stmts []Statement, idx int) (string, bool) {
+	// From v1 on these are ordinary keywords.
+	if v.Max() != RegoV0 {
+		return "", false
+	}
+
+	if kw, ok := statementHeadKeyword(stmt); ok {
+		return kw, true
+	}
+
+	// The keyword starts its own statement; check the next one on the same line.
+	if idx+1 >= len(stmts) {
+		return "", false
+	}
+	next := stmts[idx+1]
+	if next.Loc() == nil || stmt.Loc() == nil || next.Loc().Row != stmt.Loc().Row {
+		return "", false
+	}
+
+	return statementHeadKeyword(next)
+}
+
+// statementHeadKeyword returns the rule-head future keyword a statement was
+// reduced to: a rule named after it, or a body holding only it as a var.
+func statementHeadKeyword(stmt Statement) (string, bool) {
+	var name Var
+
+	switch stmt := stmt.(type) {
+	case *Rule:
+		name = stmt.Head.Name
+	case Body:
+		if len(stmt) != 1 {
+			return "", false
+		}
+		term, ok := stmt[0].Terms.(*Term)
+		if !ok {
+			return "", false
+		}
+		if name, ok = term.Value.(Var); !ok {
+			return "", false
+		}
+	default:
+		return "", false
+	}
+
+	_, ok := headFutureKeywords[string(name)]
+	return string(name), ok
 }
 
 func ruleDeclarationHasKeyword(rule *Rule, keyword tokens.Token) bool {
@@ -805,4 +895,11 @@ func (d ParserErrorDetail) Lines() []string {
 
 func isNewLineChar(b byte) bool {
 	return b == '\r' || b == '\n'
+}
+
+func implicitTrueBody(loc *Location) Body {
+	expr := NewExpr(BooleanTerm(true).SetLocation(loc)).SetLocation(loc)
+	expr.Generated = true
+
+	return NewBody(expr)
 }

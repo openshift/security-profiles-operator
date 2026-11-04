@@ -2,6 +2,7 @@ package ast
 
 import (
 	"encoding"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -25,8 +26,8 @@ func (v Var) AppendText(buf []byte) ([]byte, error) {
 	return append(buf, v...), nil
 }
 
-func (b Boolean) AppendText(buf []byte) ([]byte, error) {
-	if b {
+func (bol Boolean) AppendText(buf []byte) ([]byte, error) {
+	if bol {
 		return append(buf, "true"...), nil
 	}
 	return append(buf, "false"...), nil
@@ -91,8 +92,8 @@ func (obj *object) AppendText(buf []byte) ([]byte, error) {
 	return append(buf, '}'), nil
 }
 
-func (obj *lazyObj) AppendText(buf []byte) ([]byte, error) {
-	return append(buf, obj.force().String()...), nil
+func (lob *lazyObj) AppendText(buf []byte) ([]byte, error) {
+	return append(buf, lob.force().String()...), nil
 }
 
 func (s *set) AppendText(buf []byte) ([]byte, error) {
@@ -172,30 +173,30 @@ func (ts *TemplateString) AppendText(buf []byte) ([]byte, error) {
 	return append(buf, '"'), nil
 }
 
-func (r Ref) AppendText(buf []byte) ([]byte, error) {
-	reflen := len(r)
+func (ref Ref) AppendText(buf []byte) ([]byte, error) {
+	reflen := len(ref)
 	if reflen == 0 {
 		return buf, nil
 	}
 	if reflen == 1 {
-		if s, ok := r[0].Value.(String); ok {
+		if s, ok := ref[0].Value.(String); ok {
 			// While a ref head is typically a Var, a lone String term should not be quoted
 			return append(buf, s...), nil
 		}
-		return r[0].AppendText(buf)
+		return ref[0].AppendText(buf)
 	}
-	if name, ok := BuiltinNameFromRef(r); ok {
+	if name, ok := BuiltinNameFromRef(ref); ok {
 		return append(buf, name...), nil
 	}
 
 	var err error
-	if s, ok := r[0].Value.(String); ok {
+	if s, ok := ref[0].Value.(String); ok {
 		buf = append(buf, s...)
-	} else if buf, err = r[0].AppendText(buf); err != nil {
+	} else if buf, err = ref[0].AppendText(buf); err != nil {
 		return nil, err
 	}
 
-	for _, p := range r[1:] {
+	for _, p := range ref[1:] {
 		switch v := p.Value.(type) {
 		case String:
 			str := string(v)
@@ -228,7 +229,7 @@ func (r Ref) AppendText(buf []byte) ([]byte, error) {
 func (sc *SetComprehension) AppendText(buf []byte) ([]byte, error) {
 	buf = append(buf, '{')
 	var err error
-	if buf, err = sc.Term.AppendText(buf); err != nil {
+	if buf, err = appendComprehensionTerm(buf, sc.Term); err != nil {
 		return nil, err
 	}
 	if buf, err = sc.Body.AppendText(append(buf, " | "...)); err != nil {
@@ -240,7 +241,7 @@ func (sc *SetComprehension) AppendText(buf []byte) ([]byte, error) {
 func (ac *ArrayComprehension) AppendText(buf []byte) ([]byte, error) {
 	buf = append(buf, '[')
 	var err error
-	if buf, err = ac.Term.AppendText(buf); err != nil {
+	if buf, err = appendComprehensionTerm(buf, ac.Term); err != nil {
 		return nil, err
 	}
 	if buf, err = ac.Body.AppendText(append(buf, " | "...)); err != nil {
@@ -252,14 +253,57 @@ func (ac *ArrayComprehension) AppendText(buf []byte) ([]byte, error) {
 func (oc *ObjectComprehension) AppendText(buf []byte) ([]byte, error) {
 	buf = append(buf, '{')
 	var err error
-	if buf, err = oc.Key.AppendText(buf); err != nil {
+	if buf, err = appendComprehensionTerm(buf, oc.Key); err != nil {
 		return nil, err
 	}
 	buf = append(buf, ": "...)
-	if buf, err = oc.Value.AppendText(buf); err != nil {
+	if buf, err = appendComprehensionTerm(buf, oc.Value); err != nil {
 		return nil, err
 	}
 	if buf, err = oc.Body.AppendText(append(buf, " | "...)); err != nil {
+		return nil, err
+	}
+	return append(buf, '}'), nil
+}
+
+// appendComprehensionTerm writes a term, rendering infix operator calls
+// in infix notation wrapped in parens. This prevents ambiguity with the
+// comprehension "|" separator and produces more readable output.
+func appendComprehensionTerm(buf []byte, term *Term) ([]byte, error) {
+	if call, ok := term.Value.(Call); ok && len(call) == 3 {
+		if bi, found := BuiltinMap[call[0].String()]; found && bi.Infix != "" && bi.Infix != "in" {
+			buf = append(buf, '(')
+			var err error
+			if buf, err = appendComprehensionTerm(buf, call[1]); err != nil {
+				return nil, err
+			}
+			buf = fmt.Appendf(buf, " %s ", bi.Infix)
+			if buf, err = appendComprehensionTerm(buf, call[2]); err != nil {
+				return nil, err
+			}
+			return append(buf, ')'), nil
+		}
+	}
+	return term.AppendText(buf)
+}
+
+func (n *Not) AppendText(buf []byte) ([]byte, error) {
+	if !n.ExplicitBody && len(n.Body) == 1 {
+		if notBodyNeedsParens(n.Body) {
+			buf = append(buf, "not ("...)
+			var err error
+			if buf, err = n.Body.AppendText(buf); err != nil {
+				return nil, err
+			}
+			return append(buf, ')'), nil
+		}
+		buf = append(buf, "not "...)
+		return n.Body.AppendText(buf)
+	}
+
+	buf = append(buf, "not {"...)
+	var err error
+	if buf, err = n.Body.AppendText(buf); err != nil {
 		return nil, err
 	}
 	return append(buf, '}'), nil

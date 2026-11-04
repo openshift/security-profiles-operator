@@ -12,12 +12,13 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
-
-	"sigs.k8s.io/yaml"
 
 	fileurl "github.com/open-policy-agent/opa/internal/file/url"
 	"github.com/open-policy-agent/opa/internal/merge"
+	"github.com/open-policy-agent/opa/internal/yaml"
 	"github.com/open-policy-agent/opa/v1/ast"
 	astJSON "github.com/open-policy-agent/opa/v1/ast/json"
 	"github.com/open-policy-agent/opa/v1/bundle"
@@ -29,11 +30,16 @@ import (
 	"github.com/open-policy-agent/opa/v1/util"
 )
 
+// goos is overridden in tests to exercise Windows path handling on other platforms.
+var goos = runtime.GOOS
+
 // Result represents the result of successfully loading zero or more files.
 type Result struct {
 	Documents map[string]any
 	Modules   map[string]*RegoFile
 	path      []string
+	seen      map[string]struct{}
+	files     *[]loadedFile
 }
 
 // ParsedModules returns the parsed modules stored on the result.
@@ -386,10 +392,9 @@ func FilteredPathsFS(fsys fs.FS, paths []string, filter Filter) ([]string, error
 
 // Schemas loads a schema set from the specified file path.
 func Schemas(schemaPath string) (*ast.SchemaSet, error) {
-
-	var errs Errors
 	ss, err := loadSchemas(schemaPath)
 	if err != nil {
+		var errs Errors
 		errs.add(err)
 		return nil, errs
 	}
@@ -398,12 +403,10 @@ func Schemas(schemaPath string) (*ast.SchemaSet, error) {
 }
 
 func loadSchemas(schemaPath string) (*ast.SchemaSet, error) {
-
 	if schemaPath == "" {
 		return nil, nil
 	}
 
-	ss := ast.NewSchemaSet()
 	path, err := fileurl.Clean(schemaPath)
 	if err != nil {
 		return nil, err
@@ -413,6 +416,8 @@ func loadSchemas(schemaPath string) (*ast.SchemaSet, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	ss := ast.NewSchemaSet()
 
 	// Handle single file case.
 	if !info.IsDir() {
@@ -428,38 +433,27 @@ func loadSchemas(schemaPath string) (*ast.SchemaSet, error) {
 	// Handle directory case.
 	rootDir := path
 
-	err = filepath.Walk(path,
-		func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			} else if info.IsDir() {
-				return nil
-			}
+	return ss, filepath.WalkDir(path, func(path string, info fs.DirEntry, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
 
-			schema, err := loadOneSchema(path)
-			if err != nil {
-				return err
-			}
+		schema, err := loadOneSchema(path)
+		if err != nil {
+			return err
+		}
 
-			relPath, err := filepath.Rel(rootDir, path)
-			if err != nil {
-				return err
-			}
+		relPath, err := filepath.Rel(rootDir, path)
+		if err != nil {
+			return err
+		}
 
-			key := getSchemaSetByPathKey(relPath)
-			ss.Put(key, schema)
-			return nil
-		})
-
-	if err != nil {
-		return nil, err
-	}
-
-	return ss, nil
+		ss.Put(getSchemaSetByPathKey(relPath), schema)
+		return nil
+	})
 }
 
 func getSchemaSetByPathKey(path string) ast.Ref {
-
 	front := filepath.Dir(path)
 	last := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 
@@ -554,19 +548,18 @@ func CleanPath(path string) string {
 // and path is a directory, then Paths will walk the directory structure
 // recursively and list files at each level.
 func Paths(path string, recurse bool) (paths []string, err error) {
-	path, err = fileurl.Clean(path)
-	if err != nil {
-		return nil, err
-	}
-	err = filepath.Walk(path, func(f string, _ os.FileInfo, _ error) error {
-		if !recurse {
-			if path != f && path != filepath.Dir(f) {
-				return filepath.SkipDir
+	if path, err = fileurl.Clean(path); err == nil {
+		err = filepath.WalkDir(path, func(f string, _ fs.DirEntry, err error) error {
+			if err == nil {
+				if !recurse && path != f && path != filepath.Dir(f) {
+					return filepath.SkipDir
+				}
+				paths = append(paths, f)
 			}
-		}
-		paths = append(paths, f)
-		return nil
-	})
+			return err
+		})
+	}
+
 	return paths, err
 }
 
@@ -592,11 +585,35 @@ func SplitPrefix(path string) ([]string, string) {
 	if strings.Index(path, "://") == strings.Index(path, ":") {
 		return nil, path
 	}
+	// On Windows, a leading colon can belong to the path itself, separating the
+	// volume name from the rest of the path, rather than to a data prefix.
+	if hasWindowsVolumeName(path) {
+		return nil, path
+	}
 	parts := strings.SplitN(path, ":", 2)
 	if len(parts) == 2 && len(parts[0]) > 0 {
 		return strings.Split(parts[0], "."), parts[1]
 	}
 	return nil, path
+}
+
+// hasWindowsVolumeName returns true on Windows if path begins with a volume
+// name, i.e. a drive letter followed by a colon and a separator (c:/foo) or a
+// UNC/device prefix (\\?\c:\foo), but not a drive-relative path (c:foo), which
+// is read as a single-character data prefix instead.
+func hasWindowsVolumeName(path string) bool {
+	if goos != "windows" || len(path) < 3 {
+		return false
+	}
+	// UNC and device paths, e.g. \\server\share or \\?\c:\foo. These aren't all
+	// loadable -- UNC reads are rejected outright -- but they're never prefixes,
+	// and splitting them would hide the path from that check.
+	if isSlash(path[0]) && isSlash(path[1]) {
+		return true
+	}
+	// Drive-rooted paths, e.g. c:/foo.
+	c := path[0]
+	return ('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z') && path[1] == ':' && isSlash(path[2])
 }
 
 func (l *Result) merge(path string, result any) error {
@@ -625,7 +642,16 @@ func (l *Result) mergeDocument(path string, doc any) error {
 	}
 	merged, ok := merge.InterfaceMaps(l.Documents, obj)
 	if !ok {
-		return mergeError(path)
+		e := mergeError{path: path}
+		if conflict, ok := merge.Conflict(l.Documents, obj); ok {
+			ref := ast.Ref{ast.DefaultRootDocument}
+			for _, k := range conflict {
+				ref = append(ref, ast.StringTerm(k))
+			}
+			e.keys = conflict
+			e.conflict = ref.String()
+		}
+		return e
 	}
 	for k := range merged {
 		l.Documents[k] = merged[k]
@@ -638,6 +664,8 @@ func (l *Result) withParent(p string) *Result {
 		Documents: l.Documents,
 		Modules:   l.Modules,
 		path:      append(l.path, p),
+		seen:      l.seen,
+		files:     l.files,
 	}
 }
 
@@ -645,6 +673,8 @@ func newResult() *Result {
 	return &Result{
 		Documents: map[string]any{},
 		Modules:   map[string]*RegoFile{},
+		seen:      map[string]struct{}{},
+		files:     &[]loadedFile{},
 	}
 }
 
@@ -676,7 +706,6 @@ func all(fsys fs.FS, paths []string, filter Filter, f func(*Result, string, int)
 }
 
 func allRec(fsys fs.FS, path string, filter Filter, errors *Errors, loaded *Result, depth int, f func(*Result, string, int) error) {
-
 	path, err := fileurl.Clean(path)
 	if err != nil {
 		errors.add(err)
@@ -705,9 +734,23 @@ func allRec(fsys fs.FS, path string, filter Filter, errors *Errors, loaded *Resu
 	}
 
 	if !info.IsDir() {
-		if err := f(loaded, path, depth); err != nil {
-			errors.add(err)
+		// Providing the same file more than once (e.g. `opa test . data.json`) to
+		// the same location under data would otherwise be reported as a merge error.
+		key := strings.Join(loaded.path, "\x00") + "\x01" + filepath.Clean(path)
+		if _, ok := loaded.seen[key]; ok {
+			return
 		}
+		loaded.seen[key] = struct{}{}
+
+		err := f(loaded, path, depth)
+		if me, ok := err.(mergeError); ok {
+			err = me.withOtherFile(*loaded.files, f)
+		}
+		if err != nil {
+			errors.add(err)
+			return
+		}
+		*loaded.files = append(*loaded.files, loadedFile{parent: slices.Clone(loaded.path), path: path, depth: depth})
 		return
 	}
 
@@ -748,12 +791,12 @@ func loadKnownTypes(path string, bs []byte, m metrics.Metrics, opts ast.ParserOp
 
 		return value, nil
 	}
-	switch ext {
-	case ".json":
+	switch {
+	case ext == ".json":
 		return loadJSON(path, bs, m)
-	case ".rego":
+	case ext == ".rego":
 		return loadRego(path, bs, m, opts)
-	case ".yaml", ".yml":
+	case bundle.IsYAMLFile(path):
 		return loadYAML(path, bs, m)
 	default:
 		if strings.HasSuffix(path, ".tar.gz") {
@@ -800,7 +843,7 @@ func loadRego(path string, bs []byte, m metrics.Metrics, opts ast.ParserOptions)
 	m.Timer(metrics.RegoModuleParse).Start()
 	var module *ast.Module
 	var err error
-	module, err = ast.ParseModuleWithOpts(path, string(bs), opts)
+	module, err = ast.ParseModuleWithOpts(path, util.ByteSliceToString(bs), opts)
 	m.Timer(metrics.RegoModuleParse).Stop()
 	if err != nil {
 		return nil, err

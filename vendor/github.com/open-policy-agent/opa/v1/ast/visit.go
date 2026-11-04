@@ -48,6 +48,8 @@ type (
 		SkipWithTarget      bool
 		SkipSets            bool
 		SkipTemplateStrings bool
+		SkipWildcardVars    bool
+		customVisit         func(vis *VarVisitor, v any) bool
 	}
 
 	// Visitor defines the interface for iterating AST elements. The Visit function
@@ -161,7 +163,7 @@ func walk(v Visitor, x any) {
 		}
 	case *Expr:
 		switch ts := x.Terms.(type) {
-		case *Term, *SomeDecl, *Every:
+		case *Term, *SomeDecl, *Every, *Not, *LogicalAnd, *LogicalOr:
 			Walk(w, ts)
 		case []*Term:
 			for i := range ts {
@@ -190,9 +192,9 @@ func walk(v Visitor, x any) {
 			Walk(w, t)
 		})
 	case Set:
-		x.Foreach(func(t *Term) {
+		for _, t := range x.Slice() {
 			Walk(w, t)
-		})
+		}
 	case *ArrayComprehension:
 		Walk(w, x.Term)
 		Walk(w, x.Body)
@@ -214,6 +216,14 @@ func walk(v Visitor, x any) {
 		Walk(w, x.Value)
 		Walk(w, x.Domain)
 		Walk(w, x.Body)
+	case *Not:
+		Walk(w, x.Body)
+	case *LogicalAnd:
+		Walk(w, x.Lhs)
+		Walk(w, x.Rhs)
+	case *LogicalOr:
+		Walk(w, x.Lhs)
+		Walk(w, x.Rhs)
 	case *SomeDecl:
 		for i := range x.Symbols {
 			Walk(w, x.Symbols[i])
@@ -236,7 +246,7 @@ func WalkVars(x any, f func(Var) bool) {
 func WalkClosures(x any, f func(any) bool) {
 	vis := NewGenericVisitor(func(x any) bool {
 		switch x := x.(type) {
-		case *ArrayComprehension, *ObjectComprehension, *SetComprehension, *Every:
+		case *ArrayComprehension, *ObjectComprehension, *SetComprehension, *Every, *Not, *LogicalAnd, *LogicalOr:
 			return f(x)
 		}
 		return false
@@ -396,7 +406,7 @@ func (tv *typeVisitor[T]) walk(x any, visit func(x T) bool) {
 		}
 	case *Expr:
 		switch ts := x.Terms.(type) {
-		case *Term, *SomeDecl, *Every:
+		case *Term, *SomeDecl, *Every, *Not, *LogicalAnd, *LogicalOr:
 			tv.walk(ts, visit)
 		case []*Term:
 			for i := range ts {
@@ -416,10 +426,10 @@ func (tv *typeVisitor[T]) walk(x any, visit func(x T) bool) {
 			tv.walk(x[i], visit)
 		}
 	case *object:
-		x.Foreach(func(k, v *Term) {
-			tv.walk(k, visit)
-			tv.walk(v, visit)
-		})
+		for _, node := range x.sortedKeys() {
+			tv.walk(node.key, visit)
+			tv.walk(node.value, visit)
+		}
 	case Object:
 		for _, k := range x.Keys() {
 			tv.walk(k, visit)
@@ -463,6 +473,14 @@ func (tv *typeVisitor[T]) walk(x any, visit func(x T) bool) {
 		for i := range x.Parts {
 			tv.walk(x.Parts[i], visit)
 		}
+	case *Not:
+		tv.walk(x.Body, visit)
+	case *LogicalAnd:
+		tv.walkBody(x.Lhs, visit)
+		tv.walkBody(x.Rhs, visit)
+	case *LogicalOr:
+		tv.walkBody(x.Lhs, visit)
+		tv.walkBody(x.Rhs, visit)
 	}
 }
 
@@ -533,7 +551,7 @@ func (vis *GenericVisitor) Walk(x any) {
 		}
 	case *Expr:
 		switch ts := x.Terms.(type) {
-		case *Term, *SomeDecl, *Every:
+		case *Term, *SomeDecl, *Every, *Not, *LogicalAnd, *LogicalOr:
 			vis.Walk(ts)
 		case []*Term:
 			for i := range ts {
@@ -553,10 +571,10 @@ func (vis *GenericVisitor) Walk(x any) {
 			vis.Walk(x[i])
 		}
 	case *object:
-		x.Foreach(func(k, _ *Term) {
-			vis.Walk(k)
-			vis.Walk(x.Get(k))
-		})
+		for _, node := range x.sortedKeys() {
+			vis.Walk(node.key)
+			vis.Walk(node.value)
+		}
 	case Object:
 		for _, k := range x.Keys() {
 			vis.Walk(k)
@@ -600,6 +618,14 @@ func (vis *GenericVisitor) Walk(x any) {
 		for i := range x.Parts {
 			vis.Walk(x.Parts[i])
 		}
+	case *Not:
+		vis.Walk(x.Body)
+	case *LogicalAnd:
+		vis.Walk(x.Lhs)
+		vis.Walk(x.Rhs)
+	case *LogicalOr:
+		vis.Walk(x.Lhs)
+		vis.Walk(x.Rhs)
 	}
 }
 
@@ -668,7 +694,7 @@ func (vis *BeforeAfterVisitor) Walk(x any) {
 		}
 	case *Expr:
 		switch ts := x.Terms.(type) {
-		case *Term, *SomeDecl, *Every:
+		case *Term, *SomeDecl, *Every, *Not, *LogicalAnd, *LogicalOr:
 			vis.Walk(ts)
 		case []*Term:
 			for i := range ts {
@@ -731,6 +757,14 @@ func (vis *BeforeAfterVisitor) Walk(x any) {
 		for i := range x.Symbols {
 			vis.Walk(x.Symbols[i])
 		}
+	case *Not:
+		vis.Walk(x.Body)
+	case *LogicalAnd:
+		vis.Walk(x.Lhs)
+		vis.Walk(x.Rhs)
+	case *LogicalOr:
+		vis.Walk(x.Lhs)
+		vis.Walk(x.Rhs)
 	}
 }
 
@@ -789,6 +823,13 @@ func (vis *VarVisitor) Vars() VarSet {
 // the visitor will _skip_ that branch of the AST
 func (vis *VarVisitor) visit(v any) bool {
 	if vis.params.SkipObjectKeys {
+		if o, ok := v.(*object); ok {
+			// doesn't allocate / escape
+			for _, node := range o.sortedKeys() {
+				vis.Walk(node.value)
+			}
+			return true
+		}
 		if o, ok := v.(Object); ok {
 			o.Foreach(func(_, v *Term) {
 				vis.Walk(v)
@@ -807,7 +848,7 @@ func (vis *VarVisitor) visit(v any) bool {
 	}
 	if vis.params.SkipClosures {
 		switch v := v.(type) {
-		case *ArrayComprehension, *ObjectComprehension, *SetComprehension, *TemplateString:
+		case *ArrayComprehension, *ObjectComprehension, *SetComprehension, *TemplateString, *Not, *LogicalAnd, *LogicalOr:
 			return true
 		case *Expr:
 			if ev, ok := v.Terms.(*Every); ok {
@@ -877,6 +918,9 @@ func (vis *VarVisitor) visit(v any) bool {
 		}
 	}
 	if v, ok := v.(Var); ok {
+		if vis.params.SkipWildcardVars && v.IsWildcard() {
+			return true
+		}
 		vis.Add(v)
 		return true
 	}
@@ -886,6 +930,12 @@ func (vis *VarVisitor) visit(v any) bool {
 // Walk iterates the AST by calling the function f on the [VarVisitor] before recursing.
 // Contrary to the deprecated [Walk] function, this does not require allocating the visitor from heap.
 func (vis *VarVisitor) Walk(x any) {
+	if vis.params.customVisit != nil {
+		if vis.params.customVisit(vis, x) {
+			return
+		}
+	}
+
 	if vis.visit(x) {
 		return
 	}
@@ -927,7 +977,7 @@ func (vis *VarVisitor) Walk(x any) {
 		vis.WalkArgs(x)
 	case *Expr:
 		switch ts := x.Terms.(type) {
-		case *Term, *SomeDecl, *Every:
+		case *Term, *SomeDecl, *Every, *Not, *LogicalAnd, *LogicalOr:
 			vis.Walk(ts)
 		case []*Term:
 			for i := range ts {
@@ -992,6 +1042,14 @@ func (vis *VarVisitor) Walk(x any) {
 		for i := range x.Parts {
 			vis.Walk(x.Parts[i])
 		}
+	case *Not:
+		vis.WalkBody(x.Body)
+	case *LogicalAnd:
+		vis.WalkBody(x.Lhs)
+		vis.WalkBody(x.Rhs)
+	case *LogicalOr:
+		vis.WalkBody(x.Lhs)
+		vis.WalkBody(x.Rhs)
 	}
 }
 

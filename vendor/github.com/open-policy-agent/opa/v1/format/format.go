@@ -10,12 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"sort"
 	"strings"
 	"unicode"
 
 	"github.com/open-policy-agent/opa/internal/future"
 	"github.com/open-policy-agent/opa/v1/ast"
+	"github.com/open-policy-agent/opa/v1/ast/location"
 	"github.com/open-policy-agent/opa/v1/types"
 	"github.com/open-policy-agent/opa/v1/util"
 )
@@ -28,6 +28,7 @@ const defaultLocationFile = "__format_default__"
 var (
 	expandedConst     = ast.NewBody(ast.NewExpr(ast.InternedTerm(true)))
 	commentsSlicePool = util.NewSlicePool[*ast.Comment](50)
+	negativeRow       = &ast.Location{Row: -1}
 )
 
 // Opts lets you control the code formatting via `AstWithOpts()`.
@@ -41,11 +42,23 @@ type Opts struct {
 	// RegoVersion is the version of Rego to format code for.
 	RegoVersion ast.RegoVersion
 
+	// RegoVersionSpan is the span of Rego versions the formatted code must parse at: [v0, v2] for code
+	// compatible with both Rego v0 and v2, [v2, v2] for Rego v2 only. A span reaching v2 from an older
+	// version adds the 'rego.v2' import. If defined, it takes precedence over [Opts.RegoVersion].
+	RegoVersionSpan ast.RegoVersionSpan
+
 	// ParserOptions is the parser options used when parsing the module to be formatted.
 	ParserOptions *ast.ParserOptions
 
-	// DropV0Imports instructs the formatter to drop all v0 imports from the module; i.e. 'rego.v1' and 'future.keywords' imports.
-	// Imports are only removed if [Opts.RegoVersion] makes them redundant.
+	// DropRedundantDirectiveImports instructs the formatter to drop directive imports, which change how
+	// a module is parsed rather than bring anything into scope: 'rego.*' and 'future.*'.
+	// Imports are only removed if [Opts.RegoVersion] or [Opts.RegoVersionSpan] makes them redundant.
+	// Regardless of this option, 'rego.v1' is dropped from a module that imports 'rego.v2'.
+	DropRedundantDirectiveImports bool
+
+	// DropV0Imports is equivalent to [Opts.DropRedundantDirectiveImports]; either setting drops the imports.
+	//
+	// Deprecated: Use [Opts.DropRedundantDirectiveImports] instead.
 	DropV0Imports bool
 
 	// SkipDefensiveCopying, if true, will avoid deep-copying the AST before formatting it.
@@ -53,14 +66,46 @@ type Opts struct {
 	// as some formatting operations may otherwise mutate the AST.
 	SkipDefensiveCopying bool
 
+	// FailFast instructs the formatter to stop at the first element whose formatted form differs from the
+	// source text, and return an [UnformattedError] instead of laying out the rest of the module.
+	// Only the Source* functions honour this option, as they alone have source text to compare against.
+	// Not returning an [UnformattedError] doesn't promise that the output matches the source: FailFast never
+	// reports a formatted module as unformatted, but it doesn't catch every difference either.
+	FailFast bool
+
 	Capabilities *ast.Capabilities
+
+	// srcCheck carries the source text that FailFast compares against. It stays unexported so
+	// that only SourceWithOpts can set it, since the comparison is only sound when the bytes
+	// are the ones x was parsed from.
+	srcCheck *srcChecker
 }
 
-func (o Opts) effectiveRegoVersion() ast.RegoVersion {
-	if o.RegoVersion == ast.RegoUndefined {
-		return ast.DefaultRegoVersion
+// UnformattedError is returned by the Source* functions when [Opts.FailFast] is set and the formatted output
+// differs from the source. Loc is the element being written when the difference was noticed.
+type UnformattedError struct {
+	Loc *ast.Location
+}
+
+func (e UnformattedError) Error() string {
+	if e.Loc == nil {
+		return "source is not formatted"
 	}
-	return o.RegoVersion
+	return fmt.Sprintf("%s:%d: source is not formatted", e.Loc.File, e.Loc.Row)
+}
+
+func (o Opts) dropRedundantDirectiveImports() bool {
+	return o.DropRedundantDirectiveImports || o.DropV0Imports
+}
+
+func (o Opts) targetSpan() ast.RegoVersionSpan {
+	if !o.RegoVersionSpan.IsUndefined() {
+		return o.RegoVersionSpan
+	}
+	if o.RegoVersion == ast.RegoUndefined {
+		return ast.RegoVersionSpanOf(ast.DefaultRegoVersion)
+	}
+	return ast.RegoVersionSpanOf(o.RegoVersion)
 }
 
 // Source formats a Rego source file. The bytes provided must describe a complete
@@ -71,15 +116,15 @@ func Source(filename string, src []byte) ([]byte, error) {
 }
 
 func SourceWithOpts(filename string, src []byte, opts Opts) ([]byte, error) {
-	regoVersion := opts.effectiveRegoVersion()
+	target := opts.targetSpan()
 
 	var parserOpts ast.ParserOptions
 	if opts.ParserOptions != nil {
 		parserOpts = *opts.ParserOptions
-	} else if regoVersion == ast.RegoV1 {
-		// If the rego version is V1, we need to parse it as such, to allow for future keywords not being imported.
+	} else if target.Min() == ast.RegoV1 || target.Min() == ast.RegoV2 {
+		// If the rego version is V1 or V2, we need to parse it as such, to allow for future keywords not being imported.
 		// Otherwise, we'll default to the default rego-version.
-		parserOpts.RegoVersion = ast.RegoV1
+		parserOpts.RegoVersion = target.Min()
 	}
 
 	// Copying the node does not make sense when both input and output are bytes.
@@ -94,20 +139,33 @@ func SourceWithOpts(filename string, src []byte, opts Opts) ([]byte, error) {
 		return nil, err
 	}
 
-	if regoVersion == ast.RegoV0CompatV1 || regoVersion == ast.RegoV1 {
+	if target.Max() != ast.RegoV0 {
 		checkOpts := ast.NewRegoCheckOptions()
-		// The module is parsed as v0, so we need to disable checks that will be automatically amended by the AstWithOpts call anyways.
+		// AstWithOpts adds the `if`/`contains` keywords and rule bodies or values these checks require,
+		// which a module parsed as v0 may lack. A module parsed as v1 or later already satisfies them.
 		checkOpts.RequireIfKeyword = false
 		checkOpts.RequireContainsKeyword = false
 		checkOpts.RequireRuleBodyOrValue = false
-		errs := ast.CheckRegoV1WithOptions(module, checkOpts)
+		var errs ast.Errors
+		if target.Max() == ast.RegoV2 {
+			errs = ast.CheckRegoV2WithOptions(module, checkOpts)
+		} else {
+			errs = ast.CheckRegoV1WithOptions(module, checkOpts)
+		}
 		if len(errs) > 0 {
 			return nil, errs
 		}
 	}
 
+	if opts.FailFast {
+		opts.srcCheck = &srcChecker{src: src}
+	}
+
 	formatted, err := AstWithOpts(module, opts)
 	if err != nil {
+		if unformatted, ok := errors.AsType[UnformattedError](err); ok {
+			return nil, unformatted
+		}
 		return nil, fmt.Errorf("%s: %v", filename, err)
 	}
 
@@ -159,7 +217,9 @@ type fmtOpts struct {
 	refHeads bool
 
 	regoV1         bool
+	regoV2         bool
 	regoV1Imported bool
+	regoV2Imported bool
 	futureKeywords []string
 
 	// If true, the formatter will retain keywords in refs, e.g. `p.not ` instead of `p["not"]`.
@@ -168,8 +228,11 @@ type fmtOpts struct {
 }
 
 func (o fmtOpts) keywords() []string {
+	if o.regoV2 || o.regoV2Imported {
+		return ast.KeywordsV2[:]
+	}
 	if o.regoV1 {
-		return ast.KeywordsV1[:]
+		return append(ast.KeywordsV1[:], o.futureKeywords...)
 	}
 	kws := ast.KeywordsV0[:]
 	return append(kws, o.futureKeywords...)
@@ -193,21 +256,19 @@ func AstWithOpts(x any, opts Opts) ([]byte, error) {
 
 	o := fmtOpts{}
 
-	regoVersion := opts.effectiveRegoVersion()
-	if regoVersion == ast.RegoV0CompatV1 || regoVersion == ast.RegoV1 {
+	target := opts.targetSpan()
+	if target.Max() != ast.RegoV0 {
 		o.regoV1 = true
 		o.ifs = true
 		o.contains = true
 	}
+	o.regoV2 = target.Max() == ast.RegoV2
 
 	capabilities := opts.Capabilities
 	if capabilities == nil {
-		capabilities = ast.CapabilitiesForThisVersion(ast.CapabilitiesRegoVersion(opts.effectiveRegoVersion()))
+		capabilities = ast.CapabilitiesForThisVersion(ast.CapabilitiesRegoVersion(target.Min()))
 	}
-	o.allowKeywordsInRefs = capabilities.ContainsFeature(ast.FeatureKeywordsInRefs)
-
-	memberRef := ast.Member.Ref()
-	memberWithKeyRef := ast.MemberWithKey.Ref()
+	o.allowKeywordsInRefs = capabilities.ContainsFeatureAt(ast.FeatureKeywordsInRefs, target.Min())
 
 	// Preprocess the AST. Set any required defaults and calculate
 	// values required for printing the formatted output.
@@ -222,10 +283,23 @@ func AstWithOpts(x any, opts Opts) ([]byte, error) {
 
 		case *ast.Expr:
 			switch {
-			case n.IsCall() && memberRef.Equal(n.Operator()) || memberWithKeyRef.Equal(n.Operator()):
+			case n.IsCall() && ast.Interned.Refs.Member.Equal(n.Operator()) ||
+				ast.Interned.Refs.MemberWithKey.Equal(n.Operator()):
 				extraFutureKeywordImports["in"] = struct{}{}
 			case n.IsEvery():
 				extraFutureKeywordImports["every"] = struct{}{}
+			case n.IsNot():
+				extraFutureKeywordImports["not"] = struct{}{}
+			case n.IsAnd():
+				extraFutureKeywordImports["and"] = struct{}{}
+			case n.IsOr():
+				extraFutureKeywordImports["or"] = struct{}{}
+			}
+
+			if n.Negated && isLogicalExpr(n) {
+				// A negated logical expression is written parenthesized
+				// (`not (a or b)`), which requires the `not` keyword.
+				extraFutureKeywordImports["not"] = struct{}{}
 			}
 
 		case *ast.Import:
@@ -236,6 +310,11 @@ func AstWithOpts(x any, opts Opts) ([]byte, error) {
 			switch {
 			case isRegoV1Compatible(n):
 				o.regoV1Imported = true
+				o.contains = true
+				o.ifs = true
+			case isRegoV2Compatible(n):
+				o.regoV1Imported = true
+				o.regoV2Imported = true
 				o.contains = true
 				o.ifs = true
 			case future.IsAllFutureKeywords(n):
@@ -269,30 +348,17 @@ func AstWithOpts(x any, opts Opts) ([]byte, error) {
 		fmtOpts: o,
 	}
 
+	w.check = opts.srcCheck
+
 	switch x := x.(type) {
 	case *ast.Module:
-		if regoVersion == ast.RegoV1 && opts.DropV0Imports {
-			x.Imports = filterRegoV1Import(x.Imports)
-		} else if regoVersion == ast.RegoV0CompatV1 {
-			x.Imports = ensureRegoV1Import(x.Imports)
-		}
+		x.Imports = formatImports(x.Imports, target, o, extraFutureKeywordImports, opts.dropRedundantDirectiveImports())
 
-		regoV1Imported := slices.ContainsFunc(x.Imports, isRegoV1Compatible)
-		if regoVersion == ast.RegoV0CompatV1 || regoVersion == ast.RegoV1 || regoV1Imported {
-			if !opts.DropV0Imports && !regoV1Imported {
-				for _, kw := range o.futureKeywords {
-					x.Imports = ensureFutureKeywordImport(x.Imports, kw)
-				}
-			} else {
-				x.Imports = future.FilterFutureImports(x.Imports)
-			}
-		} else {
-			for kw := range extraFutureKeywordImports {
-				x.Imports = ensureFutureKeywordImport(x.Imports, kw)
-			}
-		}
 		err := w.writeModule(x)
 		if err != nil {
+			if unformatted, ok := errors.AsType[UnformattedError](err); ok {
+				return nil, unformatted
+			}
 			w.errs = append(w.errs, ast.NewError(ast.FormatErr, &ast.Location{}, "%s", err.Error()))
 		}
 	case *ast.Package:
@@ -399,7 +465,20 @@ func defaultLocation(x ast.Node) *ast.Location {
 }
 
 type writer struct {
+	// parenExpr, when set, is an expression whose terms must be wrapped in parens
+	// when written; consumed by the first writeExpr that sees it. Any `with`
+	// clauses stay outside the parens, as `(x | y with p as 1)` doesn't parse.
+	parenExpr *ast.Expr
+
+	// parenTerm, when set, is a term that must be wrapped in parens when written;
+	// consumed by the first writeTermParens that sees it.
+	parenTerm *ast.Term
+
 	buf bytes.Buffer
+
+	// check compares the output against the source as it's written, so that formatting can stop at the
+	// first element that differs. Nil unless [Opts.FailFast] was set.
+	check *srcChecker
 
 	indent                  string
 	level                   int
@@ -409,6 +488,57 @@ type writer struct {
 	errs                    ast.Errors
 	fmtOpts                 fmtOpts
 	writeCommentOnFinalLine bool
+}
+
+// srcChecker compares the formatter's output against the source the module was parsed from, so that a caller
+// asking only "is this formatted?" doesn't pay to lay out a module whose first rule already answers it.
+type srcChecker struct {
+	src []byte
+
+	// matched is the number of leading bytes of src the output is known to reproduce, so that each check
+	// only compares what has been written since the last one.
+	matched int
+}
+
+// check reports an [UnformattedError] if out can't be a prefix of the source: the final output can only equal
+// the source if every prefix of it does. Trailing newlines are excluded, as elements are separated by blank
+// lines that are squashed at the end, so the newlines following the last element written aren't decided yet.
+func (c *srcChecker) check(out []byte, loc *ast.Location) error {
+	out = bytes.TrimRight(out, "\n")
+
+	if len(out) > len(c.src) {
+		return UnformattedError{Loc: loc}
+	}
+	if len(out) <= c.matched {
+		return nil
+	}
+	if !bytes.Equal(out[c.matched:], c.src[c.matched:len(out)]) {
+		return UnformattedError{Loc: loc}
+	}
+
+	c.matched = len(out)
+
+	return nil
+}
+
+// checkFormatted stops formatting if the output already differs from the source. A no-op unless
+// [Opts.FailFast] was set, and only safe to call between elements: writeTerm rewinds the buffer to re-write a
+// term as unformatted source when it meets an unexpected comment, so bytes written within an element may yet
+// be replaced, and a comment registered for the end of a line is written when the line ends, which can be
+// after the element that registered it.
+func (w *writer) checkFormatted(loc *ast.Location) error {
+	// Once the writer has an error the output is discarded, so finish the layout to report every error.
+	if w.check == nil || w.beforeEnd != nil || len(w.errs) > 0 {
+		return nil
+	}
+
+	// Elements the formatter added itself, such as a missing future keyword import, carry a synthetic location
+	// that points nowhere in the source.
+	if loc != nil && loc.File == defaultLocationFile {
+		loc = nil
+	}
+
+	return w.check.check(w.buf.Bytes(), loc)
 }
 
 func (w *writer) writeModule(module *ast.Module) error {
@@ -432,26 +562,47 @@ func (w *writer) writeModule(module *ast.Module) error {
 	})
 	visitor.Walk(module)
 
-	sort.Slice(comments, func(i, j int) bool {
-		l, err := locLess(comments[i], comments[j])
+	slices.SortFunc(comments, func(a, b *ast.Comment) int {
+		al, bl, err := getLocs(a, b)
 		if err != nil {
 			w.errs = append(w.errs, ast.NewError(ast.FormatErr, &ast.Location{}, "%s", err.Error()))
 		}
-		return l
+		return locCmp(al, bl)
 	})
 
-	sort.Slice(others, func(i, j int) bool {
-		l, err := locLess(others[i], others[j])
+	slices.SortFunc(others, func(a, b any) int {
+		al, bl, err := getLocs(a, b)
 		if err != nil {
 			w.errs = append(w.errs, ast.NewError(ast.FormatErr, &ast.Location{}, "%s", err.Error()))
 		}
-		return l
+		return locCmp(al, bl)
 	})
 
 	comments = trimTrailingWhitespaceInComments(comments)
 
+	// Imports added by the formatter get an assigned line number, which can sort
+	// after a rule's. An import written after a rule has no effect.
+	var added []*ast.Import
+	if addedImportFollowsRule(others) {
+		others = slices.DeleteFunc(others, func(x any) bool {
+			imp, ok := x.(*ast.Import)
+			if !ok || !isAddedImport(imp) {
+				return false
+			}
+			added = append(added, imp)
+			return true
+		})
+	}
+
 	var err error
 	comments, err = w.writePackage(pkg, comments)
+	if err != nil {
+		return err
+	}
+	if err := w.checkFormatted(pkg.Loc()); err != nil {
+		return err
+	}
+	comments, err = w.writeImports(added, comments)
 	if err != nil {
 		return err
 	}
@@ -519,15 +670,27 @@ func (w *writer) writePackage(pkg *ast.Package, comments []*ast.Comment) ([]*ast
 }
 
 func (w *writer) writeComments(comments []*ast.Comment) error {
+	var inMetadataBlock bool
 	for i := range comments {
 		if i > 0 {
-			l, err := locCmp(comments[i], comments[i-1])
+			l, err := locCmpOrError(comments[i], comments[i-1])
 			if err != nil {
 				return err
 			}
 			if l > 1 {
 				w.blankLine()
+				inMetadataBlock = false
+			} else if l == 1 {
+				// if next comment is a metadata header and previous comment
+				// was part of a metadata block, add a blank line to separate them
+				if inMetadataBlock && ast.IsMetadataComment(comments[i]) {
+					w.blankLine()
+				}
 			}
+		}
+
+		if ast.IsMetadataComment(comments[i]) {
+			inMetadataBlock = true
 		}
 
 		w.writeLine(comments[i].String())
@@ -539,14 +702,20 @@ func (w *writer) writeComments(comments []*ast.Comment) error {
 func (w *writer) writeRules(rules []*ast.Rule, comments []*ast.Comment) ([]*ast.Comment, error) {
 	for i, rule := range rules {
 		var err error
-		comments, err = w.insertComments(comments, rule.Location)
-		if err != nil && !errors.As(err, &unexpectedCommentError{}) {
-			w.errs = append(w.errs, ast.NewError(ast.FormatErr, &ast.Location{}, "%s", err.Error()))
+		if comments, err = w.insertComments(comments, rule.Location); err != nil {
+			if _, ok := errors.AsType[unexpectedCommentError](err); !ok {
+				w.errs = append(w.errs, ast.NewError(ast.FormatErr, &ast.Location{}, "%s", err.Error()))
+			}
 		}
 
-		comments, err = w.writeRule(rule, false, comments)
-		if err != nil && !errors.As(err, &unexpectedCommentError{}) {
-			w.errs = append(w.errs, ast.NewError(ast.FormatErr, &ast.Location{}, "%s", err.Error()))
+		if comments, err = w.writeRule(rule, false, comments); err != nil {
+			if _, ok := errors.AsType[unexpectedCommentError](err); !ok {
+				w.errs = append(w.errs, ast.NewError(ast.FormatErr, &ast.Location{}, "%s", err.Error()))
+			}
+		}
+
+		if err := w.checkFormatted(rule.Loc()); err != nil {
+			return comments, err
 		}
 
 		if i < len(rules)-1 && w.groupableOneLiner(rule) {
@@ -562,10 +731,26 @@ func (w *writer) writeRules(rules []*ast.Rule, comments []*ast.Comment) ([]*ast.
 	return comments, nil
 }
 
+// groupableOneLiner reports whether rule is written on a single line, and so may
+// be grouped with an adjacent rule instead of being followed by a blank line.
+// These conditions must agree with the inline body branch of writeRule, which
+// doesn't end the line after the closing brace of a multi-line body.
 func (w *writer) groupableOneLiner(rule *ast.Rule) bool {
 	// Location required to determine if two rules are adjacent in the policy.
 	// If not, we respect line breaks between rules.
 	if len(rule.Body) > 1 || rule.Default || rule.Location == nil {
+		return false
+	}
+
+	// An else block is always written on a line of its own, so the rule spans
+	// multiple lines even when its own body is written inline.
+	if rule.Else != nil {
+		return false
+	}
+
+	// A lone set term body keeps its enclosing braces, and so is written as a
+	// multi-line block.
+	if len(rule.Body) == 1 && isSetTerm(rule.Body[0]) {
 		return false
 	}
 
@@ -598,9 +783,7 @@ func (w *writer) writeRule(rule *ast.Rule, isElse bool, comments []*ast.Comment)
 	var unexpectedComment bool
 	comments, err = w.writeHead(rule.Head, rule.Default, isExpandedConst, comments)
 	if err != nil {
-		if errors.As(err, &unexpectedCommentError{}) {
-			unexpectedComment = true
-		} else {
+		if unexpectedComment = isUnexpectedCommentError(err); !unexpectedComment {
 			return nil, err
 		}
 	}
@@ -615,15 +798,32 @@ func (w *writer) writeRule(rule *ast.Rule, isElse bool, comments []*ast.Comment)
 	// this excludes partial sets UNLESS `contains` is used
 	partialSetException := w.fmtOpts.contains || rule.Head.Value != nil
 
-	if (w.fmtOpts.regoV1 || w.fmtOpts.ifs) && partialSetException {
+	usesIf := (w.fmtOpts.regoV1 || w.fmtOpts.ifs) && partialSetException
+
+	if usesIf {
 		w.write(" if")
 		if len(rule.Body) == 1 {
-			if rule.Body[0].Location.Row == rule.Head.Location.Row {
+			// Keep `if <term>` on one line when the single body term sits on the
+			// same line as the end of the head. Comparing against the head's
+			// start row would wrongly expand the condition into a block whenever
+			// the head value spans multiple lines (e.g. a multi-line call).
+			//
+			// Additionally, a single set term must not be stripped of the outer body
+			// braces, as that would semantically change the inner set to a body:
+			// `p if { { x } }` -> p if { x }
+			headEndRow, _ := location.EndOf(rule.Head.Location.Row, rule.Head.Location.Col, rule.Head.Location.Text)
+			if rule.Body[0].Location.Row == headEndRow && !isSetTerm(rule.Body[0]) {
 				w.write(" ")
 				var err error
 				comments, err = w.writeExpr(rule.Body[0], comments)
 				if err != nil {
-					return nil, err
+					// An unexpected comment isn't fatal: the expression was
+					// written as-is, and the comments returned still need
+					// writing. Dropping them would lose every comment after
+					// this rule.
+					if _, ok := errors.AsType[unexpectedCommentError](err); !ok {
+						return nil, err
+					}
 				}
 				w.endLine()
 				if rule.Else != nil {
@@ -643,12 +843,19 @@ func (w *writer) writeRule(rule *ast.Rule, isElse bool, comments []*ast.Comment)
 		w.endLine()
 	}
 
+	// A leading set union renders as `x | y`, which the parser reads as a
+	// comprehension at the brace of a `p if { ... }` body, so it is parenthesized.
+	// An `else` body has no such ambiguity: its braces always open a body.
+	if usesIf && !isElse {
+		w.markUnionLead(rule.Body[0])
+	}
+
 	w.up()
 
 	comments, err = w.writeBody(rule.Body, comments)
 	if err != nil {
 		// the unexpected comment error is passed up to be handled by writeHead
-		if !errors.As(err, &unexpectedCommentError{}) {
+		if _, ok := errors.AsType[unexpectedCommentError](err); !ok {
 			return nil, err
 		}
 	}
@@ -784,12 +991,9 @@ func (w *writer) writeHead(head *ast.Head, isDefault bool, isExpandedConst bool,
 
 	if len(head.Args) > 0 {
 		w.write("(")
-		var args []any
-		for _, arg := range head.Args {
-			args = append(args, arg)
-		}
+		args := util.ToSliceOf[any](head.Args)
 		var err error
-		comments, err = w.writeIterable(args, head.Location, closingLoc(0, 0, '(', ')', head.Location), comments, w.listWriter())
+		comments, err = w.writeIterable(args, head.Location, closingLoc(0, 0, '(', ')', head.Location), comments, w.listWriter(false))
 		w.write(")")
 		if err != nil {
 			return comments, err
@@ -885,9 +1089,10 @@ func (w *writer) writeBody(body ast.Body, comments []*ast.Comment) ([]*ast.Comme
 		}
 		w.startLine()
 
-		comments, err = w.writeExpr(expr, comments)
-		if err != nil && !errors.As(err, &unexpectedCommentError{}) {
-			w.errs = append(w.errs, ast.NewError(ast.FormatErr, &ast.Location{}, "%s", err.Error()))
+		if comments, err = w.writeExpr(expr, comments); err != nil {
+			if _, ok := errors.AsType[unexpectedCommentError](err); !ok {
+				w.errs = append(w.errs, ast.NewError(ast.FormatErr, &ast.Location{}, "%s", err.Error()))
+			}
 		}
 		w.endLine()
 	}
@@ -895,6 +1100,11 @@ func (w *writer) writeBody(body ast.Body, comments []*ast.Comment) ([]*ast.Comme
 }
 
 func (w *writer) writeExpr(expr *ast.Expr, comments []*ast.Comment) ([]*ast.Comment, error) {
+	parenTerms := w.parenExpr == expr
+	if parenTerms {
+		w.parenExpr = nil
+	}
+
 	var err error
 	comments, err = w.insertComments(comments, expr.Location)
 	if err != nil {
@@ -904,8 +1114,24 @@ func (w *writer) writeExpr(expr *ast.Expr, comments []*ast.Comment) ([]*ast.Comm
 		w.startLine()
 	}
 
+	// `not` binds tighter than `and`/`or`, so a negated logical expression is
+	// parenthesized. Only reachable through programmatically built ASTs; the
+	// parser represents `not (a or b)` as an *ast.Not.
+	negatedLogical := expr.Negated && isLogicalExpr(expr)
+
+	// In v2 `not {x}` is a not-body, so a negated brace-led value from an older
+	// module is parenthesized to keep its meaning: `not ({x})`.
+	negatedBraceLead := expr.Negated && w.fmtOpts.regoV2 && exprRendersBraceLead(expr)
+
 	if expr.Negated {
 		w.write("not ")
+		if negatedLogical || negatedBraceLead {
+			w.write("(")
+		}
+	}
+
+	if parenTerms {
+		w.write("(")
 	}
 
 	switch t := expr.Terms.(type) {
@@ -915,7 +1141,17 @@ func (w *writer) writeExpr(expr *ast.Expr, comments []*ast.Comment) ([]*ast.Comm
 			return nil, err
 		}
 	case *ast.Every:
-		comments, err = w.writeEvery(t, comments)
+		comments, err = w.writeEvery(t, expr.Loc(), comments)
+		if err != nil {
+			return nil, err
+		}
+	case *ast.Not:
+		comments, err = w.writeNot(t, expr.Loc(), comments)
+		if err != nil {
+			return nil, err
+		}
+	case *ast.LogicalAnd, *ast.LogicalOr:
+		comments, err = w.writeLogical(expr, comments)
 		if err != nil {
 			return nil, err
 		}
@@ -931,36 +1167,94 @@ func (w *writer) writeExpr(expr *ast.Expr, comments []*ast.Comment) ([]*ast.Comm
 		}
 	}
 
-	var indented, down bool
-	for i, with := range expr.With {
-		if i == 0 || with.Location.Row == expr.With[i-1].Location.Row { // we're on the same line
-			comments, err = w.writeWith(with, comments, false)
-			if err != nil {
-				return nil, err
-			}
-		} else { // we're on a new line
-			if !indented {
-				indented = true
-
-				w.up()
-				down = true
-			}
-			w.endLine()
-			w.startLine()
-			comments, err = w.writeWith(with, comments, true)
-			if err != nil {
-				return nil, err
-			}
-		}
+	if parenTerms {
+		w.write(")")
 	}
 
-	if down {
-		if err := w.down(); err != nil {
-			return nil, err
+	if negatedLogical || negatedBraceLead {
+		w.write(")")
+	}
+
+	if len(expr.With) == 0 {
+		return comments, nil
+	}
+
+	withs := expr.With
+	// Compare against the row where the expression's terms end (its
+	// closing-bracket row), not where they begin. For a multi-line expression
+	// the lone leading `with` sits on the closing-bracket line, which differs
+	// from the start row, and comparing against the start would eject it onto
+	// its own indented line (see issue #8804).
+	lastRow := exprTermsEndRow(expr)
+
+	// Print on same row if already there, otherwise increase indent a print remaining
+	if withs[0].Location.Row == lastRow {
+		if comments, err = w.writeWith(withs[0], comments, false); err != nil {
+			return comments, err
+		}
+		lastRow, withs = withs[0].Location.Row, withs[1:]
+	}
+
+	if len(withs) > 0 {
+		var indented bool
+
+		for _, with := range withs {
+			indent := with.Location.Row > lastRow
+			if indent {
+				if !indented {
+					w.up()
+					defer w.down() //nolint
+					indented = true
+				}
+				w.endLine()
+				w.startLine()
+				lastRow = with.Location.Row
+			}
+			if comments, err = w.writeWith(with, comments, indent); err != nil {
+				return comments, err
+			}
 		}
 	}
 
 	return comments, nil
+}
+
+// exprTermsEndRow returns the row of the last source line occupied by the
+// expression's own terms, ignoring any trailing `with` modifiers. For a
+// single-line expression this equals expr.Location.Row; for a multi-line one
+// (e.g. a wrapped function call ending in `)` or an `every` block ending in
+// `}`) it is the closing-bracket row. expr.Location.Text spans the `with`
+// clauses too, so they are trimmed off via the first `with`'s offset before
+// the remaining term text is measured.
+func exprTermsEndRow(expr *ast.Expr) int {
+	loc := expr.Location
+	if loc == nil {
+		return 0
+	}
+	text := loc.Text
+	if len(expr.With) > 0 && expr.With[0].Location != nil {
+		if off := expr.With[0].Location.Offset - loc.Offset; off > 0 && off <= len(text) {
+			text = text[:off]
+		}
+	}
+	text = bytes.TrimRight(text, " \t\r\n")
+	endRow, _ := location.EndOf(loc.Row, loc.Col, text)
+	return endRow
+}
+
+// isSetTerm reports whether expr is a non-negated set term.
+func isSetTerm(expr *ast.Expr) bool {
+	if expr.IsNegated() {
+		return false
+	}
+
+	term, ok := expr.Terms.(*ast.Term)
+	if !ok {
+		return false
+	}
+
+	_, ok = term.Value.(ast.Set)
+	return ok
 }
 
 func (w *writer) writeSomeDecl(decl *ast.SomeDecl, comments []*ast.Comment) ([]*ast.Comment, error) {
@@ -1004,9 +1298,13 @@ func (w *writer) writeSomeDecl(decl *ast.SomeDecl, comments []*ast.Comment) ([]*
 	return comments, nil
 }
 
-func (w *writer) writeEvery(every *ast.Every, comments []*ast.Comment) ([]*ast.Comment, error) {
+func (w *writer) writeEvery(every *ast.Every, loc *ast.Location, comments []*ast.Comment) ([]*ast.Comment, error) {
+	if loc == nil {
+		loc = every.Loc()
+	}
+
 	var err error
-	comments, err = w.insertComments(comments, every.Location)
+	comments, err = w.insertComments(comments, loc)
 	if err != nil {
 		return nil, err
 	}
@@ -1028,12 +1326,10 @@ func (w *writer) writeEvery(every *ast.Every, comments []*ast.Comment) ([]*ast.C
 		return nil, err
 	}
 	w.write(" {")
-	comments, err = w.writeComprehensionBody('{', '}', every.Body, every.Loc(), every.Loc(), comments)
-	if err != nil {
+	comments, err = w.writeComprehensionBody('{', '}', every.Body, loc, loc, comments)
+	if err != nil && !isUnexpectedCommentError(err) {
 		// the unexpected comment error is passed up to be handled by writeHead
-		if !errors.As(err, &unexpectedCommentError{}) {
-			return nil, err
-		}
+		return nil, err
 	}
 
 	if len(every.Body) == 1 &&
@@ -1042,6 +1338,312 @@ func (w *writer) writeEvery(every *ast.Every, comments []*ast.Comment) ([]*ast.C
 	}
 	w.write("}")
 	return comments, nil
+}
+
+func (w *writer) writeNot(not *ast.Not, loc *ast.Location, comments []*ast.Comment) ([]*ast.Comment, error) {
+	if loc == nil {
+		loc = not.Loc()
+	}
+
+	var err error
+	comments, err = w.insertComments(comments, loc)
+	if err != nil {
+		return nil, err
+	}
+
+	w.write("not ")
+
+	if not.ExplicitBody || len(not.Body) > 1 {
+		// A leading set union renders as `x | y`, which the parser reads as a
+		// comprehension at the brace, so it is parenthesized.
+		if isUnionExpr(not.Body[0]) {
+			w.parenExpr = not.Body[0]
+		}
+
+		w.write("{")
+		comments, err = w.writeComprehensionBody('{', '}', not.Body, loc, loc, comments)
+		if err != nil && !isUnexpectedCommentError(err) {
+			return nil, err
+		}
+
+		if last := not.Body[len(not.Body)-1]; last.Location != nil && last.Location.Row == loc.Row {
+			w.write(" ")
+		}
+		w.write("}")
+	} else {
+		parens := notBodyNeedsParens(not.Body[0])
+		if parens {
+			w.write("(")
+		}
+
+		comments, err = w.writeExpr(not.Body[0], comments)
+		if err != nil && !isUnexpectedCommentError(err) {
+			return nil, err
+		}
+
+		if parens {
+			w.write(")")
+		}
+	}
+
+	return comments, nil
+}
+
+// notBodyNeedsParens reports whether the sole expression of an implicit `not`
+// body must be parenthesized to be read back as that same expression. Mirrors
+// notBodyNeedsParens in the ast package.
+func notBodyNeedsParens(expr *ast.Expr) bool {
+	// A `with` on a bare operand of `not` binds to the whole `not` expression.
+	if len(expr.With) > 0 {
+		return true
+	}
+
+	// `not` binds tighter than `and`/`or`.
+	if isLogicalExpr(expr) {
+		return true
+	}
+
+	// `not not x` doesn't parse: a nested negation must be parenthesized to be
+	// read back as a body.
+	if _, ok := expr.Terms.(*ast.Not); ok {
+		return true
+	}
+
+	// A value that renders brace-led would be re-read as an explicit body.
+	return exprRendersBraceLead(expr)
+}
+
+// logicalOperand is one operand of an `and`/`or` chain.
+type logicalOperand struct {
+	body ast.Body
+
+	// explicit is set for `{...}` operands, which scope their contents and are
+	// always written braced.
+	explicit bool
+
+	// parens is set for implicit operands that must be parenthesized to be read
+	// back as the same expression.
+	parens bool
+
+	// brace is the location of the operand's opening `{`, for explicit operands.
+	brace *ast.Location
+}
+
+// logicalStep is one operator application of an `and`/`or` chain.
+type logicalStep struct {
+	op  string
+	rhs logicalOperand
+
+	// lhsEndRow is the row on which everything to the left of the operator ends.
+	lhsEndRow int
+}
+
+// breaksLine reports whether the rhs operand is written on a line of its own,
+// i.e. starts on a later row than the end of everything left of the operator.
+// An explicit operand starts at its opening brace, an implicit one at its sole
+// expression; a missing location leaves the row unknown, so no break.
+func (s logicalStep) breaksLine() bool {
+	var start *ast.Location
+	if s.rhs.explicit {
+		start = s.rhs.brace
+	} else if len(s.rhs.body) > 0 {
+		start = s.rhs.body[0].Location
+	}
+
+	return start != nil && start.Row > s.lhsEndRow
+}
+
+func (w *writer) writeLogical(expr *ast.Expr, comments []*ast.Comment) ([]*ast.Comment, error) {
+	lhs, steps := flattenLogical(expr)
+
+	comments, err := w.writeLogicalOperand(lhs, comments)
+	if err != nil && !isUnexpectedCommentError(err) {
+		return comments, err
+	}
+
+	var indented bool
+
+	for _, s := range steps {
+		w.write(" " + s.op)
+
+		if s.breaksLine() {
+			if !indented {
+				w.up()
+				defer w.down() //nolint
+				indented = true
+			}
+			w.endLine()
+			w.startLine()
+		} else {
+			w.write(" ")
+		}
+
+		comments, err = w.writeLogicalOperand(s.rhs, comments)
+		if err != nil && !isUnexpectedCommentError(err) {
+			return comments, err
+		}
+	}
+
+	return comments, nil
+}
+
+func (w *writer) writeLogicalOperand(o logicalOperand, comments []*ast.Comment) ([]*ast.Comment, error) {
+	if !o.explicit {
+		if o.parens {
+			w.write("(")
+			defer w.write(")")
+		}
+
+		return w.writeExpr(o.body[0], comments)
+	}
+
+	if len(o.body) == 0 {
+		w.write("{}")
+		return comments, nil
+	}
+
+	// A leading set union renders as `x | y`, which the parser reads as a
+	// comprehension at the brace, so it is parenthesized.
+	if isUnionExpr(o.body[0]) {
+		w.parenExpr = o.body[0]
+	}
+
+	w.write("{")
+	comments, err := w.writeComprehensionBody('{', '}', o.body, o.brace, o.brace, comments)
+	if err != nil && !isUnexpectedCommentError(err) {
+		return comments, err
+	}
+
+	if last := o.body[len(o.body)-1]; last.Location != nil && last.Location.Row == o.brace.Row {
+		w.write(" ")
+	}
+	w.write("}")
+
+	return comments, nil
+}
+
+// flattenLogical returns the leading operand and the operator applications of an
+// `and`/`or` chain. Chains are left-associative, so the operands of
+// `a and b and c` -- And{And{a, b}, c} -- are collected into a single chain,
+// written with one level of continuation indent. A nested node that requires
+// parens stays an operand of its own.
+func flattenLogical(expr *ast.Expr) (logicalOperand, []logicalStep) {
+	op, lhs, rhs, explicitLhs, explicitRhs := logicalParts(expr)
+
+	step := logicalStep{
+		op:  op,
+		rhs: newLogicalOperand(rhs, explicitRhs, op, true, expr.Location),
+	}
+
+	if !explicitLhs && len(lhs) == 1 && isLogicalExpr(lhs[0]) && !logicalOperandNeedsParens(lhs[0], op, false) {
+		step.lhsEndRow = bodyEndRow(lhs)
+		first, steps := flattenLogical(lhs[0])
+
+		return first, append(steps, step)
+	}
+
+	first := newLogicalOperand(lhs, explicitLhs, op, false, expr.Location)
+	step.lhsEndRow = logicalOperandEndRow(first)
+
+	return first, []logicalStep{step}
+}
+
+func logicalParts(expr *ast.Expr) (op string, lhs, rhs ast.Body, explicitLhs, explicitRhs bool) {
+	switch t := expr.Terms.(type) {
+	case *ast.LogicalAnd:
+		return "and", t.Lhs, t.Rhs, t.ExplicitLhs, t.ExplicitRhs
+	case *ast.LogicalOr:
+		return "or", t.Lhs, t.Rhs, t.ExplicitLhs, t.ExplicitRhs
+	}
+
+	return "", nil, nil, false, false
+}
+
+func newLogicalOperand(b ast.Body, explicit bool, parentOp string, rhs bool, node *ast.Location) logicalOperand {
+	if explicit || len(b) != 1 {
+		return logicalOperand{body: b, explicit: true, brace: operandBraceLoc(node, b)}
+	}
+
+	return logicalOperand{body: b, parens: logicalOperandNeedsParens(b[0], parentOp, rhs)}
+}
+
+// logicalOperandNeedsParens reports whether an implicit operand of parentOp must
+// be parenthesized to be read back as that same expression. Mirrors
+// logicalOperandNeedsParens in the ast package.
+func logicalOperandNeedsParens(expr *ast.Expr, parentOp string, rhs bool) bool {
+	// A `with` on a bare operand binds to the whole and/or expression.
+	if len(expr.With) > 0 {
+		return true
+	}
+
+	switch expr.Terms.(type) {
+	case *ast.LogicalOr:
+		// `or` binds looser than `and`: always parenthesize under `and`; under
+		// `or`, parenthesize only the rhs to preserve right-nesting.
+		return parentOp == "and" || rhs
+	case *ast.LogicalAnd:
+		// `and` binds tighter: no parens under `or`; under `and`, parenthesize
+		// only the rhs to preserve right-nesting.
+		return parentOp == "and" && rhs
+	}
+
+	// A value that renders brace-led would be re-read as an explicit body.
+	return exprRendersBraceLead(expr)
+}
+
+func logicalOperandEndRow(o logicalOperand) int {
+	if o.explicit {
+		if row := closingLoc(0, 0, '{', '}', o.brace).Row; row > 0 {
+			return row
+		}
+	}
+
+	return bodyEndRow(o.body)
+}
+
+// bodyEndRow returns the row of the last source line occupied by b.
+func bodyEndRow(b ast.Body) int {
+	if len(b) == 0 {
+		return 0
+	}
+
+	loc := b[len(b)-1].Location
+	if loc == nil {
+		return 0
+	}
+
+	return loc.Row + bytes.Count(bytes.TrimRight(loc.Text, " \t\r\n"), []byte{'\n'})
+}
+
+// operandBraceLoc returns the location of the `{` opening an explicit operand
+// body, derived from the location of the enclosing and/or node. The node
+// location is returned as-is if the brace can't be located, e.g. for default
+// locations.
+func operandBraceLoc(node *ast.Location, b ast.Body) *ast.Location {
+	if node == nil || len(b) == 0 || b[0].Location == nil {
+		return node
+	}
+
+	i := min(b[0].Location.Offset-node.Offset, len(node.Text))
+
+	for i--; i >= 0; i-- {
+		if node.Text[i] != '{' {
+			continue
+		}
+
+		cpy := *node
+		cpy.Row = node.Row + bytes.Count(node.Text[:i], []byte{'\n'})
+		cpy.Offset = node.Offset + i
+		cpy.Text = node.Text[i:]
+
+		return &cpy
+	}
+
+	return node
+}
+
+func isLogicalExpr(expr *ast.Expr) bool {
+	return expr.IsAnd() || expr.IsOr()
 }
 
 func (w *writer) writeFunctionCall(expr *ast.Expr, comments []*ast.Comment) ([]*ast.Comment, error) {
@@ -1105,13 +1707,10 @@ func (w *writer) writeFunctionCallPlain(terms []*ast.Term, comments []*ast.Comme
 	w.write("(")
 	defer w.write(")")
 
-	args := make([]any, len(terms)-1)
-	for i, t := range terms[1:] {
-		args[i] = t
-	}
+	args := util.ToSliceOf[any](terms[1:])
 	loc := terms[0].Location
 	var err error
-	comments, err = w.writeIterable(args, loc, closingLoc(0, 0, '(', ')', loc), comments, w.listWriter())
+	comments, err = w.writeIterable(args, loc, closingLoc(0, 0, '(', ')', loc), comments, w.listWriter(false))
 	if err != nil {
 		return nil, err
 	}
@@ -1134,8 +1733,12 @@ func (w *writer) writeWith(with *ast.With, comments []*ast.Comment, indented boo
 	}
 	w.write(" as ")
 	comments, err = w.writeTerm(with.Value, comments)
-	if err != nil {
-		return nil, err
+	if err != nil && !isUnexpectedCommentError(err) {
+		// An unexpectedCommentError from writeTerm signals that it fell
+		// back to writing the term's original unformatted text — the value
+		// was written successfully, so don't abort the surrounding chain
+		// of `with` clauses (issue #8765).
+		return comments, err
 	}
 	return comments, nil
 }
@@ -1158,13 +1761,24 @@ func (w *writer) writeTerm(term *ast.Term, comments []*ast.Comment) ([]*ast.Comm
 	}
 
 	currentLen := w.buf.Len()
+	currentLevel := w.level
 	currentComments := saveComments(comments)
 	defer commentsSlicePool.Put(currentComments)
 
 	comments, err := w.writeTermParens(false, term, comments)
 	if err != nil {
-		if errors.As(err, &unexpectedCommentError{}) {
+		if isUnexpectedCommentError(err) {
 			w.buf.Truncate(currentLen)
+			w.level = currentLevel
+
+			// If beforeEnd refers to a comment within the source text range, clear it
+			// This prevents the comment from being written twice
+			if w.beforeEnd != nil && len(term.Location.Text) > 0 {
+				endRow, _ := location.EndOf(term.Location.Row, term.Location.Col, term.Location.Text)
+				if w.beforeEnd.Location.Row >= term.Location.Row && w.beforeEnd.Location.Row <= endRow {
+					w.beforeEnd = nil
+				}
+			}
 
 			comments, uErr := w.writeUnformatted(term.Location, *currentComments)
 			if uErr != nil {
@@ -1207,6 +1821,11 @@ func (w *writer) writeUnformatted(location *ast.Location, currentComments []*ast
 }
 
 func (w *writer) writeTermParens(parens bool, term *ast.Term, comments []*ast.Comment) ([]*ast.Comment, error) {
+	if w.parenTerm == term {
+		w.parenTerm = nil
+		parens = true
+	}
+
 	var err error
 	comments, err = w.insertComments(comments, term.Location)
 	if err != nil {
@@ -1410,7 +2029,7 @@ func (w *writer) writeRef(x ast.Ref, comments []*ast.Comment) ([]*ast.Comment, e
 				w.write("[")
 				comments, err = w.writeTerm(t, comments)
 				if err != nil {
-					if errors.As(err, &unexpectedCommentError{}) {
+					if _, ok := errors.AsType[unexpectedCommentError](err); ok {
 						// add a new line so that the closing bracket isn't part of the unexpected comment
 						w.write("\n")
 					} else {
@@ -1560,7 +2179,7 @@ func (w *writer) writeObject(obj ast.Object, loc *ast.Location, comments []*ast.
 	w.write("{")
 	defer w.write("}")
 
-	var s []any
+	s := make([]any, 0, obj.Len())
 	obj.Foreach(func(k, v *ast.Term) {
 		s = append(s, ast.Item(k, v))
 	})
@@ -1571,12 +2190,12 @@ func (w *writer) writeArray(arr *ast.Array, loc *ast.Location, comments []*ast.C
 	w.write("[")
 	defer w.write("]")
 
-	var s []any
+	s := make([]any, 0, arr.Len())
 	arr.Foreach(func(t *ast.Term) {
 		s = append(s, t)
 	})
 	var err error
-	comments, err = w.writeIterable(s, loc, closingLoc(0, 0, '[', ']', loc), comments, w.listWriter())
+	comments, err = w.writeIterable(s, loc, closingLoc(0, 0, '[', ']', loc), comments, w.listWriter(true))
 	if err != nil {
 		return nil, err
 	}
@@ -1584,10 +2203,9 @@ func (w *writer) writeArray(arr *ast.Array, loc *ast.Location, comments []*ast.C
 }
 
 func (w *writer) writeSet(set ast.Set, loc *ast.Location, comments []*ast.Comment) ([]*ast.Comment, error) {
-
+	var err error
 	if set.Len() == 0 {
 		w.write("set()")
-		var err error
 		comments, err = w.insertComments(comments, closingLoc(0, 0, '(', ')', loc))
 		if err != nil {
 			return nil, err
@@ -1598,12 +2216,8 @@ func (w *writer) writeSet(set ast.Set, loc *ast.Location, comments []*ast.Commen
 	w.write("{")
 	defer w.write("}")
 
-	var s []any
-	set.Foreach(func(t *ast.Term) {
-		s = append(s, t)
-	})
-	var err error
-	comments, err = w.writeIterable(s, loc, closingLoc(0, 0, '{', '}', loc), comments, w.listWriter())
+	s := util.ToSliceOf[any](set.Slice())
+	comments, err = w.writeIterable(s, loc, closingLoc(0, 0, '{', '}', loc), comments, w.listWriter(true))
 	if err != nil {
 		return nil, err
 	}
@@ -1628,10 +2242,19 @@ func (w *writer) writeObjectComprehension(object *ast.ObjectComprehension, loc *
 	w.write("{")
 	defer w.write("}")
 
-	object.Value.Location = object.Key.Location // Ensure the value is not written on the next line.
-	if object.Key.Location.Row-loc.Row > 1 {
-		w.endLine()
-		w.startLine()
+	// Ensure the value is not written on the next line. writeComprehension
+	// breaks before the term whenever the term's row is below the row the
+	// comprehension opened on, so the value is given a location on that row
+	// rather than its own, which may already be a row further down. Copying
+	// the value's own location rather than the key's keeps Text intact, which
+	// writeComprehension reads to decide whether a call term was parenthesised.
+	valueLoc := *object.Value.Location
+	valueLoc.Row = loc.Row
+	object.Value.Location = &valueLoc
+
+	paren := isUnionCall(object.Key)
+	if paren {
+		w.write("(")
 	}
 
 	var err error
@@ -1639,6 +2262,10 @@ func (w *writer) writeObjectComprehension(object *ast.ObjectComprehension, loc *
 	if err != nil {
 		return nil, err
 	}
+	if paren {
+		w.write(")")
+	}
+
 	w.write(": ")
 	return w.writeComprehension('{', '}', object.Value, object.Body, loc, comments)
 }
@@ -1650,9 +2277,8 @@ func (w *writer) writeComprehension(openChar, closeChar byte, term *ast.Term, bo
 	}
 
 	parens := false
-	_, ok := term.Value.(ast.Call)
-	if ok {
-		parens = term.Location.Text[0] == 40 // Starts with "("
+	if _, ok := term.Value.(ast.Call); ok {
+		parens = isUnionCall(term) || term.Location.Text[0] == 40 // Starts with "("
 	}
 	var err error
 	comments, err = w.writeTermParens(parens, term, comments)
@@ -1665,11 +2291,7 @@ func (w *writer) writeComprehension(openChar, closeChar byte, term *ast.Term, bo
 }
 
 func (w *writer) writeComprehensionBody(openChar, closeChar byte, body ast.Body, term, compr *ast.Location, comments []*ast.Comment) ([]*ast.Comment, error) {
-	exprs := make([]any, 0, len(body))
-	for _, expr := range body {
-		exprs = append(exprs, expr)
-	}
-	lines, err := w.groupIterable(exprs, term)
+	lines, err := w.groupIterable(util.ToSliceOf[any](body), term)
 	if err != nil {
 		return nil, err
 	}
@@ -1723,17 +2345,19 @@ func (w *writer) writeImports(imports []*ast.Import, comments []*ast.Comment) ([
 		}
 
 		// Sort imports within a newline grouping.
-		slices.SortFunc(group, (*ast.Import).Compare)
-		for _, i := range group {
+		for _, i := range util.SortedFunc(group, (*ast.Import).Compare) {
 			w.startLine()
-			err = w.writeImport(i)
-			if err != nil {
+			if err = w.writeImport(i); err != nil {
 				return nil, err
 			}
 			if c, ok := m[i]; ok {
 				w.write(" " + c.String())
 			}
 			w.endLine()
+
+			if err := w.checkFormatted(i.Loc()); err != nil {
+				return nil, err
+			}
 		}
 		w.blankLine()
 	}
@@ -1750,6 +2374,9 @@ func (w *writer) writeImport(imp *ast.Import) error {
 		// We don't want to wrap future.keywords imports in parens, so we create a new writer that doesn't
 		w2 := writer{
 			buf: bytes.Buffer{},
+			fmtOpts: fmtOpts{
+				allowKeywordsInRefs: true,
+			},
 		}
 		_, err := w2.writeRef(path, nil)
 		if err != nil {
@@ -1777,7 +2404,37 @@ func (w *writer) writeIterable(elements []any, last *ast.Location, close *ast.Lo
 	if err != nil {
 		return nil, err
 	}
-	if len(lines) > 1 {
+
+	newlinePrecedesItem := false
+	// If there are comments within the single line, don't collapse it and keep it as-is
+	// Return an error so that writeTerm will write the original formatting
+	if len(lines) == 1 {
+		for _, c := range comments {
+			if c.Location.Row > last.Row && c.Location.Row < close.Row {
+				return comments, unexpectedCommentError{
+					newComment:    truncatedString(c.String(), 100),
+					newCommentRow: c.Location.Row,
+				}
+			}
+		}
+		if len(elements) > 0 {
+			var first *ast.Term
+			if term, ok := elements[0].(*ast.Term); ok {
+				first = term
+			} else if pair, ok := elements[0].([2]*ast.Term); ok {
+				first = pair[0]
+			}
+			cut := bytes.Index(last.Text, first.Location.Text)
+			if cut > 0 {
+				txt := last.Text[:cut]
+				newlinePrecedesItem = bytes.IndexByte(txt, '\n') > 0
+			}
+		}
+	}
+
+	isMultiline := len(lines) > 1 || (len(lines) == 1 && newlinePrecedesItem)
+
+	if isMultiline {
 		w.delayBeforeEnd()
 		w.startMultilineSeq()
 	}
@@ -1799,7 +2456,7 @@ func (w *writer) writeIterable(elements []any, last *ast.Location, close *ast.Lo
 		return nil, err
 	}
 
-	if len(lines) > 1 {
+	if isMultiline {
 		w.write(",")
 		w.endLine()
 		comments, err = w.insertComments(comments, close)
@@ -1833,15 +2490,117 @@ func (w *writer) writeIterableLine(elements []any, comments []*ast.Comment, fn e
 	return fn(elements[i], comments)
 }
 
+// isUnionExpr reports whether expr is a set-union call that renders as a bare
+// `x | y`, which is comprehension syntax at an operand brace.
+func isUnionExpr(expr *ast.Expr) bool {
+	terms, ok := expr.Terms.([]*ast.Term)
+	return ok && len(terms) == 3 && ast.Interned.Refs.Or.Equal(terms[0].Value)
+}
+
+// markUnionLead parenthesizes the set union leading the rendering of expr, if
+// there is one: a leading `x | y` reads as comprehension syntax at the brace of
+// the body holding expr. The union is either the expression itself, or the
+// leading operand of an infix call — one nested deeper is already parenthesized
+// by writeCall.
+func (w *writer) markUnionLead(expr *ast.Expr) {
+	if expr.Negated {
+		return
+	}
+
+	if isLogicalExpr(expr) {
+		if lhs, _ := flattenLogical(expr); !lhs.explicit && !lhs.parens {
+			w.markUnionLead(lhs.body[0])
+		}
+
+		return
+	}
+
+	if isUnionExpr(expr) {
+		w.parenExpr = expr
+		return
+	}
+
+	terms, ok := expr.Terms.([]*ast.Term)
+	if !ok {
+		return
+	}
+
+	// Infix calls render an operand first: the result for the assigned form
+	// (`z = x | y`), otherwise the lhs (`x | y == z`).
+	if bi, ok := ast.BuiltinMap[terms[0].Value.String()]; ok && bi.Infix != "" {
+		var lead *ast.Term
+
+		switch len(terms) {
+		case bi.Decl.Arity() + 1:
+			lead = terms[1]
+		case bi.Decl.Arity() + 2:
+			lead = terms[len(terms)-1]
+		}
+
+		if lead != nil && isUnionCall(lead) {
+			w.parenTerm = lead
+		}
+	}
+}
+
+// exprRendersBraceLead reports whether expr renders starting with a `{`. Such an
+// expression needs parens in an operand position, as bare braces there are read as
+// an explicit body. Mirrors rendersWithLeadingBrace in the ast package.
+func exprRendersBraceLead(expr *ast.Expr) bool {
+	switch t := expr.Terms.(type) {
+	case *ast.Term:
+		return termRendersBraceLead(t)
+	case []*ast.Term:
+		// Infix calls render an operand first: the result for the assigned form
+		// (`z = x | y`), otherwise the lhs (`{x} == y`).
+		if bi, ok := ast.BuiltinMap[t[0].Value.String()]; ok && bi.Infix != "" {
+			switch len(t) {
+			case bi.Decl.Arity() + 1:
+				return termRendersBraceLead(t[1])
+			case bi.Decl.Arity() + 2:
+				return termRendersBraceLead(t[len(t)-1])
+			}
+		}
+	}
+
+	return false
+}
+
+func termRendersBraceLead(t *ast.Term) bool {
+	switch v := t.Value.(type) {
+	case ast.Set:
+		// The empty set renders as `set()`.
+		return v.Len() > 0
+	case ast.Object, *ast.SetComprehension, *ast.ObjectComprehension:
+		return true
+	case ast.Ref:
+		return len(v) > 0 && termRendersBraceLead(v[0])
+	case ast.Call:
+		// An infix call renders an operand first, so a brace-led operand of a
+		// nested call leads the whole rendering: `{1, 2} & s == set()`.
+		if bi, ok := ast.BuiltinMap[v[0].Value.String()]; ok && bi.Infix != "" &&
+			len(v) == bi.Decl.Arity()+1 {
+			return termRendersBraceLead(v[1])
+		}
+	}
+
+	return false
+}
+
+// isUnionCall returns true if the term is a call to the union built-in, whose
+// infix form (`|`) is comprehension syntax when used inside a collection
+// literal or as a comprehension term, and must be parenthesized there.
+func isUnionCall(t *ast.Term) bool {
+	call, ok := t.Value.(ast.Call)
+	return ok && ast.Interned.Refs.Or.Equal(call[0].Value)
+}
+
 func (w *writer) objectWriter() entryWriter {
 	return func(x any, comments []*ast.Comment) ([]*ast.Comment, error) {
 		entry := x.([2]*ast.Term)
 
-		call, isCall := entry[0].Value.(ast.Call)
-
-		paren := false
-		if isCall && ast.Or.Ref().Equal(call[0].Value) && entry[0].Location.Text[0] == 40 { // Starts with "("
-			paren = true
+		paren := isUnionCall(entry[0])
+		if paren {
 			w.write("(")
 		}
 
@@ -1856,8 +2615,7 @@ func (w *writer) objectWriter() entryWriter {
 
 		w.write(": ")
 
-		call, isCall = entry[1].Value.(ast.Call)
-		if isCall && ast.Or.Ref().Equal(call[0].Value) && entry[1].Location.Text[0] == 40 { // Starts with "("
+		if isUnionCall(entry[1]) {
 			w.write("(")
 			defer w.write(")")
 		}
@@ -1866,12 +2624,11 @@ func (w *writer) objectWriter() entryWriter {
 	}
 }
 
-func (w *writer) listWriter() entryWriter {
+func (w *writer) listWriter(parenUnionCalls bool) entryWriter {
 	return func(x any, comments []*ast.Comment) ([]*ast.Comment, error) {
 		t, ok := x.(*ast.Term)
-		if ok {
-			call, isCall := t.Value.(ast.Call)
-			if isCall && ast.Or.Ref().Equal(call[0].Value) && t.Location.Text[0] == 40 { // Starts with "("
+		if ok && isUnionCall(t) {
+			if parenUnionCalls || t.Location.Text[0] == 40 { // Starts with "("
 				w.write("(")
 				defer w.write(")")
 			}
@@ -1915,7 +2672,7 @@ func (w *writer) groupIterable(elements []any, last *ast.Location) ([][]any, err
 	}
 
 	slices.SortFunc(elements, func(i, j any) int {
-		l, err := locCmp(i, j)
+		l, err := locCmpOrError(i, j)
 		if err != nil {
 			w.errs = append(w.errs, ast.NewError(ast.FormatErr, &ast.Location{}, "%s", err.Error()))
 		}
@@ -2061,34 +2818,27 @@ loop:
 	return rules, others[i:]
 }
 
-func locLess(a, b any) (bool, error) {
-	c, err := locCmp(a, b)
-	return c < 0, err
+func locCmpOrError(a, b any) (int, error) {
+	al, bl, err := getLocs(a, b)
+	if err != nil {
+		return 0, err
+	}
+	return locCmp(al, bl), nil
 }
 
-func locCmp(a, b any) (int, error) {
-	al, err := getLoc(a)
-	if err != nil {
-		return 0, err
-	}
-	bl, err := getLoc(b)
-	if err != nil {
-		return 0, err
-	}
+func locCmp(a, b *ast.Location) int {
 	switch {
-	case al == nil && bl == nil:
-		return 0, nil
-	case al == nil:
-		return -1, nil
-	case bl == nil:
-		return 1, nil
+	case a == b:
+		return 0
+	case a == nil:
+		return -1
+	case b == nil:
+		return 1
 	}
-
-	if cmp := al.Row - bl.Row; cmp != 0 {
-		return cmp, nil
-
+	if cmp := a.Row - b.Row; cmp != 0 {
+		return cmp
 	}
-	return al.Col - bl.Col, nil
+	return a.Col - b.Col
 }
 
 func getLoc(x any) (*ast.Location, error) {
@@ -2104,7 +2854,11 @@ func getLoc(x any) (*ast.Location, error) {
 	}
 }
 
-var negativeRow = &ast.Location{Row: -1}
+func getLocs(a, b any) (*ast.Location, *ast.Location, error) {
+	al, err1 := getLoc(a)
+	bl, err2 := getLoc(b)
+	return al, bl, errors.Join(err1, err2)
+}
 
 func closingLoc(skipOpen, skipClose, openChar, closeChar byte, loc *ast.Location) *ast.Location {
 	i, offset := 0, 0
@@ -2294,44 +3048,130 @@ func ensureFutureKeywordImport(imps []*ast.Import, kw string) []*ast.Import {
 			return imps
 		}
 	}
-	imp := &ast.Import{
-		// NOTE: This is a hack to not error on the ref containing a keyword already present in v1.
-		// A cleaner solution would be to instead allow refs to contain keyword terms.
-		// E.g. in v1, `import future.keywords["in"]` is valid, but `import future.keywords.in` is not
-		// as it contains a reserved keyword.
-		Path: ast.MustParseTerm("future.keywords[\"" + kw + "\"]"),
-		//Path: ast.MustParseTerm("future.keywords." + kw),
+	imp := &ast.Import{Path: ast.MustParseTerm("future.keywords." + kw)}
+	imp.Location = nextImportLoc(imps, imp)
+
+	return append(imps, imp)
+}
+
+func nextImportLoc(imps []*ast.Import, node ast.Node) *ast.Location {
+	maxRow := 0
+	for _, imp := range imps {
+		if imp.Loc() == nil {
+			continue
+		}
+		if imp.Path.Value.(ast.Ref).HasPrefix(ast.FutureKeywordsRef[:1]) || isRegoV1Compatible(imp) {
+			if imp.Loc().Row > maxRow {
+				maxRow = imp.Loc().Row
+			}
+		}
 	}
-	imp.Location = defaultLocation(imp)
+	if maxRow == 0 {
+		return defaultLocation(node)
+	}
+	return ast.NewLocation([]byte(node.String()), defaultLocationFile, maxRow+1, 1)
+}
+
+func isAddedImport(imp *ast.Import) bool {
+	return imp.Loc() != nil && imp.Loc().File == defaultLocationFile
+}
+
+// addedImportFollowsRule reports whether an import added by the formatter would
+// be written at or after the first rule.
+func addedImportFollowsRule(others []any) bool {
+	firstRule := -1
+	for _, x := range others {
+		if r, ok := x.(*ast.Rule); ok && r.Loc() != nil {
+			if firstRule < 0 || r.Loc().Row < firstRule {
+				firstRule = r.Loc().Row
+			}
+		}
+	}
+	if firstRule < 0 {
+		return false
+	}
+	for _, x := range others {
+		if imp, ok := x.(*ast.Import); ok && isAddedImport(imp) && imp.Loc().Row >= firstRule {
+			return true
+		}
+	}
+	return false
+}
+
+// formatImports adds and removes the directive imports a module needs when formatted for target.
+func formatImports(imps []*ast.Import, target ast.RegoVersionSpan, o fmtOpts, extraFutureKeywordImports map[string]struct{}, dropRedundant bool) []*ast.Import {
+	switch {
+	case target.Min() == ast.RegoV2:
+		// Every future keyword is standard in v2, so no import is ever added.
+		if dropRedundant {
+			imps = slices.DeleteFunc(imps, func(imp *ast.Import) bool {
+				return isRegoV1Compatible(imp) || isRegoV2Compatible(imp)
+			})
+			imps = future.FilterFutureImports(imps)
+		}
+		return imps
+	case target.Max() == ast.RegoV2:
+		// 'rego.v2' makes every other directive import redundant, at both ends of the span.
+		// It's added first, so that it takes the place of the imports it replaces.
+		imps = ensureRegoV2Import(imps)
+		imps = slices.DeleteFunc(imps, isRegoV1Compatible)
+		return future.FilterFutureImports(imps)
+	}
+
+	regoV2Imported := slices.ContainsFunc(imps, isRegoV2Compatible)
+
+	if regoV2Imported || target.Min() == ast.RegoV1 && dropRedundant {
+		imps = slices.DeleteFunc(imps, isRegoV1Compatible)
+	} else if target.Min() != target.Max() { // [v0, v1]
+		imps = ensureRegoV1Import(imps)
+	}
+
+	regoV1Imported := slices.ContainsFunc(imps, isRegoV1Compatible) || regoV2Imported
+
+	if target.Max() == ast.RegoV1 || regoV1Imported {
+		if !dropRedundant && !regoV1Imported {
+			for _, kw := range o.futureKeywords {
+				imps = ensureFutureKeywordImport(imps, kw)
+			}
+		} else {
+			imps = future.FilterFutureImports(imps)
+		}
+
+		if !regoV2Imported {
+			for kw := range extraFutureKeywordImports {
+				if ast.IsFutureKeywordForRegoVersion(kw, ast.RegoV1) {
+					imps = ensureFutureKeywordImport(imps, kw)
+				}
+			}
+		}
+	} else {
+		for kw := range extraFutureKeywordImports {
+			imps = ensureFutureKeywordImport(imps, kw)
+		}
+	}
+
+	return imps
+}
+
+func ensureRegoV2Import(imps []*ast.Import) []*ast.Import {
+	if slices.ContainsFunc(imps, isRegoV2Compatible) {
+		return imps
+	}
+	imp := &ast.Import{Path: ast.NewTerm(ast.RegoV2CompatibleRef)}
+	imp.Location = nextImportLoc(imps, imp)
+
 	return append(imps, imp)
 }
 
 func ensureRegoV1Import(imps []*ast.Import) []*ast.Import {
-	return ensureImport(imps, ast.RegoV1CompatibleRef)
-}
-
-func filterRegoV1Import(imps []*ast.Import) []*ast.Import {
-	var ret []*ast.Import
 	for _, imp := range imps {
-		path := imp.Path.Value.(ast.Ref)
-		if !ast.RegoV1CompatibleRef.Equal(path) {
-			ret = append(ret, imp)
-		}
-	}
-	return ret
-}
-
-func ensureImport(imps []*ast.Import, path ast.Ref) []*ast.Import {
-	for _, imp := range imps {
-		p := imp.Path.Value.(ast.Ref)
-		if p.Equal(path) {
+		if ast.RegoV1CompatibleRef.Equal(imp.Path.Value) {
 			return imps
 		}
 	}
-	imp := &ast.Import{
-		Path: ast.NewTerm(path),
-	}
-	imp.Location = defaultLocation(imp)
+	imp := &ast.Import{Path: ast.NewTerm(ast.RegoV1CompatibleRef)}
+	imp.Location = nextImportLoc(imps, imp)
+
 	return append(imps, imp)
 }
 
@@ -2370,8 +3210,14 @@ func (d *ArityFormatErrDetail) Lines() []string {
 
 // isRegoV1Compatible returns true if the passed *ast.Import is `rego.v1`
 func isRegoV1Compatible(imp *ast.Import) bool {
-	path := imp.Path.Value.(ast.Ref)
-	return len(path) == 2 &&
-		ast.RegoRootDocument.Equal(path[0]) &&
-		path[1].Equal(ast.InternedTerm("v1"))
+	return ast.RegoV1CompatibleRef.Equal(imp.Path.Value)
+}
+
+func isRegoV2Compatible(imp *ast.Import) bool {
+	return ast.RegoV2CompatibleRef.Equal(imp.Path.Value)
+}
+
+func isUnexpectedCommentError(err error) bool {
+	_, ok := errors.AsType[unexpectedCommentError](err)
+	return ok
 }

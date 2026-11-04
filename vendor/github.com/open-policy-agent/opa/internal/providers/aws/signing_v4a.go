@@ -15,7 +15,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +24,7 @@ import (
 
 	signerCrypto "github.com/open-policy-agent/opa/internal/providers/aws/crypto"
 	v4Internal "github.com/open-policy-agent/opa/internal/providers/aws/v4"
+	"github.com/open-policy-agent/opa/v1/util"
 )
 
 const (
@@ -112,12 +113,10 @@ func deriveKeyFromAccessKeyPair(accessKey, secretKey string) (*ecdsa.PrivateKey,
 	}
 	d = d.Add(d, one)
 
-	priv := new(ecdsa.PrivateKey)
-	priv.PublicKey.Curve = p256
-	priv.D = d
-	priv.PublicKey.X, priv.PublicKey.Y = p256.ScalarBaseMult(d.Bytes())
+	dBytes := make([]byte, 32)
+	d.FillBytes(dBytes)
 
-	return priv, nil
+	return ecdsa.ParseRawPrivateKey(p256, dBytes)
 }
 
 // v4aCredentials is Context, ECDSA, and Optional Session Token that can be used
@@ -199,7 +198,7 @@ func (s *httpSigner) Build() (signedRequest, error) {
 
 	// Sort Each Query Key's Values
 	for key := range query {
-		sort.Strings(query[key])
+		slices.Sort(query[key])
 	}
 
 	v4Internal.SanitizeHostForHeader(req)
@@ -307,9 +306,8 @@ func (*httpSigner) buildCanonicalHeaders(host string, rule v4Internal.Rule, head
 		headers = append(headers, lowerCaseKey)
 		signed[lowerCaseKey] = v
 	}
-	sort.Strings(headers)
 
-	signedHeaders = strings.Join(headers, ";")
+	signedHeaders = strings.Join(util.Sorted(headers), ";")
 
 	var canonicalHeaders strings.Builder
 	n := len(headers)

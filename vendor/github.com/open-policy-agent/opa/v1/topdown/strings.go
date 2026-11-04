@@ -8,90 +8,217 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/tchap/go-patricia/v2/patricia"
-
+	"github.com/open-policy-agent/opa/internal/prefixtrie"
 	"github.com/open-policy-agent/opa/v1/ast"
 	"github.com/open-policy-agent/opa/v1/topdown/builtins"
+	"github.com/open-policy-agent/opa/v1/topdown/cache"
 	"github.com/open-policy-agent/opa/v1/util"
 )
 
-func builtinAnyPrefixMatch(_ BuiltinContext, operands []*ast.Term, iter func(*ast.Term) error) error {
-	a, b := operands[0].Value, operands[1].Value
+var (
+	errEmptySearchCharacter = errors.New("empty search character")
+)
 
+// Named inter-query value caches for the tries built over the base strings of
+// strings.any_prefix_match and strings.any_suffix_match, keyed by collection,
+// and for the hashes of the collections matched against once, kept apart so
+// that marking a collection never evicts a trie.
+const (
+	anyPrefixMatchCacheName     = "any_prefix_match"
+	anySuffixMatchCacheName     = "any_suffix_match"
+	anyPrefixMatchSeenCacheName = "any_prefix_match_seen"
+	anySuffixMatchSeenCacheName = "any_suffix_match_seen"
+)
+
+type affixCaches struct {
+	tries, seen string
+}
+
+var (
+	anyPrefixMatchCaches = affixCaches{tries: anyPrefixMatchCacheName, seen: anyPrefixMatchSeenCacheName}
+	anySuffixMatchCaches = affixCaches{tries: anySuffixMatchCacheName, seen: anySuffixMatchSeenCacheName}
+)
+
+func builtinAnyPrefixMatch(bctx BuiltinContext, operands []*ast.Term, iter func(*ast.Term) error) error {
+	found, err := anyAffixMatch(bctx, operands[0].Value, operands[1].Value, anyPrefixMatchCaches, false)
+	if err != nil {
+		return err
+	}
+	return iter(ast.InternedTerm(found))
+}
+
+func builtinAnySuffixMatch(bctx BuiltinContext, operands []*ast.Term, iter func(*ast.Term) error) error {
+	found, err := anyAffixMatch(bctx, operands[0].Value, operands[1].Value, anySuffixMatchCaches, true)
+	if err != nil {
+		return err
+	}
+	return iter(ast.InternedTerm(found))
+}
+
+// affixSeen marks a collection that has been matched against once. The first
+// call to see it again builds the collection's trie, while any others wait.
+type affixSeen struct {
+	once sync.Once
+}
+
+// anyAffixMatch reports whether any string in a starts with (or with suffix set,
+// ends with) any string in base.
+//
+// A collection's trie is built the second time it is seen, so that one built
+// per query (from input, say) never pays for it. Collections are marked by hash,
+// so as not to hold on to them: a collision only builds a trie a call early.
+// Cached tries are shared by concurrent evaluations and never written to.
+func anyAffixMatch(bctx BuiltinContext, a, base ast.Value, caches affixCaches, suffix bool) (bool, error) {
+	match := strings.HasPrefix
+	if suffix {
+		match = strings.HasSuffix
+	}
+
+	// The search strings are checked first, so that their type errors come first.
+	s, single := a.(ast.String)
 	var strs []string
 	switch a := a.(type) {
 	case ast.String:
-		strs = []string{string(a)}
 	case *ast.Array, ast.Set:
 		var err error
-		strs, err = builtins.StringSliceOperand(a, 1)
-		if err != nil {
-			return err
+		if strs, err = builtins.StringSliceOperand(a, 1); err != nil {
+			return false, err
 		}
 	default:
-		return builtins.NewOperandTypeErr(1, a, "string", "set", "array")
+		return false, builtins.NewOperandTypeErr(1, a, "string", "set", "array")
 	}
 
-	var prefixes []string
-	switch b := b.(type) {
+	switch base := base.(type) {
 	case ast.String:
-		prefixes = []string{string(b)}
-	case *ast.Array, ast.Set:
-		var err error
-		prefixes, err = builtins.StringSliceOperand(b, 2)
-		if err != nil {
-			return err
+		if single {
+			return match(string(s), string(base)), nil
 		}
+		return slices.ContainsFunc(strs, func(s string) bool { return match(s, string(base)) }), nil
+	case *ast.Array, ast.Set:
 	default:
-		return builtins.NewOperandTypeErr(2, b, "string", "set", "array")
+		return false, builtins.NewOperandTypeErr(2, base, "string", "set", "array")
 	}
 
-	return iter(ast.InternedTerm(anyStartsWithAny(strs, prefixes)))
+	var tries, seen cache.InterQueryValueCacheBucket
+	if bctx.InterQueryBuiltinValueCache != nil {
+		tries = bctx.InterQueryBuiltinValueCache.GetCache(caches.tries)
+		seen = bctx.InterQueryBuiltinValueCache.GetCache(caches.seen)
+	}
+
+	var key ast.Value
+	var marker *affixSeen
+	if tries != nil && seen != nil {
+		if v, ok := tries.Get(base); ok {
+			if trie, ok := v.(*prefixtrie.Trie[struct{}]); ok {
+				return matchAffixTrie(trie, s, single, strs, suffix), nil
+			}
+		}
+		key = ast.Number(strconv.Itoa(base.Hash()))
+		if v, ok := seen.Get(key); ok {
+			marker, _ = v.(*affixSeen)
+		}
+	}
+
+	if single && marker == nil {
+		// Declined only for a non-string member, reported below.
+		if found, ok := anyStringMatch(string(s), base, match); ok {
+			if key != nil {
+				seen.Insert(key, &affixSeen{})
+			}
+			return found, nil
+		}
+	}
+
+	bases, err := builtins.StringSliceOperand(base, 2)
+	if err != nil {
+		return false, err
+	}
+
+	if marker != nil {
+		var trie *prefixtrie.Trie[struct{}]
+		marker.once.Do(func() {
+			trie = buildAffixTrie(bases, suffix)
+			tries.Insert(base, trie)
+		})
+		if trie == nil {
+			// Built by another call, for this collection or one with the same hash.
+			if v, ok := tries.Get(base); ok {
+				trie, _ = v.(*prefixtrie.Trie[struct{}])
+			}
+		}
+		if trie != nil {
+			return matchAffixTrie(trie, s, single, strs, suffix), nil
+		}
+		// Since evicted, or never built for this collection: built next time.
+	}
+
+	if key != nil {
+		seen.Insert(key, &affixSeen{})
+	}
+
+	if suffix {
+		// Bytes, not runes, so that invalid UTF-8 matches like endswith.
+		return anyStartsWithAny(util.Map(strs, prefixtrie.Reverse), util.Map(bases, prefixtrie.Reverse)), nil
+	}
+	return anyStartsWithAny(strs, bases), nil
 }
 
-func builtinAnySuffixMatch(_ BuiltinContext, operands []*ast.Term, iter func(*ast.Term) error) error {
-	a, b := operands[0].Value, operands[1].Value
+func buildAffixTrie(bases []string, suffix bool) *prefixtrie.Trie[struct{}] {
+	trie := &prefixtrie.Trie[struct{}]{}
+	for _, b := range bases {
+		if suffix {
+			b = prefixtrie.Reverse(b)
+		}
+		trie.Insert(b)
+	}
+	trie.Compact()
+	return trie
+}
 
-	var strsReversed []string
-	switch a := a.(type) {
-	case ast.String:
-		strsReversed = []string{reverseString(string(a))}
-	case *ast.Array, ast.Set:
-		strs, err := builtins.StringSliceOperand(a, 1)
-		if err != nil {
-			return err
-		}
-		strsReversed = make([]string, len(strs))
-		for i := range strs {
-			strsReversed[i] = reverseString(strs[i])
-		}
-	default:
-		return builtins.NewOperandTypeErr(1, a, "string", "set", "array")
+func matchAffixTrie(trie *prefixtrie.Trie[struct{}], s ast.String, single bool, strs []string, suffix bool) bool {
+	hasAffix := trie.HasPrefixOf
+	if suffix {
+		hasAffix = trie.HasSuffixOf
+	}
+	if single {
+		return hasAffix(string(s))
+	}
+	return slices.ContainsFunc(strs, hasAffix)
+}
+
+// anyStringMatch tests one string against each member of an array or set of
+// strings, without copying them out first. ok is false for any other operand,
+// which is left to the general path to handle or reject.
+func anyStringMatch(s string, b ast.Value, match func(s, affix string) bool) (found, ok bool) {
+	// An array or a set; an object's Until takes keys and values.
+	col, ok := b.(interface {
+		Until(func(*ast.Term) bool) bool
+	})
+	if !ok {
+		return false, false
 	}
 
-	var suffixesReversed []string
-	switch b := b.(type) {
-	case ast.String:
-		suffixesReversed = []string{reverseString(string(b))}
-	case *ast.Array, ast.Set:
-		suffixes, err := builtins.StringSliceOperand(b, 2)
-		if err != nil {
-			return err
-		}
-		suffixesReversed = make([]string, len(suffixes))
-		for i := range suffixes {
-			suffixesReversed[i] = reverseString(suffixes[i])
-		}
-	default:
-		return builtins.NewOperandTypeErr(2, b, "string", "set", "array")
+	// Every member is checked before any is matched, so that a non-string
+	// after a match is still the type error it always was.
+	if col.Until(func(t *ast.Term) bool {
+		_, ok := t.Value.(ast.String)
+		return !ok
+	}) {
+		return false, false
 	}
 
-	return iter(ast.InternedTerm(anyStartsWithAny(strsReversed, suffixesReversed)))
+	col.Until(func(t *ast.Term) bool {
+		found = match(s, string(t.Value.(ast.String)))
+		return found
+	})
+	return found, true
 }
 
 func anyStartsWithAny(strs []string, prefixes []string) bool {
@@ -102,13 +229,12 @@ func anyStartsWithAny(strs []string, prefixes []string) bool {
 		return strings.HasPrefix(strs[0], prefixes[0])
 	}
 
-	trie := patricia.NewTrie()
-	for i := range strs {
-		trie.Insert([]byte(strs[i]), true)
-	}
-
-	for i := range prefixes {
-		if trie.MatchSubtree([]byte(prefixes[i])) {
+	// Strings sharing a prefix sort contiguously, directly after the prefix
+	// itself, so only the first string at or after each prefix needs to be
+	// checked. strs is sorted in place: callers pass slices they own.
+	slices.Sort(strs)
+	for _, prefix := range prefixes {
+		if i, _ := slices.BinarySearch(strs, prefix); i < len(strs) && strings.HasPrefix(strs[i], prefix) {
 			return true
 		}
 	}
@@ -129,22 +255,41 @@ func builtinFormatInt(_ BuiltinContext, operands []*ast.Term, iter func(*ast.Ter
 	}
 
 	var format string
+	var radix int
 	switch base {
 	case ast.Number("2"):
 		format = "%b"
+		radix = 2
 	case ast.Number("8"):
 		format = "%o"
+		radix = 8
 	case ast.Number("10"):
+		// Fast path: for numbers whose decimal string is already interned (e.g.
+		// "0"–"100"), we can skip strconv.ParseInt entirely.
+		if term := ast.InternedStringTermFromNumber(input); term != nil {
+			return iter(term)
+		}
 		if i, ok := input.Int(); ok {
 			return iter(ast.InternedIntegerString(i))
 		}
 		format = "%d"
+		radix = 10
 	case ast.Number("16"):
 		format = "%x"
+		radix = 16
 	default:
 		return builtins.NewOperandEnumErr(2, "2", "8", "10", "16")
 	}
 
+	// For integer inputs, format the exact big.Int. Routing integers through a
+	// float (as the fractional path below does) loses precision for values that
+	// need more than a float64's 53-bit mantissa, e.g. 18446744073709551617.
+	if i, ok := new(big.Int).SetString(string(input), 10); ok {
+		return iter(ast.InternedTerm(i.Text(radix)))
+	}
+
+	// Fractional inputs (e.g. 15.9) are truncated toward zero, matching the
+	// historical behaviour: format_int(15.9, 16) == "f", format_int(-15.9, 16) == "-f".
 	f := builtins.NumberToFloat(input)
 	i, _ := f.Int(nil)
 
@@ -293,12 +438,12 @@ func builtinIndexOf(_ BuiltinContext, operands []*ast.Term, iter func(*ast.Term)
 		return err
 	}
 	if len(string(search)) == 0 {
-		return errors.New("empty search character")
+		return errEmptySearchCharacter
 	}
 
 	if isASCII(string(base)) && isASCII(string(search)) {
-		// this is a false positive in the indexAlloc rule that thinks
-		// we're converting byte arrays to strings
+		// this is a false positive in the indexAlloc rule that thinks we're converting
+		// byte arrays to strings. still a false positive as of 2026-08-19.
 		//nolint:gocritic
 		return iter(ast.InternedTerm(strings.Index(string(base), string(search))))
 	}
@@ -331,7 +476,20 @@ func builtinIndexOfN(_ BuiltinContext, operands []*ast.Term, iter func(*ast.Term
 		return err
 	}
 	if len(string(search)) == 0 {
-		return errors.New("empty search character")
+		return errEmptySearchCharacter
+	}
+
+	if isASCII(string(base)) && isASCII(string(search)) {
+		var arr []*ast.Term
+		for offset := 0; ; {
+			i := strings.Index(string(base)[offset:], string(search))
+			if i < 0 {
+				break
+			}
+			arr = append(arr, ast.InternedTerm(offset+i))
+			offset += i + 1
+		}
+		return iter(ast.ArrayTerm(arr...))
 	}
 
 	baseRunes := []rune(string(base))
@@ -353,7 +511,6 @@ func builtinIndexOfN(_ BuiltinContext, operands []*ast.Term, iter func(*ast.Term
 }
 
 func builtinSubstring(_ BuiltinContext, operands []*ast.Term, iter func(*ast.Term) error) error {
-
 	base, err := builtins.StringOperand(operands[0].Value, 1)
 	if err != nil {
 		return err
@@ -393,7 +550,7 @@ func builtinSubstring(_ BuiltinContext, operands []*ast.Term, iter func(*ast.Ter
 			return iter(operands[0])
 		}
 
-		upto := min(len(sbase), startIndex+length)
+		upto := startIndex + min(length, len(sbase)-startIndex) // clamp length first: startIndex+length can overflow
 		return iter(ast.InternedTerm(sbase[startIndex:upto]))
 	}
 
@@ -411,7 +568,7 @@ func builtinSubstring(_ BuiltinContext, operands []*ast.Term, iter func(*ast.Ter
 	if length < 0 {
 		s = string(runes[startIndex:])
 	} else {
-		upto := min(len(runes), startIndex+length)
+		upto := startIndex + min(length, len(runes)-startIndex) // clamp length first: startIndex+length can overflow
 		s = string(runes[startIndex:upto])
 	}
 
@@ -536,6 +693,45 @@ func builtinSplit(_ BuiltinContext, operands []*ast.Term, iter func(*ast.Term) e
 	}
 
 	return iter(ast.ArrayTerm(util.SplitMap(text, delim, ast.InternedTerm)...))
+}
+
+func builtinSplitN(_ BuiltinContext, operands []*ast.Term, iter func(*ast.Term) error) error {
+	s, err := builtins.StringOperand(operands[0].Value, 1)
+	if err != nil {
+		return err
+	}
+
+	d, err := builtins.StringOperand(operands[1].Value, 2)
+	if err != nil {
+		return err
+	}
+
+	n, err := builtins.IntOperand(operands[2].Value, 3)
+	if err != nil {
+		return err
+	}
+
+	text, delim := string(s), string(d)
+
+	var result []*ast.Term
+	if n >= 0 {
+		// n+1 may overflow for very large n; a negative limit means no limit.
+		limit := n + 1
+		if limit < 0 {
+			limit = -1
+		}
+		parts := strings.SplitN(text, delim, limit)
+		result = make([]*ast.Term, min(n, len(parts)))
+		for i := range result {
+			result[i] = ast.InternedTerm(parts[i])
+		}
+	} else {
+		parts := strings.Split(text, delim)
+		start := max(len(parts)+n, 0)
+		result = util.Map(parts[start:], ast.InternedTerm)
+	}
+
+	return iter(ast.ArrayTerm(result...))
 }
 
 func builtinReplace(bctx BuiltinContext, operands []*ast.Term, iter func(*ast.Term) error) error {
@@ -717,15 +913,15 @@ func builtinSprintf(_ BuiltinContext, operands []*ast.Term, iter func(*ast.Term)
 		return err
 	}
 
-	astArr, ok := operands[1].Value.(*ast.Array)
-	if !ok {
-		return builtins.NewOperandTypeErr(2, operands[1].Value, "array")
+	a, err := builtins.ArrayOperand(operands[1].Value, 2)
+	if err != nil {
+		return err
 	}
 
 	// Optimized path for where sprintf is used as a "to_string" function for
 	// a single integer, i.e. sprintf("%d", [x]) where x is an integer.
-	if s == "%d" && astArr.Len() == 1 {
-		if n, ok := astArr.Elem(0).Value.(ast.Number); ok {
+	if s == "%d" && a.Len() == 1 {
+		if n, ok := a.Elem(0).Value.(ast.Number); ok && !isFloatNumber(string(n)) {
 			if i, ok := n.Int(); ok {
 				if interned := ast.InternedIntegerString(i); interned != nil {
 					return iter(interned)
@@ -735,28 +931,43 @@ func builtinSprintf(_ BuiltinContext, operands []*ast.Term, iter func(*ast.Term)
 		}
 	}
 
-	args := make([]any, astArr.Len())
+	args := make([]any, a.Len())
 
 	for i := range args {
-		switch v := astArr.Elem(i).Value.(type) {
+		t := a.Elem(i)
+		switch v := t.Value.(type) {
 		case ast.Number:
-			if n, ok := v.Int(); ok {
-				args[i] = n
-			} else if b, ok := new(big.Int).SetString(v.String(), 10); ok {
+			ns := string(v)
+			if isFloatNumber(ns) {
+				if f, ok := v.Float64(); ok {
+					args[i] = f
+				} else {
+					args[i] = ns
+				}
+			} else if x, ok := util.Atoi64(ns); ok {
+				args[i] = x
+			} else if b, ok := new(big.Int).SetString(ns, 10); ok {
 				args[i] = b
-			} else if f, ok := v.Float64(); ok {
-				args[i] = f
 			} else {
-				args[i] = v.String()
+				args[i] = ns
 			}
 		case ast.String:
 			args[i] = string(v)
 		default:
-			args[i] = astArr.Elem(i).String()
+			args[i] = t.Value.String()
 		}
 	}
 
 	return iter(ast.InternedTerm(fmt.Sprintf(string(s), args...)))
+}
+
+// isFloatNumber reports whether the textual representation of a number is that
+// of a floating point value, i.e. it has a fraction or an exponent. Since
+// util.Atoi64 parses numbers with only zeros past the decimal point (1.0) as
+// integers, the text, and not the parsed value, decides how a number is
+// formatted by sprintf.
+func isFloatNumber(s string) bool {
+	return strings.ContainsAny(s, ".eE")
 }
 
 func builtinReverse(_ BuiltinContext, operands []*ast.Term, iter func(*ast.Term) error) error {
@@ -782,13 +993,27 @@ func reverseString(str string) string {
 	for start := 0; start < size; {
 		r, n := utf8.DecodeRuneInString(str[start:])
 		start += n
+		if r == utf8.RuneError && n == 1 {
+			buf[size-start] = str[start-1]
+			continue
+		}
 		utf8.EncodeRune(buf[size-start:], r)
 	}
 
-	return string(buf)
+	return util.ByteSliceToString(buf)
 }
 
 func init() {
+	defaultCacheEntries, defaultSeenCacheEntries := 10, 1000
+	for _, c := range []affixCaches{anyPrefixMatchCaches, anySuffixMatchCaches} {
+		cache.RegisterDefaultInterQueryBuiltinValueCacheConfig(c.tries, &cache.NamedValueCacheConfig{
+			MaxNumEntries: &defaultCacheEntries,
+		})
+		cache.RegisterDefaultInterQueryBuiltinValueCacheConfig(c.seen, &cache.NamedValueCacheConfig{
+			MaxNumEntries: &defaultSeenCacheEntries,
+		})
+	}
+
 	RegisterBuiltinFunc(ast.FormatInt.Name, builtinFormatInt)
 	RegisterBuiltinFunc(ast.Concat.Name, builtinConcat)
 	RegisterBuiltinFunc(ast.IndexOf.Name, builtinIndexOf)
@@ -801,6 +1026,7 @@ func init() {
 	RegisterBuiltinFunc(ast.Upper.Name, builtinUpper)
 	RegisterBuiltinFunc(ast.Lower.Name, builtinLower)
 	RegisterBuiltinFunc(ast.Split.Name, builtinSplit)
+	RegisterBuiltinFunc(ast.SplitN.Name, builtinSplitN)
 	RegisterBuiltinFunc(ast.Replace.Name, builtinReplace)
 	RegisterBuiltinFunc(ast.ReplaceN.Name, builtinReplaceN)
 	RegisterBuiltinFunc(ast.Trim.Name, builtinTrim)

@@ -5,6 +5,7 @@
 package bundle
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -13,7 +14,6 @@ import (
 	"maps"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 
@@ -359,8 +359,9 @@ type ActivateOpts struct {
 	TxnCtx                   *storage.Context
 	Compiler                 *ast.Compiler
 	Metrics                  metrics.Metrics
-	Bundles                  map[string]*Bundle     // Optional
-	ExtraModules             map[string]*ast.Module // Optional
+	Bundles                  map[string]*Bundle                               // Optional
+	ExtraModules             map[string]*ast.Module                           // Optional
+	ExternalSources          *util.HasherMap[ast.Ref, ast.ExternalRuleSource] // Optional
 	AuthorizationDecisionRef ast.Ref
 	ParserOptions            ast.ParserOptions
 	Plugin                   string
@@ -424,7 +425,6 @@ func Deactivate(opts *DeactivateOpts) error {
 }
 
 func activateBundles(opts *ActivateOpts) error {
-
 	// Build collections of bundle names, modules, and roots to erase
 	erase := map[string]struct{}{}
 	names := map[string]struct{}{}
@@ -476,13 +476,11 @@ func activateBundles(opts *ActivateOpts) error {
 
 	// Validate data in bundle does not contain paths outside the bundle's roots.
 	for _, b := range snapshotBundles {
-
 		if b.lazyLoadingMode {
-
 			for _, item := range b.Raw {
 				path := filepath.ToSlash(item.Path)
 
-				if filepath.Base(path) == dataFile || filepath.Base(path) == yamlDataFile {
+				if filepath.Base(path) == dataFile || IsYAMLDataFile(path) {
 					var val map[string]json.RawMessage
 					err = util.Unmarshal(item.Value, &val)
 					if err == nil {
@@ -531,11 +529,11 @@ func activateBundles(opts *ActivateOpts) error {
 	}
 
 	// Compile the modules all at once to avoid having to re-do work.
-	remainingAndExtra := make(map[string]*ast.Module)
+	remainingAndExtra := make(map[string]*ast.Module, len(remaining)+len(opts.ExtraModules))
 	maps.Copy(remainingAndExtra, remaining)
 	maps.Copy(remainingAndExtra, opts.ExtraModules)
 
-	err = compileModules(opts.Compiler, opts.Metrics, snapshotBundles, remainingAndExtra, opts.legacy, opts.AuthorizationDecisionRef)
+	err = compileModules(opts.Compiler, opts.Metrics, snapshotBundles, remainingAndExtra, opts.legacy, opts.AuthorizationDecisionRef, opts.ExternalSources)
 	if err != nil {
 		return err
 	}
@@ -612,7 +610,6 @@ func doDFS(obj map[string]json.RawMessage, path string, roots []string) error {
 }
 
 func activateDeltaBundles(opts *ActivateOpts, bundles map[string]*Bundle) error {
-
 	// Check that the manifest roots and wasm resolvers in the delta bundle
 	// match with those currently in the store
 	for name, b := range bundles {
@@ -685,7 +682,6 @@ func valueToManifest(v any) (Manifest, error) {
 // erase bundles by name and roots. This will clear all policies and data at its roots and remove its
 // manifest from storage.
 func eraseBundles(ctx context.Context, store storage.Store, txn storage.Transaction, parserOpts ast.ParserOptions, names map[string]struct{}, roots map[string]struct{}) (map[string]*ast.Module, error) {
-
 	if err := eraseData(ctx, store, txn, roots); err != nil {
 		return nil, err
 	}
@@ -762,7 +758,11 @@ func readModuleInfoFromStore(ctx context.Context, store storage.Store, txn stora
 						if err != nil {
 							return nil, errors.New("corrupt rego version")
 						}
-						versions[k] = moduleInfo{RegoVersion: ast.RegoVersionFromInt(int(i))}
+						rv, err := ast.RegoVersionFromIntStrict(int(i))
+						if err != nil {
+							return nil, fmt.Errorf("corrupt rego version: %w", err)
+						}
+						versions[k] = moduleInfo{RegoVersion: rv}
 					}
 				}
 			}
@@ -774,7 +774,6 @@ func readModuleInfoFromStore(ctx context.Context, store storage.Store, txn stora
 }
 
 func erasePolicies(ctx context.Context, store storage.Store, txn storage.Transaction, parserOpts ast.ParserOptions, roots map[string]struct{}) (map[string]*ast.Module, []string, error) {
-
 	ids, err := store.ListPolicies(ctx, txn)
 	if err != nil {
 		return nil, nil, err
@@ -785,12 +784,14 @@ func erasePolicies(ctx context.Context, store storage.Store, txn storage.Transac
 		return nil, nil, fmt.Errorf("failed to read module info from store: %w", err)
 	}
 
-	getRegoVersion := func(modId string) (ast.RegoVersion, bool) {
-		info, ok := modulesInfo[modId]
-		if !ok {
-			return ast.RegoUndefined, false
+	parserOptsFor := func(modID string) ast.ParserOptions {
+		info, ok := modulesInfo[strings.TrimPrefix(modID, "/")]
+		if !ok || info.RegoVersion == parserOpts.RegoVersion {
+			return parserOpts
 		}
-		return info.RegoVersion, true
+		opts := parserOpts
+		opts.RegoVersion = info.RegoVersion
+		return opts
 	}
 
 	remaining := map[string]*ast.Module{}
@@ -802,70 +803,92 @@ func erasePolicies(ctx context.Context, store storage.Store, txn storage.Transac
 			return nil, nil, err
 		}
 
-		parserOptsCpy := parserOpts
-		if regoVersion, ok := getRegoVersion(id); ok {
-			parserOptsCpy.RegoVersion = regoVersion
-		}
-
-		module, err := ast.ParseModuleWithOpts(id, string(bs), parserOptsCpy)
+		// Modules that are about to be deleted only need their package.
+		erase, err := underRoots(packageOnly(bs), roots)
 		if err != nil {
 			return nil, nil, err
 		}
-		path, err := module.Package.Path.Ptr()
-		if err != nil {
-			return nil, nil, err
-		}
-		deleted := false
-		for root := range roots {
-			if RootPathsContain([]string{root}, path) {
-				if err := store.DeletePolicy(ctx, txn, id); err != nil {
-					return nil, nil, err
-				}
-				deleted = true
-				break
+		var module *ast.Module
+		if !erase {
+			if module, err = ast.ParseModuleWithOpts(id, util.ByteSliceToString(bs), parserOptsFor(id)); err != nil {
+				return nil, nil, err
+			}
+			if erase, err = underRoots(module.Package, roots); err != nil {
+				return nil, nil, err
 			}
 		}
 
-		if deleted {
+		if erase {
+			if err := store.DeletePolicy(ctx, txn, id); err != nil {
+				return nil, nil, err
+			}
 			removed = append(removed, id)
-		} else {
-			remaining[id] = module
+			continue
 		}
+		remaining[id] = module
 	}
 
 	return remaining, removed, nil
 }
 
+// underRoots reports whether pkg is under one of roots, and false for pkg=nil.
+func underRoots(pkg *ast.Package, roots map[string]struct{}) (bool, error) {
+	if pkg == nil {
+		return false, nil
+	}
+	path, err := storage.NewPathForRef(pkg.Path)
+	if err != nil {
+		return false, err
+	}
+	for root := range roots {
+		if rootPathsContainSegments([]string{root}, path) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// packageOnly parses the package statement of a module if it is the first
+// non-comment line, and returns nil if it is not or cannot be parsed alone.
+func packageOnly(bs []byte) *ast.Package {
+	for line := range bytes.Lines(bs) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 || line[0] == '#' {
+			continue
+		}
+		if !bytes.HasPrefix(line, []byte("package ")) {
+			return nil
+		}
+		pkg, err := ast.ParsePackage(util.ByteSliceToString(line))
+		if err != nil {
+			return nil
+		}
+		return pkg
+	}
+	return nil
+}
+
 func writeManifestToStore(opts *ActivateOpts, name string, manifest Manifest) error {
 	// Always write manifests to the named location. If the plugin is in the older style config
 	// then also write to the old legacy unnamed location.
-	if err := WriteManifestToStore(opts.Ctx, opts.Store, opts.Txn, name, manifest); err != nil {
-		return err
+	err := WriteManifestToStore(opts.Ctx, opts.Store, opts.Txn, name, manifest)
+	if err == nil && opts.legacy {
+		err = LegacyWriteManifestToStore(opts.Ctx, opts.Store, opts.Txn, manifest)
 	}
 
-	if opts.legacy {
-		if err := LegacyWriteManifestToStore(opts.Ctx, opts.Store, opts.Txn, manifest); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return err
 }
 
 func writeEtagToStore(opts *ActivateOpts, name, etag string) error {
-	if err := WriteEtagToStore(opts.Ctx, opts.Store, opts.Txn, name, etag); err != nil {
-		return err
-	}
-
-	return nil
+	return WriteEtagToStore(opts.Ctx, opts.Store, opts.Txn, name, etag)
 }
 
 func writeModuleRegoVersionToStore(ctx context.Context, store storage.Store, txn storage.Transaction, b *Bundle,
-	mf ModuleFile, storagePath string, runtimeRegoVersion ast.RegoVersion) error {
-
+	mf ModuleFile, storagePath string, runtimeRegoVersion ast.RegoVersion,
+) error {
 	var regoVersion ast.RegoVersion
 	if mf.Parsed != nil {
-		regoVersion = mf.Parsed.RegoVersion()
+		regoVersion = mf.Parsed.RegoVersionSpan().Min()
 	}
 
 	if regoVersion == ast.RegoUndefined {
@@ -876,7 +899,9 @@ func writeModuleRegoVersionToStore(ctx context.Context, store storage.Store, txn
 		}
 	}
 
-	if regoVersion != ast.RegoUndefined && regoVersion != runtimeRegoVersion {
+	// A module without a recorded rego-version is read back at the runtime's, so only record one
+	// whose integer form differs. An undefined runtime records every version.
+	if regoVersion != ast.RegoUndefined && (runtimeRegoVersion == ast.RegoUndefined || regoVersion.Int() != runtimeRegoVersion.Int()) {
 		if err := write(ctx, store, txn, moduleRegoVersionPath(storagePath), regoVersion.Int()); err != nil {
 			return fmt.Errorf("failed to write rego version for module '%s': %w", storagePath, err)
 		}
@@ -933,7 +958,7 @@ func writeDataAndModules(ctx context.Context, store storage.Store, txn storage.T
 					if m := f.module; m != nil {
 						// 'f.module.Path' contains the module's path as it relates to the bundle root, and can be used for looking up the rego-version.
 						// 'f.Path' can differ, based on how the bundle reader was initialized.
-						if err := writeModuleRegoVersionToStore(ctx, store, txn, b, *m, p.String(), runtimeRegoVersion); err != nil {
+						if err := writeModuleRegoVersionToStore(ctx, store, txn, b, *m, p.PolicyID(), runtimeRegoVersion); err != nil {
 							return err
 						}
 					}
@@ -965,10 +990,17 @@ func writeData(ctx context.Context, store storage.Store, txn storage.Transaction
 	return nil
 }
 
-func compileModules(compiler *ast.Compiler, m metrics.Metrics, bundles map[string]*Bundle, extraModules map[string]*ast.Module, legacy bool, authorizationDecisionRef ast.Ref) error {
-
+func compileModules(compiler *ast.Compiler, m metrics.Metrics, bundles map[string]*Bundle, extraModules map[string]*ast.Module, legacy bool, authorizationDecisionRef ast.Ref, externalSources *util.HasherMap[ast.Ref, ast.ExternalRuleSource]) error {
 	m.Timer(metrics.RegoModuleCompile).Start()
 	defer m.Timer(metrics.RegoModuleCompile).Stop()
+
+	// Apply external sources before compilation
+	if externalSources != nil {
+		externalSources.Iter(func(ref ast.Ref, source ast.ExternalRuleSource) bool {
+			compiler = compiler.WithExternalSource(ref, source)
+			return false
+		})
+	}
 
 	modules := make(map[string]*ast.Module, len(compiler.Modules)+len(extraModules)+len(bundles))
 
@@ -993,58 +1025,11 @@ func compileModules(compiler *ast.Compiler, m metrics.Metrics, bundles map[strin
 		return compiler.Errors
 	}
 
-	if authorizationDecisionRef.Equal(ast.EmptyRef()) {
+	if authorizationDecisionRef.Equal(ast.InternedEmptyRefValue) {
 		return nil
 	}
 
 	return iCompiler.VerifyAuthorizationPolicySchema(compiler, authorizationDecisionRef)
-}
-
-func writeModules(ctx context.Context, store storage.Store, txn storage.Transaction, compiler *ast.Compiler, m metrics.Metrics, bundles map[string]*Bundle, extraModules map[string]*ast.Module, legacy bool) error {
-
-	m.Timer(metrics.RegoModuleCompile).Start()
-	defer m.Timer(metrics.RegoModuleCompile).Stop()
-
-	modules := map[string]*ast.Module{}
-
-	// preserve any modules already on the compiler
-	maps.Copy(modules, compiler.Modules)
-
-	// preserve any modules passed in from the store
-	maps.Copy(modules, extraModules)
-
-	// include all the new bundle modules
-	for bundleName, b := range bundles {
-		if legacy {
-			for _, mf := range b.Modules {
-				modules[mf.Path] = mf.Parsed
-			}
-		} else {
-			maps.Copy(modules, b.ParsedModules(bundleName))
-		}
-	}
-
-	if compiler.Compile(modules); compiler.Failed() {
-		return compiler.Errors
-	}
-	for bundleName, b := range bundles {
-		for _, mf := range b.Modules {
-			var path string
-
-			// For backwards compatibility, in legacy mode, upsert policies to
-			// the unprefixed path.
-			if legacy {
-				path = mf.Path
-			} else {
-				path = modulePathWithPrefix(bundleName, mf.Path)
-			}
-
-			if err := store.UpsertPolicy(ctx, txn, path, mf.Raw); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
 }
 
 func lookup(path storage.Path, data map[string]any) (any, bool) {
@@ -1066,67 +1051,164 @@ func lookup(path storage.Path, data map[string]any) (any, bool) {
 	return value, ok
 }
 
+// rootEntry is a (bundle, root) pair, used for the
+// sort-and-scan algorithm in hasRootsOverlap.
+type rootEntry struct {
+	bundle    string
+	canonical string // cannonicalized bundle root path
+}
+
+// displayRoot is used for cleaner error messages.
+func (e rootEntry) displayRoot() string {
+	return strings.Trim(e.canonical, "/")
+}
+
+// canonicalRoot normalizes a raw bundle root so that string prefix
+// matching correctly handles path segments.
+// Example: "/a/b/" is a prefix of "/a/b/c/" but not of "/a/bc/".
+func canonicalRoot(raw string) string {
+	trimmed := strings.Trim(raw, "/")
+	if trimmed == "" {
+		return "/"
+	}
+	return "/" + trimmed + "/"
+}
+
+// appendRootEntries appends one rootEntry per root in the `roots` slice
+// to the `entries` slice, returning the updated entries list. Bundles
+// declaring an empty root are tracked in `bundlesWithEmptyRoots` for the
+// empty-root error-message special case.
+func appendRootEntries(entries []rootEntry, bundlesWithEmptyRoots map[string]bool, name string, roots []string) []rootEntry {
+	for _, raw := range roots {
+		if raw == "" {
+			bundlesWithEmptyRoots[name] = true
+		}
+		entries = append(entries, rootEntry{
+			bundle:    name,
+			canonical: canonicalRoot(raw),
+		})
+	}
+	return entries
+}
+
+// hasRootsOverlap verifies that the roots declared by the bundles being
+// activated do not collide with each other or with any bundle already
+// present in the store.
+//
+// Intuition: We sort all paths lexicographically, then scan forward for
+// prefix matches. Prefix matches == collisions. This works because
+// shorter path prefixes will always be sorted ahead of any colliding
+// longer paths.
+//
+// We use one loop to scan for exact matches. This forms a group of known
+// conflicting paths. We then scan forward from that group until we hit
+// a path which does not have our root path as the prefix. We then generate
+// the conflict sets for all of the paths in the group against each other,
+// and then against any conflicting longer paths.
+//
+// All conflicts among the post-activation root set are reported.
+// Existing bundles in the store are assumed conflict-free with each
+// other — an invariant maintained because each was checked against the
+// store at its own activation time. Replacing a bundle takes its new
+// roots only; the store's stale view of that bundle is discarded
+// during setup so it can't produce phantom conflicts against the
+// replacement's own new roots.
 func hasRootsOverlap(ctx context.Context, store storage.Store, txn storage.Transaction, newBundles map[string]*Bundle) error {
 	storeBundles, err := ReadBundleNamesFromStore(ctx, store, txn)
 	if suppressNotFound(err) != nil {
 		return err
 	}
 
-	allRoots := map[string][]string{}
+	// Flatten every root (existing + new) into one entry list. A bundle
+	// being re-activated takes its roots from newBundles only; the
+	// store's stale view of that bundle is skipped.
 	bundlesWithEmptyRoots := map[string]bool{}
+	entries := make([]rootEntry, 0, len(storeBundles)+2*len(newBundles))
 
-	// Build a map of roots for existing bundles already in the system
 	for _, name := range storeBundles {
+		if _, replaced := newBundles[name]; replaced {
+			continue
+		}
 		roots, err := ReadBundleRootsFromStore(ctx, store, txn, name)
 		if suppressNotFound(err) != nil {
 			return err
 		}
-		allRoots[name] = roots
-		if slices.Contains(roots, "") {
-			bundlesWithEmptyRoots[name] = true
-		}
+		entries = appendRootEntries(entries, bundlesWithEmptyRoots, name, roots)
 	}
-
-	// Add in any bundles that are being activated, overwrite existing roots
-	// with new ones where bundles are in both groups.
 	for name, bundle := range newBundles {
-		allRoots[name] = *bundle.Manifest.Roots
-		if slices.Contains(*bundle.Manifest.Roots, "") {
-			bundlesWithEmptyRoots[name] = true
-		}
+		entries = appendRootEntries(entries, bundlesWithEmptyRoots, name, *bundle.Manifest.Roots)
 	}
 
-	// Now check for each new bundle if it conflicts with any of the others
+	// Sort the bundle roots list.
+	slices.SortFunc(entries, func(a, b rootEntry) int {
+		if c := strings.Compare(a.canonical, b.canonical); c != 0 {
+			return c
+		}
+		return strings.Compare(a.bundle, b.bundle)
+	})
+
 	collidingBundles := map[string]bool{}
 	conflictSet := map[string]bool{}
-	for name, bundle := range newBundles {
-		for otherBundle, otherRoots := range allRoots {
-			if name == otherBundle {
-				// Skip the current bundle being checked
-				continue
+	groupBundles := map[string]bool{} // reused across iterations via clear()
+
+	// Scan through the sorted list of bundle root paths iteratively,
+	// identifying conflict groups for later reporting at the end.
+	// If there's a cluster of exact path matches, we can advance the
+	// groupStart index to the end of that group after we've accounted
+	// for the conflicts.
+	for groupStart := 0; groupStart < len(entries); {
+		// Identify the group of entries sharing the
+		// exact same canonical root.
+		groupEnd := groupStart + 1
+		for groupEnd < len(entries) && entries[groupEnd].canonical == entries[groupStart].canonical {
+			groupEnd++
+		}
+
+		clear(groupBundles) // Reuse the conflict group map.
+		for k := groupStart; k < groupEnd; k++ {
+			groupBundles[entries[k].bundle] = true
+		}
+
+		// Same-root conflict: more than one bundle shares this root.
+		if len(groupBundles) > 1 {
+			for k := groupStart; k < groupEnd; k++ {
+				collidingBundles[entries[k].bundle] = true
+			}
+			conflictSet[fmt.Sprintf("root %s is in multiple bundles", entries[groupStart].displayRoot())] = true
+		}
+
+		groupCanonical := entries[groupStart].canonical
+		groupDisplay := entries[groupStart].displayRoot()
+
+		// Descendant conflicts: forward scan while the group's canonical
+		// root is a prefix of the next entry's canonical root.
+		for d := groupEnd; d < len(entries); d++ {
+			// Break if next entry isn't a conflict.
+			if !strings.HasPrefix(entries[d].canonical, groupCanonical) {
+				break
 			}
 
-			// Compare the "new" roots with other existing (or a different bundles new roots)
-			for _, newRoot := range *bundle.Manifest.Roots {
-				for _, otherRoot := range otherRoots {
-					if !RootPathsOverlap(newRoot, otherRoot) {
-						continue
-					}
-
-					collidingBundles[name] = true
-					collidingBundles[otherBundle] = true
-
-					// Different message required if the roots are same
-					if newRoot == otherRoot {
-						conflictSet[fmt.Sprintf("root %s is in multiple bundles", newRoot)] = true
-					} else {
-						paths := []string{newRoot, otherRoot}
-						sort.Strings(paths)
-						conflictSet[fmt.Sprintf("%s overlaps %s", paths[0], paths[1])] = true
-					}
+			// Pair the descendant against every group entry from a different bundle.
+			sawCrossBundleConflict := false
+			for k := groupStart; k < groupEnd; k++ {
+				if entries[k].bundle == entries[d].bundle {
+					continue
 				}
+				collidingBundles[entries[k].bundle] = true
+				sawCrossBundleConflict = true
+			}
+
+			// Only record a conflict if the descendant overlaps with an
+			// ancestor declared by a different bundle. A single bundle
+			// is allowed to declare overlapping roots in its own manifest.
+			if sawCrossBundleConflict {
+				collidingBundles[entries[d].bundle] = true
+				paths := util.Sorted([]string{groupDisplay, entries[d].displayRoot()})
+				conflictSet[fmt.Sprintf("%s overlaps %s", paths[0], paths[1])] = true
 			}
 		}
+
+		groupStart = groupEnd
 	}
 
 	if len(collidingBundles) == 0 {
@@ -1192,8 +1274,10 @@ func applyPatches(ctx context.Context, store storage.Store, txn storage.Transact
 // LegacyManifestStoragePath is the older unnamed bundle path for manifests to be stored.
 //
 // Deprecated: Use ManifestStoragePath and named bundles instead.
-var legacyManifestStoragePath = storage.MustParsePath("/system/bundle/manifest")
-var legacyRevisionStoragePath = append(legacyManifestStoragePath, "revision")
+var (
+	legacyManifestStoragePath = storage.MustParsePath("/system/bundle/manifest")
+	legacyRevisionStoragePath = append(legacyManifestStoragePath, "revision")
+)
 
 // LegacyWriteManifestToStore will write the bundle manifest to the older single (unnamed) bundle manifest location.
 //
@@ -1206,11 +1290,7 @@ func LegacyWriteManifestToStore(ctx context.Context, store storage.Store, txn st
 //
 // Deprecated: Use WriteManifestToStore and named bundles instead.
 func LegacyEraseManifestFromStore(ctx context.Context, store storage.Store, txn storage.Transaction) error {
-	err := store.Write(ctx, txn, storage.RemoveOp, legacyManifestStoragePath, nil)
-	if err != nil {
-		return err
-	}
-	return nil
+	return store.Write(ctx, txn, storage.RemoveOp, legacyManifestStoragePath, nil)
 }
 
 // LegacyReadRevisionFromStore will read the bundle manifest revision from the older single (unnamed) bundle manifest location.

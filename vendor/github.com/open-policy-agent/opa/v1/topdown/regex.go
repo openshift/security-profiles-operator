@@ -14,6 +14,7 @@ import (
 
 	"github.com/open-policy-agent/opa/v1/ast"
 	"github.com/open-policy-agent/opa/v1/topdown/builtins"
+	"github.com/open-policy-agent/opa/v1/util"
 )
 
 const (
@@ -25,6 +26,41 @@ var (
 	regexpCacheLock = sync.RWMutex{}
 	regexpCache     = make(map[string]*regexp.Regexp)
 )
+
+func regexpCacheGet(pat string) (*regexp.Regexp, error) {
+	regexpCacheLock.RLock()
+	v, ok := regexpCache[pat]
+	regexpCacheLock.RUnlock()
+	if ok {
+		return v, nil
+	}
+
+	// cache miss!
+	re, err := regexp.Compile(pat)
+	if err != nil {
+		return nil, err
+	}
+
+	regexpCacheLock.Lock()
+
+	// Ensure the cache is below the max size.
+	for len(regexpCache) >= regexCacheMaxSize {
+		// Since every caller inserts at most one item, we expect this
+		// loop to run for at most one iteration.
+		for k := range regexpCache {
+			// Go map iteration is semi-random, so this deletes a
+			// more or less arbitrary key.
+			delete(regexpCache, k)
+			break
+		}
+	}
+
+	regexpCache[pat] = re
+
+	regexpCacheLock.Unlock()
+	return re, nil
+
+}
 
 func builtinRegexIsValid(_ BuiltinContext, operands []*ast.Term, iter func(*ast.Term) error) error {
 	if s, err := builtins.StringOperand(operands[0].Value, 1); err == nil {
@@ -129,46 +165,16 @@ func getRegexp(bctx BuiltinContext, pat string) (*regexp.Regexp, error) {
 		return re, nil
 	}
 
-	regexpCacheLock.RLock()
-	re, ok := regexpCache[pat]
-	numCached := len(regexpCache)
-	regexpCacheLock.RUnlock()
-	if !ok {
-		var err error
-		re, err = regexp.Compile(pat)
-		if err != nil {
-			return nil, err
-		}
-
-		regexpCacheLock.Lock()
-		if numCached >= regexCacheMaxSize {
-			// Delete a (semi-)random key to make room for the new one.
-			for k := range regexpCache {
-				delete(regexpCache, k)
-				break
-			}
-		}
-		regexpCache[pat] = re
-		regexpCacheLock.Unlock()
-	}
-	return re, nil
+	return regexpCacheGet(pat)
 }
 
 func getRegexpTemplate(pat string, delimStart, delimEnd byte) (*regexp.Regexp, error) {
-	regexpCacheLock.RLock()
-	re, ok := regexpCache[pat]
-	regexpCacheLock.RUnlock()
-	if !ok {
-		var err error
-		re, err = compileRegexTemplate(pat, delimStart, delimEnd)
-		if err != nil {
-			return nil, err
-		}
-		regexpCacheLock.Lock()
-		regexpCache[pat] = re
-		regexpCacheLock.Unlock()
+	gen, err := generateRegexTemplate(pat, delimStart, delimEnd)
+	if err != nil {
+		return nil, err
 	}
-	return re, nil
+
+	return regexpCacheGet(gen)
 }
 
 func builtinGlobsMatch(_ BuiltinContext, operands []*ast.Term, iter func(*ast.Term) error) error {
@@ -277,8 +283,8 @@ func builtinRegexReplace(bctx BuiltinContext, operands []*ast.Term, iter func(*a
 
 	// Use sink writer for cancellation-aware replacement
 	sink := newSink(ast.RegexReplace.Name, len(base), bctx.Cancel)
-	src := []byte(base)
-	repl := []byte(value)
+	src := util.StringToByteSlice(base)
+	repl := util.StringToByteSlice(value)
 
 	// Find all matches at once to preserve anchor behavior: replace("foo", "^[a-z]", "F") => "Foo"
 	allMatches := re.FindAllSubmatchIndex(src, -1)

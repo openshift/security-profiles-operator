@@ -23,13 +23,14 @@
 //
 // created          26-02-2013
 
-// nolint:unused,varcheck // Package in development (2021).
 package gojsonschema
 
 import (
 	"encoding/json"
 	"math/big"
 	"slices"
+
+	"github.com/open-policy-agent/opa/v1/util"
 )
 
 func isStringInSlice(s []string, what string) bool {
@@ -133,20 +134,11 @@ func mustBeNumber(what any) *big.Rat {
 }
 
 func convertDocumentNode(val any) any {
-
 	if lval, ok := val.([]any); ok {
-
-		res := []any{}
-		for _, v := range lval {
-			res = append(res, convertDocumentNode(v))
-		}
-
-		return res
-
+		return util.Map(lval, convertDocumentNode)
 	}
 
 	if mval, ok := val.(map[any]any); ok {
-
 		res := map[string]any{}
 
 		for k, v := range mval {
@@ -154,7 +146,6 @@ func convertDocumentNode(val any) any {
 		}
 
 		return res
-
 	}
 
 	return val

@@ -41,7 +41,7 @@ type BaseCache interface {
 }
 
 type virtualCache struct {
-	stack []*virtualCacheElem
+	stack util.SliceStack[*virtualCacheElem]
 }
 
 type virtualCacheElem struct {
@@ -57,11 +57,11 @@ func NewVirtualCache() VirtualCache {
 }
 
 func (c *virtualCache) Push() {
-	c.stack = append(c.stack, newVirtualCacheElem())
+	c.stack.Push(newVirtualCacheElem())
 }
 
 func (c *virtualCache) Pop() {
-	c.stack = c.stack[:len(c.stack)-1]
+	c.stack.Pop()
 }
 
 // Returns the resolved value of the AST term and a flag indicating if the value
@@ -72,7 +72,7 @@ func (c *virtualCache) Pop() {
 //	nil, false indicates the ref has not been cached
 //	ast.Term, true is impossible
 func (c *virtualCache) Get(ref ast.Ref) (*ast.Term, bool) {
-	node := c.stack[len(c.stack)-1]
+	node := c.stack.Peek()
 	for i := range ref {
 		x, ok := node.children.Get(ref[i])
 		if !ok {
@@ -90,13 +90,16 @@ func (c *virtualCache) Get(ref ast.Ref) (*ast.Term, bool) {
 // If value is a nil pointer, set the 'undefined' flag on the cache element to
 // indicate that the Ref has resolved to undefined.
 func (c *virtualCache) Put(ref ast.Ref, value *ast.Term) {
-	node := c.stack[len(c.stack)-1]
+	node := c.stack.Peek()
 	for i := range ref {
 		x, ok := node.children.Get(ref[i])
 		if ok {
 			node = x
 		} else {
 			next := newVirtualCacheElem()
+			if node.children == nil {
+				node.children = newVirtualCacheHashMap()
+			}
 			node.children.Put(ref[i], next)
 			node = next
 		}
@@ -109,7 +112,7 @@ func (c *virtualCache) Put(ref ast.Ref, value *ast.Term) {
 }
 
 func (c *virtualCache) Keys() []ast.Ref {
-	node := c.stack[len(c.stack)-1]
+	node := c.stack.Peek()
 	return keysRecursive(nil, node)
 }
 
@@ -128,12 +131,13 @@ func keysRecursive(root ast.Ref, node *virtualCacheElem) []ast.Ref {
 	return keys
 }
 
+// children is allocated on first insert: most frames, and every leaf, never get one.
 func newVirtualCacheElem() *virtualCacheElem {
-	return &virtualCacheElem{children: newVirtualCacheHashMap()}
+	return &virtualCacheElem{}
 }
 
 func newVirtualCacheHashMap() *util.HasherMap[*ast.Term, *virtualCacheElem] {
-	return util.NewHasherMap[*ast.Term, *virtualCacheElem](ast.TermValueEqual)
+	return util.NewHasherMap[*ast.Term, *virtualCacheElem]((*ast.Term).Equal)
 }
 
 // baseCache implements a trie structure to cache base documents read out of
@@ -144,7 +148,7 @@ type baseCache struct {
 	root *baseCacheElem
 }
 
-func newBaseCache() *baseCache {
+func newBaseCache() BaseCache {
 	return &baseCache{
 		root: newBaseCacheElem(),
 	}
@@ -180,6 +184,9 @@ func (c *baseCache) Put(ref ast.Ref, value ast.Value) {
 			node = child
 		} else {
 			child := newBaseCacheElem()
+			if node.children == nil {
+				node.children = map[ast.Value]*baseCacheElem{}
+			}
 			node.children[ref[i].Value] = child
 			node = child
 		}
@@ -193,18 +200,16 @@ type baseCacheElem struct {
 }
 
 func newBaseCacheElem() *baseCacheElem {
-	return &baseCacheElem{
-		children: map[ast.Value]*baseCacheElem{},
-	}
+	return &baseCacheElem{}
 }
 
 func (e *baseCacheElem) set(value ast.Value) {
 	e.value = value
-	e.children = map[ast.Value]*baseCacheElem{}
+	e.children = nil
 }
 
 type refStack struct {
-	sl []refStackElem
+	sl util.SliceStack[refStackElem]
 }
 
 type refStackElem struct {
@@ -216,20 +221,21 @@ func newRefStack() *refStack {
 }
 
 func (s *refStack) Push(refs []ast.Ref) {
-	s.sl = append(s.sl, refStackElem{refs: refs})
+	s.sl.Push(refStackElem{refs: refs})
 }
 
 func (s *refStack) Pop() {
 	if s == nil {
 		return
 	}
-	s.sl = s.sl[:len(s.sl)-1]
+	s.sl.Pop()
 }
 
 func (s *refStack) Prefixed(ref ast.Ref) bool {
 	if s != nil {
-		for i := len(s.sl) - 1; i >= 0; i-- {
-			if slices.ContainsFunc(s.sl[i].refs, ref.HasPrefix) {
+		sl := s.sl.Slice()
+		for _, s := range slices.Backward(sl) {
+			if slices.ContainsFunc(s.refs, ref.HasPrefix) {
 				return true
 			}
 		}
@@ -238,7 +244,7 @@ func (s *refStack) Prefixed(ref ast.Ref) bool {
 }
 
 type comprehensionCache struct {
-	stack []map[*ast.Term]*comprehensionCacheElem
+	stack util.SliceStack[map[*ast.Term]*comprehensionCacheElem]
 }
 
 type comprehensionCacheElem struct {
@@ -253,20 +259,24 @@ func newComprehensionCache() *comprehensionCache {
 }
 
 func (c *comprehensionCache) Push() {
-	c.stack = append(c.stack, map[*ast.Term]*comprehensionCacheElem{})
+	c.stack.Push(nil) // allocated by Set, a frame is often never written to
 }
 
 func (c *comprehensionCache) Pop() {
-	c.stack = c.stack[:len(c.stack)-1]
+	c.stack.Pop()
 }
 
 func (c *comprehensionCache) Elem(t *ast.Term) (*comprehensionCacheElem, bool) {
-	elem, ok := c.stack[len(c.stack)-1][t]
+	elem, ok := c.stack.Peek()[t]
 	return elem, ok
 }
 
 func (c *comprehensionCache) Set(t *ast.Term, elem *comprehensionCacheElem) {
-	c.stack[len(c.stack)-1][t] = elem
+	top := c.stack.PeekPtr()
+	if *top == nil {
+		*top = map[*ast.Term]*comprehensionCacheElem{}
+	}
+	(*top)[t] = elem
 }
 
 func newComprehensionCacheElem() *comprehensionCacheElem {
@@ -301,14 +311,12 @@ func (c *comprehensionCacheElem) Put(key []*ast.Term, value *ast.Term) {
 }
 
 func newComprehensionCacheHashMap() *util.HasherMap[*ast.Term, *comprehensionCacheElem] {
-	return util.NewHasherMap[*ast.Term, *comprehensionCacheElem](ast.TermValueEqual)
+	return util.NewHasherMap[*ast.Term, *comprehensionCacheElem]((*ast.Term).Equal)
 }
 
 type functionMocksStack struct {
-	stack []*functionMocksElem
+	stack util.GroupStack[frame]
 }
-
-type functionMocksElem []frame
 
 type frame map[string]*ast.Term
 
@@ -318,25 +326,24 @@ func newFunctionMocksStack() *functionMocksStack {
 	return stack
 }
 
-func newFunctionMocksElem() *functionMocksElem {
-	return &functionMocksElem{}
-}
-
 func (s *functionMocksStack) Push() {
-	s.stack = append(s.stack, newFunctionMocksElem())
+	s.stack.PushGroup(nil)
 }
 
 func (s *functionMocksStack) Pop() {
-	s.stack = s.stack[:len(s.stack)-1]
+	s.stack.PopGroup()
 }
 
 func (s *functionMocksStack) PopPairs() {
-	current := s.stack[len(s.stack)-1]
-	*current = (*current)[:len(*current)-1]
+	s.stack.Pop()
 }
 
 func (s *functionMocksStack) PutPairs(mocks [][2]*ast.Term) {
-	el := frame{}
+	if len(mocks) == 0 {
+		s.Put(nil) // keeps PopPairs balanced
+		return
+	}
+	el := make(frame, len(mocks))
 	for i := range mocks {
 		el[mocks[i][0].Value.String()] = mocks[i][1]
 	}
@@ -344,8 +351,7 @@ func (s *functionMocksStack) PutPairs(mocks [][2]*ast.Term) {
 }
 
 func (s *functionMocksStack) Put(el frame) {
-	current := s.stack[len(s.stack)-1]
-	*current = append(*current, el)
+	s.stack.Push(el)
 }
 
 func (s *functionMocksStack) Get(f ast.Ref) (*ast.Term, bool) {
@@ -353,9 +359,9 @@ func (s *functionMocksStack) Get(f ast.Ref) (*ast.Term, bool) {
 		return nil, false
 	}
 
-	current := *s.stack[len(s.stack)-1]
-	for i := len(current) - 1; i >= 0; i-- {
-		if r, ok := current[i][f.String()]; ok {
+	current := s.stack.PeekGroup()
+	for _, c := range slices.Backward(current) {
+		if r, ok := c[f.String()]; ok {
 			return r, true
 		}
 	}

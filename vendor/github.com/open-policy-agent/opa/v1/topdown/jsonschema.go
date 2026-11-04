@@ -10,6 +10,7 @@ import (
 
 	"github.com/open-policy-agent/opa/internal/gojsonschema"
 	"github.com/open-policy-agent/opa/v1/ast"
+	"github.com/open-policy-agent/opa/v1/util"
 )
 
 // astValueToJSONSchemaLoader converts a value to JSON Loader.
@@ -23,7 +24,7 @@ func astValueToJSONSchemaLoader(value ast.Value) (gojsonschema.JSONLoader, error
 	case ast.String:
 		// In case of string pass it as is as a raw JSON string.
 		// Make pre-check that it's a valid JSON at all because gojsonschema won't do that.
-		if !json.Valid([]byte(x)) {
+		if !json.Valid(util.StringToByteSlice(x)) {
 			return nil, errors.New("invalid JSON string")
 		}
 		loader = gojsonschema.NewStringLoader(string(x))
@@ -47,9 +48,33 @@ func newResultTerm(valid bool, data *ast.Term) *ast.Term {
 	return ast.ArrayTerm(ast.InternedTerm(valid), data)
 }
 
+// newPatternValidatingSchemaLoader returns a SchemaLoader configured to
+// compile and enforce the "pattern" keyword. This is the variant used by the
+// json.verify_schema and json.match_schema built-ins, where runtime pattern
+// validation is expected. It is intentionally not shared with the compile-time
+// type-checking path, where pattern validation is disabled to tolerate
+// schemas containing ECMA-262 regex features that Go's RE2 dialect can't
+// compile.
+//
+// Remote reference fetching is restricted to the hosts in the caller's
+// allow_net capability. Schemas reaching these built-ins come from the policy
+// or, worse, from input, so an unrestricted loader would let a `$ref` drive
+// outbound requests from wherever OPA happens to be deployed. The query's
+// context comes along so that those fetches are abandoned when evaluation is
+// cancelled.
+func newPatternValidatingSchemaLoader(bctx BuiltinContext) *gojsonschema.SchemaLoader {
+	sl := gojsonschema.NewSchemaLoader()
+	sl.ValidatePatterns = true
+	sl.Context = bctx.Context
+	if bctx.Capabilities != nil {
+		sl.AllowNet = bctx.Capabilities.AllowNet
+	}
+	return sl
+}
+
 // builtinJSONSchemaVerify accepts 1 argument which can be string or object and checks if it is valid JSON schema.
 // Returns array [false, <string>] with error string at index 1, or [true, ""] with empty string at index 1 otherwise.
-func builtinJSONSchemaVerify(_ BuiltinContext, operands []*ast.Term, iter func(*ast.Term) error) error {
+func builtinJSONSchemaVerify(bctx BuiltinContext, operands []*ast.Term, iter func(*ast.Term) error) error {
 	// Take first argument and make JSON Loader from it.
 	loader, err := astValueToJSONSchemaLoader(operands[0].Value)
 	if err != nil {
@@ -57,7 +82,7 @@ func builtinJSONSchemaVerify(_ BuiltinContext, operands []*ast.Term, iter func(*
 	}
 
 	// Check that schema is correct and parses without errors.
-	if _, err = gojsonschema.NewSchema(loader); err != nil {
+	if _, err = newPatternValidatingSchemaLoader(bctx).Compile(loader); err != nil {
 		return iter(newResultTerm(false, ast.StringTerm("jsonschema: "+err.Error())))
 	}
 
@@ -67,6 +92,11 @@ func builtinJSONSchemaVerify(_ BuiltinContext, operands []*ast.Term, iter func(*
 // builtinJSONMatchSchema accepts 2 arguments both can be string or object and verifies if the document matches the JSON schema.
 // Returns an array where first element is a boolean indicating a successful match, and the second is an array of errors that is empty on success and populated on failure.
 // In case of internal error returns empty array.
+//
+// Cached schemas are keyed on the schema value alone. A compiled schema has
+// already resolved its remote references, so a cache shared between callers
+// with differing allow_net would leak across them. That needs a deliberately
+// shared cache, an assumption http.send makes as well.
 func builtinJSONMatchSchema(bctx BuiltinContext, operands []*ast.Term, iter func(*ast.Term) error) error {
 	var schema *gojsonschema.Schema
 
@@ -93,7 +123,7 @@ func builtinJSONMatchSchema(bctx BuiltinContext, operands []*ast.Term, iter func
 			return err
 		}
 
-		schema, err = gojsonschema.NewSchema(schemaLoader)
+		schema, err = newPatternValidatingSchemaLoader(bctx).Compile(schemaLoader)
 		if err != nil {
 			return err
 		}

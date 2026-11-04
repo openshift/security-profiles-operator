@@ -13,8 +13,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	go_metrics "github.com/rcrowley/go-metrics"
 )
 
 // Well-known metric names.
@@ -260,26 +258,33 @@ type Histogram interface {
 }
 
 type histogram struct {
-	hist go_metrics.Histogram // is thread-safe because of the underlying ExpDecaySample
+	sample *expDecaySample
 }
 
 func newHistogram() Histogram {
 	// NOTE(tsandall): the reservoir size and alpha factor are taken from
 	// https://github.com/rcrowley/go-metrics. They may need to be tweaked in
 	// the future.
-	sample := go_metrics.NewExpDecaySample(1028, 0.015)
-	hist := go_metrics.NewHistogram(sample)
-	return &histogram{hist}
+	return &histogram{sample: newExpDecaySample(1028, 0.015)}
 }
 
 func (h *histogram) Update(v int64) {
-	h.hist.Update(v)
+	h.sample.Update(v)
 }
 
 func (h *histogram) Value() any {
 	values := make(map[string]any, 12)
-	snap := h.hist.Snapshot()
-	percentiles := snap.Percentiles([]float64{
+	count, vals := h.sample.snapshot()
+	var minV, maxV int64
+	if len(vals) > 0 {
+		minV, maxV = slices.Min(vals), slices.Max(vals)
+	}
+	values["count"] = count
+	values["min"] = minV
+	values["max"] = maxV
+	values["mean"] = mean(vals)
+	values["stddev"] = stdDev(vals)
+	ps := percentiles(vals, []float64{
 		0.5,
 		0.75,
 		0.9,
@@ -288,18 +293,13 @@ func (h *histogram) Value() any {
 		0.999,
 		0.9999,
 	})
-	values["count"] = snap.Count()
-	values["min"] = snap.Min()
-	values["max"] = snap.Max()
-	values["mean"] = snap.Mean()
-	values["stddev"] = snap.StdDev()
-	values["median"] = percentiles[0]
-	values["75%"] = percentiles[1]
-	values["90%"] = percentiles[2]
-	values["95%"] = percentiles[3]
-	values["99%"] = percentiles[4]
-	values["99.9%"] = percentiles[5]
-	values["99.99%"] = percentiles[6]
+	values["median"] = ps[0]
+	values["75%"] = ps[1]
+	values["90%"] = ps[2]
+	values["95%"] = ps[3]
+	values["99%"] = ps[4]
+	values["99.9%"] = ps[5]
+	values["99.99%"] = ps[6]
 	return values
 }
 
@@ -311,19 +311,19 @@ type Counter interface {
 }
 
 type counter struct {
-	c uint64
+	c atomic.Uint64
 }
 
 func (c *counter) Incr() {
-	atomic.AddUint64(&c.c, 1)
+	c.c.Add(1)
 }
 
 func (c *counter) Add(n uint64) {
-	atomic.AddUint64(&c.c, n)
+	c.c.Add(n)
 }
 
 func (c *counter) Value() any {
-	return atomic.LoadUint64(&c.c)
+	return c.c.Load()
 }
 
 func Statistics(num ...int64) any {
@@ -346,12 +346,12 @@ var (
 	noOpCounterInstance   = &noOpCounter{}
 )
 
-func (*noOpMetrics) Info() Info                      { return Info{Name: "<built-in no-op>"} }
-func (*noOpMetrics) Timer(name string) Timer         { return noOpTimerInstance }
-func (*noOpMetrics) Histogram(name string) Histogram { return noOpHistogramInstance }
-func (*noOpMetrics) Counter(name string) Counter     { return noOpCounterInstance }
-func (*noOpMetrics) All() map[string]any             { return nil }
-func (*noOpMetrics) Clear()                          {}
+func (*noOpMetrics) Info() Info                 { return Info{Name: "<built-in no-op>"} }
+func (*noOpMetrics) Timer(string) Timer         { return noOpTimerInstance }
+func (*noOpMetrics) Histogram(string) Histogram { return noOpHistogramInstance }
+func (*noOpMetrics) Counter(string) Counter     { return noOpCounterInstance }
+func (*noOpMetrics) All() map[string]any        { return nil }
+func (*noOpMetrics) Clear()                     {}
 func (*noOpMetrics) MarshalJSON() ([]byte, error) {
 	return []byte(`{"name": "<built-in no-op>"}`), nil
 }
@@ -361,10 +361,10 @@ func (*noOpTimer) Stop() int64  { return 0 }
 func (*noOpTimer) Value() any   { return 0 }
 func (*noOpTimer) Int64() int64 { return 0 }
 
-func (*noOpHistogram) Update(v int64) {}
-func (*noOpHistogram) Value() any     { return nil }
+func (*noOpHistogram) Update(int64) {}
+func (*noOpHistogram) Value() any   { return nil }
 
 func (*noOpCounter) Incr()        {}
-func (*noOpCounter) Add(_ uint64) {}
+func (*noOpCounter) Add(uint64)   {}
 func (*noOpCounter) Value() any   { return 0 }
 func (*noOpCounter) Int64() int64 { return 0 }
