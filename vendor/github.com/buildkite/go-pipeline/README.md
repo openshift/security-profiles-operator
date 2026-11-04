@@ -125,6 +125,106 @@ would be represented in go as:
 
 This go struct would be marshaled back out to YAML equivalent to the original input.
 
+## Checkout
+
+The `checkout` block configures git checkout behavior for a pipeline or a command step. It supports `skip`, `submodules`, `depth`, `lfs`, `ssh_secret`, `commit_verification`, and a nested `flags` mapping. `skip`, `lfs` and `submodules` are `*bool`, so the model preserves the difference between `true`, `false`, and an absent value; `depth` (`*int`) and `ssh_secret` (`*string`) keep the same distinction between an explicit value and an absent one; `flags` carries per-phase git overrides. `commit_verification` is a `string` and supports `warn` or `strict` values.
+
+The simplest case opts a step out of checkout entirely:
+
+```yaml
+steps:
+  - command: echo "no git checkout for me"
+    checkout:
+      skip: true
+```
+
+`skip: false` at the step level explicitly overrides any pipeline-level or agent-level default that would otherwise skip checkout; an absent `skip` inherits whatever default applies. Round-trips preserve the distinction, so `skip: false` does not collapse to an empty mapping.
+
+`skip` maps to `BUILDKITE_SKIP_CHECKOUT` on the agent: `true` skips the checkout phase, absent leaves it to the agent default. `submodules` follows the same tristate pattern and maps to `BUILDKITE_GIT_SUBMODULES`: `true` and `false` set the env var explicitly, absent leaves it to the agent default.
+
+`ssh_secret` holds the name or ID of a Buildkite Secret containing an SSH private key the agent uses for git checkout. The agent owns retrieval and validation; go-pipeline only parses and round-trips the value.
+
+```yaml
+steps:
+  - command: make test
+    checkout:
+      ssh_secret: deploy-key
+```
+
+`commit_verification` enables a verification step which ensures that the specified commit SHA genuinely exists on the specified branch. Allowed values are `warn` or `strict`. `warn` logs a warning but allows the checkout to proceed; `strict` will fail the checkout with an error if it determines that the SHA doesn't exist on the branch.
+
+```yaml
+steps:
+  - command: build.sh
+    checkout:
+      commit_verification: strict
+```
+
+`flags` carries per-phase git invocation overrides for `clone`, `fetch`, `checkout`, and `clean`:
+
+```yaml
+steps:
+  - command: build.sh
+    checkout:
+      flags:
+        clone: "--depth 1"
+        fetch: "--prune"
+        checkout: "--force"
+        clean: "-fdx"
+```
+
+Each leaf is `*string`. Omitting a flag leaves whatever default the consumer applies; an explicit empty string (`clone: ""`) is preserved through round-trips and signals "no flags for this phase". Non-string scalars (`clone: 42`, `clone: true`) are rejected at parse time, since the value passes through to git as flag text and coercion would silently produce broken invocations. Unknown keys under `flags:` land in `RemainingFields`, so a pipeline using a flag name this library doesn't yet recognize still parses and round-trips cleanly.
+
+A pipeline-level `checkout` provides defaults for command steps. Inheritance is opt-in: the consumer merges pipeline values into each step. After merging the step value wins per leaf, with anything the step didn't set inherited from the pipeline, at both the top level and inside `flags`:
+
+```yaml
+checkout:
+  skip: true
+
+steps:
+  - command: echo "inherits skip: true from the pipeline"
+
+  - command: echo "explicit override - checkout runs"
+    checkout:
+      skip: false
+```
+
+After merging, the second step has `skip: false` (step wins) and the first step has `skip: true` (inherited).
+
+The conventional ordering is `Pipeline.Interpolate` first, then merge per step before dispatching to the agent.
+
+Both `checkout:` and `flags:` must be mappings. Non-mapping shapes (scalars, including the `checkout: true` / `checkout: false` shorthand, and sequences) are rejected at parse time. Opt-out is spelled `checkout: { skip: true }`.
+
+Pipelines signed before checkout was a signed field will fail to verify if the step now carries any non-empty Checkout data (for example a step that sets only `submodules`). Re-sign such pipelines when rolling forward to a verifier that includes checkout.
+
+`Checkout.Depth` is a `*int` for the same reason as `Skip`, this is distinguishable from any explicit value, so an inherited pipeline level depth can be cleanly overridden at the step level. The backend validates `depth >= 1`, this library does not.
+
+```yaml
+checkout:
+  depth: 10
+
+steps:
+  - command: echo "Shallow depth defaulting to 10 from build level checkout"
+
+  - command: echo "Deeper shallow at the step level"
+    checkout:
+      depth: 50
+```
+
+`lfs` is a `*bool` following the same tristate pattern as `skip` and `submodules`: `true` and `false` set the behaviour explicitly, an absent value leaves it to the agent default. A step inherits the pipeline-level `lfs` unless it sets its own.
+
+```yaml
+checkout:
+  lfs: true
+
+steps:
+  - command: echo "inherits lfs: true from the pipeline"
+
+  - command: echo "explicit override - no LFS for this step"
+    checkout:
+      lfs: false
+```
+
 ## What's up with the ordered module?
 
 While implementing the pipeline module, we ran into a problem: in some cases, in the buildkite pipeline.yaml, the order of map fields is significant. Because of this, whenever the pipeline gets unmarshaled from YAML or JSON, it needs to be stored in a way that preserves the order of the fields. The `ordered` module is a simple implementation of an ordered map. In most cases, when the pipeline is dealing with user-input maps, it will store them internally as `ordered.Map`s. When the pipeline is marshaled back out to YAML or JSON, the `ordered.Map`s will be marshaled in the correct order.

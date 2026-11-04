@@ -13,9 +13,10 @@ import (
 //
 // Standard caveats apply - see the package comment.
 type Pipeline struct {
-	Steps   Steps          `yaml:"steps"`
-	Env     *ordered.MapSS `yaml:"env,omitempty"`
-	Secrets Secrets        `yaml:"secrets,omitempty"`
+	Steps    Steps          `yaml:"steps"`
+	Env      *ordered.MapSS `yaml:"env,omitempty"`
+	Secrets  Secrets        `yaml:"secrets,omitempty"`
+	Checkout *Checkout      `yaml:"checkout,omitempty"`
 
 	// RemainingFields stores any other top-level mapping items so they at least
 	// survive an unmarshal-marshal round-trip.
@@ -104,6 +105,10 @@ func (p *Pipeline) Interpolate(interpolationEnv InterpolationEnv, preferRuntimeE
 		return err
 	}
 
+	if err := p.Checkout.interpolate(tf); err != nil {
+		return fmt.Errorf("interpolating checkout: %w", err)
+	}
+
 	return interpolateMap(tf, p.RemainingFields)
 }
 
@@ -113,7 +118,7 @@ func (p *Pipeline) Interpolate(interpolationEnv InterpolationEnv, preferRuntimeE
 // be interpolated into later environment variables, we also add the results
 // to interpolationEnv, making the input ordering of p.Env potentially important.
 func (p *Pipeline) interpolateEnvBlock(interpolationEnv InterpolationEnv, preferRuntimeEnv bool) error {
-	return p.Env.Range(func(k, v string) error {
+	for k, v := range p.Env.All {
 		// We interpolate both keys and values.
 		intk, err := interpolate.Interpolate(interpolationEnv, k)
 		if err != nil {
@@ -132,7 +137,6 @@ func (p *Pipeline) interpolateEnvBlock(interpolationEnv InterpolationEnv, prefer
 		if _, exists := interpolationEnv.Get(intk); !(preferRuntimeEnv && exists) {
 			interpolationEnv.Set(intk, intv)
 		}
-
-		return nil
-	})
+	}
+	return nil
 }
