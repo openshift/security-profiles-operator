@@ -87,6 +87,7 @@ package protobuf
 //                   ...}
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -302,9 +303,7 @@ func (b *Extractor) Instances() (instances []*build.Instance, err error) {
 
 		inst.Files = append(inst.Files, f)
 
-		for pkg := range r.p.imported {
-			inst.ImportPaths = append(inst.ImportPaths, pkg)
-		}
+		inst.ImportPaths = slices.AppendSeq(inst.ImportPaths, maps.Keys(r.p.imported))
 	}
 
 	for _, p := range b.imports {
@@ -401,7 +400,9 @@ func (b *Extractor) getInst(p *protoConverter) *build.Instance {
 //
 // Extract assumes the proto file compiles with protoc and may not report an error
 // if it does not. Imports are resolved using the paths defined in Config.
-func Extract(filename string, src interface{}, c *Config) (f *ast.File, err error) {
+//
+// The result can be converted to a [cue.Value] via [cue.Context.BuildFile].
+func Extract(filename string, src any, c *Config) (f *ast.File, err error) {
 	if c == nil {
 		c = &Config{}
 	}

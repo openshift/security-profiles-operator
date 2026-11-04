@@ -60,7 +60,7 @@
 //
 // # Limitations
 //
-// The embed interpreter currently does not support:
+// The embed injection currently does not support:
 // - stream values, such as .ndjson or YAML streams.
 // - schema-based decoding, such as needed for textproto
 //
@@ -94,9 +94,7 @@ package embed
 
 import (
 	iofs "io/fs"
-	"os"
 	"path"
-	"path/filepath"
 	"strings"
 
 	"cuelang.org/go/cue"
@@ -115,57 +113,57 @@ import (
 
 // TODO: record files in build.Instance
 
-// interpreter is a [cuecontext.ExternInterpreter] for embedded files.
-type interpreter struct{}
+// injection is a [runtime.Injection] for embedded files.
+type injection struct{}
 
-// Note that [cuecontext.ExternInterpreter] is just an alias for [runtime.Interpreter]
-// but because the [cuelang.org/go/cue/cuecontext] package depends on embedding
-// we cannot refer to that type directly.
-
-// New returns a new interpreter for embedded files as a
-// [cuelang.org/go/cue/cuecontext.ExternInterpreter] suitable for
-// passing to [cuelang.org/go/cue/cuecontext.New].
-func New() runtime.Interpreter {
-	return interpreter{}
+// New returns a new injection for embedded files as a
+// [runtime.Injection] suitable for passing to
+// [cuelang.org/go/cue/cuecontext.WithInjection].
+func New() runtime.Injection {
+	return injection{}
 }
 
-func (i interpreter) Kind() string {
+func (i injection) Kind() string {
 	return EmbedKind
 }
 
 const EmbedKind = "embed"
 
-// NewCompiler returns a compiler that can decode and embed files that exist
-// within a CUE module.
-func (i interpreter) NewCompiler(b *build.Instance, r *runtime.Runtime) (runtime.Compiler, errors.Error) {
+// InjectorForInstance returns an injector that can decode and embed files
+// that exist within a CUE module.
+func (i injection) InjectorForInstance(b *build.Instance, r *runtime.Runtime) (runtime.Injector, errors.Error) {
 	if b.Module == "" {
 		return nil, errors.Newf(token.Pos{}, "cannot embed files when not in a module")
 	}
 	if b.Root == "" {
 		return nil, errors.Newf(token.Pos{}, "cannot embed files: no module root found")
 	}
-	return &compiler{
+	return &injector{
 		b:       b,
 		runtime: (*cue.Context)(r),
 	}, nil
 }
 
-// A compiler is a [runtime.Compiler] that allows embedding files into CUE
+// An injector is a [runtime.Injector] that allows embedding files into CUE
 // values.
-type compiler struct {
+type injector struct {
 	b       *build.Instance
 	runtime *cue.Context
 	opCtx   *adt.OpContext
 
 	// file system cache
 	dir string
-	fs  iofs.StatFS
+	fs  iofs.FS
 	pos token.Pos
 }
 
 // validateAttr performs logical validation of the attr. It does not
 // perform any checks against a filesystem.
 func validateAttr(a *internal.Attr) (file, glob, typ string, allowEmptyGlob bool, errs errors.Error) {
+	if a.Err != nil {
+		return "", "", "", false, a.Err
+	}
+
 	pos := a.Pos
 
 	file, _, err := a.Lookup(0, "file")
@@ -229,21 +227,26 @@ func validateAttr(a *internal.Attr) (file, glob, typ string, allowEmptyGlob bool
 	}
 }
 
-// Compile interprets an embed attribute to either load a file
-// (@embed(file=...)) or a glob of files (@embed(glob=...)).
+// InjectedValue interprets an embed attribute to either load a file
+// (@embed(file=...)) or a glob of files (@embed(glob=...))
 // and decodes the given files.
-func (c *compiler) Compile(funcName string, scope adt.Value, a *internal.Attr) (adt.Expr, errors.Error) {
+func (c *injector) InjectedValue(attr *runtime.ExternAttr, scope *adt.Vertex) (adt.Expr, errors.Error) {
+	a := attr.Attr
 	c.opCtx = adt.NewContext((*runtime.Runtime)(c.runtime), nil)
 
 	pos := a.Pos
 	c.pos = pos
 
-	// Jump through some hoops to get file operations to behave the same for
-	// Windows and Unix.
-	// TODO: obtain an iofs.FS from load or something similar.
-	dir := filepath.Dir(pos.File().Name())
+	// Resolve the FS from the file's recorded FSLoc, which is populated
+	// by cue/load for both [load.Config.FS] and [load.Config.Overlay].
+	loc := pos.File().FSLoc()
+	dir := path.Dir(loc.Path)
 	if c.dir != dir {
-		c.fs = os.DirFS(dir).(iofs.StatFS) // Documented as implementing iofs.StatFS
+		fsys, err := iofs.Sub(loc.FS, dir)
+		if err != nil {
+			return nil, errors.Newf(pos, "cannot embed: %v", err)
+		}
+		c.fs = fsys
 		c.dir = dir
 	}
 
@@ -254,7 +257,7 @@ func (c *compiler) Compile(funcName string, scope adt.Value, a *internal.Attr) (
 
 	if file != "" {
 		for dir := path.Dir(file); dir != "."; dir = path.Dir(dir) {
-			if _, err := c.fs.Stat(path.Join(dir, "cue.mod")); err == nil {
+			if _, err := iofs.Stat(c.fs, path.Join(dir, "cue.mod")); err == nil {
 				return nil, errors.Newf(pos, "cannot embed file %q: in different module", file)
 			}
 		}
@@ -263,7 +266,7 @@ func (c *compiler) Compile(funcName string, scope adt.Value, a *internal.Attr) (
 	return c.processGlob(glob, typ, allowEmptyGlob)
 }
 
-func (c *compiler) processGlob(glob, scope string, allowEmptyGlob bool) (adt.Expr, errors.Error) {
+func (c *injector) processGlob(glob, scope string, allowEmptyGlob bool) (adt.Expr, errors.Error) {
 	m := &adt.StructLit{}
 
 	matches, err := fsGlob(c.fs, glob)
@@ -279,7 +282,7 @@ func (c *compiler) processGlob(glob, scope string, allowEmptyGlob bool) (adt.Exp
 		// TODO: lots of stat calls happening in this MVP so another won't hurt.
 		// We don't support '**' initially, and '*' only matches files, so skip
 		// any directories.
-		if fi, err := c.fs.Stat(f); err != nil {
+		if fi, err := iofs.Stat(c.fs, f); err != nil {
 			return nil, errors.Newf(c.pos, "failed to stat %s: %v", f, err)
 		} else if fi.IsDir() {
 			continue
@@ -305,7 +308,7 @@ func (c *compiler) processGlob(glob, scope string, allowEmptyGlob bool) (adt.Exp
 	// Check that none of the matches were in a nested module
 	// directory.
 	for dir, f := range dirs {
-		if _, err := c.fs.Stat(path.Join(dir, "cue.mod")); err == nil {
+		if _, err := iofs.Stat(c.fs, path.Join(dir, "cue.mod")); err == nil {
 			return nil, errors.Newf(c.pos, "cannot embed file %q: in different module", f)
 		}
 	}
@@ -344,12 +347,14 @@ func fsGlob(fsys iofs.FS, pattern string) ([]string, error) {
 func filterFsGlobResults(pattern string, matches ...string) []string {
 	patElems := strings.Split(pattern, "/")
 	included := func(m string) bool {
-		for i, elem := range strings.Split(m, "/") {
+		i := 0
+		for elem := range strings.SplitSeq(m, "/") {
 			// Technically there should never be more elements in m than
 			// there are in patElems, but be defensive and check bounds just in case.
 			if strings.HasPrefix(elem, ".") && (i >= len(patElems) || !strings.HasPrefix(patElems[i], ".")) {
 				return false
 			}
+			i++
 		}
 		return true
 	}
@@ -364,7 +369,7 @@ func filterFsGlobResults(pattern string, matches ...string) []string {
 	return matches[:i]
 }
 
-func (c *compiler) decodeFile(file, scope string) (adt.Expr, errors.Error) {
+func (c *injector) decodeFile(file, scope string) (adt.Expr, errors.Error) {
 	// Do not use the most obvious filetypes.Input in order to disable "auto"
 	// mode.
 	f, err := filetypes.ParseFileAndType(file, scope, filetypes.Def)
@@ -434,31 +439,38 @@ func (c *compiler) decodeFile(file, scope string) (adt.Expr, errors.Error) {
 	return v, nil
 }
 
-// EmbeddedPaths validates the provided attributes as embed
-// attributes, returning a slice of [Embed] structs for attributes
+// EmbeddedPaths walks all the embed attributes in the given file,
+// returning a slice of [Embed] structs for attributes
 // that were successfully validated, and errors for those which were
 // not. The filepath should be the filepath of the file from which
 // these attributes were extracted, and relative to whatever root is
 // going to be used in calls to [Embed.Matches] and [Embed.FindAll].
-func EmbeddedPaths(filepath string, attrsByField map[*ast.Field]*internal.Attr) ([]*Embed, errors.Error) {
-	if len(attrsByField) == 0 {
+func EmbeddedPaths(filepath string, syntax *ast.File) ([]*Embed, errors.Error) {
+	extAttrs, err := runtime.ExternAttrsForFile(syntax)
+	if err != nil {
+		return nil, err
+	}
+	if extAttrs.TopLevel[EmbedKind] == nil {
 		return nil, nil
 	}
 	var errs errors.Error
-	embeds := make([]*Embed, 0, len(attrsByField))
-	for field, attr := range attrsByField {
-		if attr.Err != nil {
-			errs = errors.Append(errs, attr.Err)
+	var embeds []*Embed
+	for attr := range extAttrs.Body {
+		if attr.Attr.Name != EmbedKind {
 			continue
 		}
-		file, glob, typ, allowEmptyGlob, err := validateAttr(attr)
+		if err := attr.Attr.Err; err != nil {
+			errs = errors.Append(errs, err)
+			continue
+		}
+		file, glob, typ, allowEmptyGlob, err := validateAttr(attr.Attr)
 		if err != nil {
 			errs = errors.Append(errs, err)
 			continue
 		}
 		embed := &Embed{
-			Field:     field,
-			Attribute: attr,
+			Node:      attr.Parent,
+			Attribute: attr.Attr,
 			FilePath:  filepath,
 			Type:      typ,
 		}
@@ -479,7 +491,7 @@ func EmbeddedPaths(filepath string, attrsByField map[*ast.Field]*internal.Attr) 
 }
 
 type Embed struct {
-	Field       *ast.Field
+	Node        ast.Node
 	Attribute   *internal.Attr
 	FilePath    string
 	Type        string

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Package strings implements simple functions to manipulate UTF-8 encoded
-// strings.package strings.
+// strings.
 //
 // Some of the functions in this package are specifically intended as field
 // constraints. For instance, MaxRunes as used in this CUE program
@@ -30,9 +30,11 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"cuelang.org/go/internal/core/adt"
 )
 
-// ByteAt reports the ith byte of the underlying strings or byte.
+// ByteAt reports the ith byte of the underlying byte slice.
 func ByteAt(b []byte, i int) (byte, error) {
 	if i < 0 || i >= len(b) {
 		return 0, fmt.Errorf("index out of range")
@@ -40,7 +42,7 @@ func ByteAt(b []byte, i int) (byte, error) {
 	return b[i], nil
 }
 
-// ByteSlice reports the bytes of the underlying string data from the start
+// ByteSlice reports the bytes of the underlying byte slice from the start
 // index up to but not including the end index.
 func ByteSlice(b []byte, start, end int) ([]byte, error) {
 	if start < 0 || start > end || end > len(b) {
@@ -54,9 +56,20 @@ func Runes(s string) []rune {
 	return []rune(s)
 }
 
+// Repeat returns a new string consisting of count copies of the string s.
+func Repeat(s string, count int) (string, error) {
+	if count < 0 {
+		return "", fmt.Errorf("negative count")
+	}
+	if count > adt.MaxRepeatCount {
+		return "", fmt.Errorf("count %d exceeds limit of %d", count, adt.MaxRepeatCount)
+	}
+	return strings.Repeat(s, count), nil
+}
+
 // MinRunes reports whether the number of runes (Unicode codepoints) in a string
-// is at least a certain minimum. MinRunes can be used a field constraint to
-// except all strings for which this property holds.
+// is at least a certain minimum. MinRunes can be used as a field constraint to
+// accept all strings for which this property holds.
 func MinRunes(s string, min int) bool {
 	// TODO: CUE strings cannot be invalid UTF-8. In case this changes, we need
 	// to use the following conversion to count properly:
@@ -65,8 +78,8 @@ func MinRunes(s string, min int) bool {
 }
 
 // MaxRunes reports whether the number of runes (Unicode codepoints) in a string
-// exceeds a certain maximum. MaxRunes can be used a field constraint to
-// except all strings for which this property holds
+// exceeds a certain maximum. MaxRunes can be used as a field constraint to
+// accept all strings for which this property holds.
 func MaxRunes(s string, max int) bool {
 	// See comment in MinRunes implementation.
 	return utf8.RuneCountInString(s) <= max
