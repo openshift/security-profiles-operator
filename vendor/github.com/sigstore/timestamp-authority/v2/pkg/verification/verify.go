@@ -18,6 +18,7 @@ package verification
 import (
 	"bytes"
 	"crypto"
+	"crypto/mldsa"
 	"crypto/x509"
 	"encoding/asn1"
 	"fmt"
@@ -29,6 +30,8 @@ import (
 	"github.com/digitorus/pkcs7"
 	"github.com/digitorus/timestamp"
 	"github.com/pkg/errors"
+
+	tsx509 "github.com/sigstore/timestamp-authority/v2/pkg/x509"
 )
 
 var (
@@ -111,6 +114,14 @@ func verifyLeafCert(leafCert *x509.Certificate, verifiedChains [][]*x509.Certifi
 
 	errMsg := "failed to verify TSA certificate"
 
+	// The TSA certificate must be an end-entity certificate, per RFC 3161 2.3.
+	// crypto/x509 chain verification does not reject a CA certificate used as
+	// the leaf, so a certificate that asserts the CA bit yet carries the
+	// timestamping EKU would otherwise be accepted as a signer.
+	if leafCert.IsCA {
+		return fmt.Errorf("%s: %w", errMsg, errors.New("TSA certificate must be an end-entity certificate, not a CA"))
+	}
+
 	err := verifyLeafCertCriticalEKU(leafCert)
 	if err != nil {
 		return fmt.Errorf("%s: %w", errMsg, err)
@@ -137,12 +148,15 @@ func verifyLeafCert(leafCert *x509.Certificate, verifiedChains [][]*x509.Certifi
 }
 
 func verifyLeafExtendedKeyUsage(cert *x509.Certificate) error {
-	certEKULen := len(cert.ExtKeyUsage)
+	// crypto/x509 sorts key purposes it does not recognise into
+	// UnknownExtKeyUsage, so a leaf carrying id-kp-timeStamping alongside an
+	// unknown OID would otherwise pass the single-EKU requirement of RFC 3161 2.3.
+	certEKULen := len(cert.ExtKeyUsage) + len(cert.UnknownExtKeyUsage)
 	if certEKULen != 1 {
 		return fmt.Errorf("certificate has %d extended key usages, expected only one", certEKULen)
 	}
 
-	if cert.ExtKeyUsage[0] != x509.ExtKeyUsageTimeStamping {
+	if len(cert.ExtKeyUsage) != 1 || cert.ExtKeyUsage[0] != x509.ExtKeyUsageTimeStamping {
 		return fmt.Errorf("leaf certificate EKU is not set to TimeStamping as required")
 	}
 	return nil
@@ -202,6 +216,47 @@ func verifyLeafAndIntermediatesTimestampingEKU(leafCert *x509.Certificate, verif
 	return nil
 }
 
+func verifyCertPolicyOIDKeyType(policyOID asn1.ObjectIdentifier, cert *x509.Certificate) error {
+	_, isMLDSACert := cert.PublicKey.(*mldsa.PublicKey)
+	switch {
+	case policyOID.Equal(tsx509.PolicyOID):
+		if isMLDSACert {
+			return fmt.Errorf("policy OID %s does not support ML-DSA certificates, expected %s", policyOID, tsx509.PolicyOIDPQC)
+		}
+	case policyOID.Equal(tsx509.PolicyOIDPQC):
+		if !isMLDSACert {
+			return fmt.Errorf("policy OID %s requires an ML-DSA certificate chain", policyOID)
+		}
+	}
+	return nil
+}
+
+func verifyPolicyOIDMatchesSignerKeyType(policyOID asn1.ObjectIdentifier, signerCert *x509.Certificate, verifiedChains [][]*x509.Certificate) error {
+	if err := verifyCertPolicyOIDKeyType(policyOID, signerCert); err != nil {
+		return fmt.Errorf("failed to verify policy OID on leaf certificate: %w", err)
+	}
+
+	var lastErr error
+	for _, chain := range verifiedChains {
+		chainOK := true
+		// Skip the leaf cert (index 0)
+		for i := 1; i < len(chain); i++ {
+			if err := verifyCertPolicyOIDKeyType(policyOID, chain[i]); err != nil {
+				chainOK = false
+				lastErr = err
+				break
+			}
+		}
+		if chainOK {
+			return nil // Found at least one fully valid chain matching the policy OID
+		}
+	}
+	if lastErr != nil {
+		return fmt.Errorf("no verified certificate chain matched policy OID %s: %w", policyOID, lastErr)
+	}
+	return nil
+}
+
 // Verify the OID of the TSR matches an expected OID
 func verifyOID(oid []int, opts VerifyOpts) error {
 	if opts.OID == nil {
@@ -223,6 +278,14 @@ func verifyOID(oid []int, opts VerifyOpts) error {
 func verifyNonce(requestNonce *big.Int, opts VerifyOpts) error {
 	if opts.Nonce == nil {
 		return nil
+	}
+	// A nonce was requested, so per RFC 3161 2.4.2 the response must carry the
+	// same nonce. The nonce is optional in the response structure, so a
+	// (genuinely signed) response that drops it must be rejected rather than
+	// dereferenced, otherwise a replayed timestamp lacking the nonce trips a
+	// nil pointer in the comparison below.
+	if requestNonce == nil {
+		return fmt.Errorf("expected nonce %d but response does not contain a nonce", opts.Nonce)
 	}
 	if opts.Nonce.Cmp(requestNonce) != 0 {
 		return fmt.Errorf("incoming nonce %d does not match TSR nonce %d", requestNonce, opts.Nonce)
@@ -270,6 +333,10 @@ func VerifyTimestampResponse(tsrBytes []byte, artifact io.Reader, opts VerifyOpt
 	}
 
 	if err = verifyOID(ts.Policy, opts); err != nil {
+		return nil, err
+	}
+
+	if err = verifyPolicyOIDMatchesSignerKeyType(ts.Policy, signerCert, verifiedChains); err != nil {
 		return nil, err
 	}
 
