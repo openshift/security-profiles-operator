@@ -181,7 +181,7 @@ require (
 	github.com/golang-jwt/jwt/v4 v4.5.2 // indirect
 	github.com/golang/snappy v1.0.0 // indirect
 	github.com/google/cel-go v0.29.0 // indirect
-	github.com/google/certificate-transparency-go v1.3.3 // indirect
+	github.com/google/certificate-transparency-go v1.4.0 // indirect
 	github.com/google/flatbuffers v25.12.19+incompatible // indirect
 	github.com/google/gnostic-models v0.7.1 // indirect
 	github.com/google/go-github/v73 v73.0.0 // indirect
