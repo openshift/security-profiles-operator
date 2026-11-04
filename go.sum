@@ -21,8 +21,8 @@ cloud.google.com/go/longrunning v1.0.0 h1:lwzWEYD8+NkYV7dhexOz6kmlvajZA70+bW/xMh
 cloud.google.com/go/longrunning v1.0.0/go.mod h1:8nqFBPOO1U/XkhWl0I19AMZEphrHi73VNABIpKYaTwM=
 connectrpc.com/connect v1.19.1 h1:R5M57z05+90EfEvCY1b7hBxDVOUl45PrtXtAV2fOC14=
 connectrpc.com/connect v1.19.1/go.mod h1:tN20fjdGlewnSFeZxLKb0xwIZ6ozc3OQs2hTXy4du9w=
-cuelabs.dev/go/oci/ociregistry v0.0.0-20251212221603-3adeb8663819 h1:Zh+Ur3OsoWpvALHPLT45nOekHkgOt+IOfutBbPqM17I=
-cuelabs.dev/go/oci/ociregistry v0.0.0-20251212221603-3adeb8663819/go.mod h1:WjmQxb+W6nVNCgj8nXrF24lIz95AHwnSl36tpjDZSU8=
+cuelabs.dev/go/oci/ociregistry v0.0.0-20261026160121-545c0455168d h1:VQJY+iqMtWilYwcSgEPqBrwqtb01z3n+w7ALc/xmQvk=
+cuelabs.dev/go/oci/ociregistry v0.0.0-20261026160121-545c0455168d/go.mod h1:ETJsQ880PrjcDPD/fN5ovoVEMYd6IzcWAuAESTZXLnU=
 cuelang.org/go v0.16.0 h1:mmt9SL/IzfSIiBKuP5wxdO4xLjvIHr3urpbjCDdMV5U=
 cuelang.org/go v0.16.0/go.mod h1:4veMX+GpsK0B91b1seGXoozG80LJCczvG1M1Re/knxo=
 cyphar.com/go-pathrs v0.2.5 h1:SnX9FBvnoyn3lUs1dkMgZ52bAETpirNu3FTRh5HlRik=
