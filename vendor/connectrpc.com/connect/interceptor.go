@@ -1,4 +1,4 @@
-// Copyright 2021-2025 The Connect Authors
+// Copyright 2021-2026 The Connect Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package connect
 import (
 	"context"
 	"errors"
+	"slices"
 )
 
 var (
@@ -31,6 +32,8 @@ var (
 // The type of the request and response structs depend on the codec being used.
 // When using Protobuf, request.Any() and response.Any() will always be
 // [proto.Message] implementations.
+//
+// On return, response is non-nil if and only if err is nil.
 type UnaryFunc func(context.Context, AnyRequest) (AnyResponse, error)
 
 // StreamingClientFunc is the generic signature of a streaming RPC from the client's
@@ -81,8 +84,8 @@ func newChain(interceptors []Interceptor) *chain {
 	// the slice act first. Rather than doing this dance repeatedly, reverse the
 	// interceptor order now.
 	var chain chain
-	for i := len(interceptors) - 1; i >= 0; i-- {
-		if interceptor := interceptors[i]; interceptor != nil {
+	for _, interceptor := range slices.Backward(interceptors) {
+		if interceptor != nil {
 			chain.interceptors = append(chain.interceptors, interceptor)
 		}
 	}
@@ -124,7 +127,7 @@ func unaryThunk(next UnaryFunc) UnaryFunc {
 func streamingClientThunk(next StreamingClientFunc) StreamingClientFunc {
 	return func(ctx context.Context, spec Spec) StreamingClientConn {
 		if err := checkSentinel(ctx); err != nil {
-			return &errStreamingClientConn{err: err}
+			return newErrStreamingClientConn(err)
 		}
 		return next(ctx, spec)
 	}

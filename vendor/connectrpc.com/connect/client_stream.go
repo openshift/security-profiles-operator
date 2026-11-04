@@ -1,4 +1,4 @@
-// Copyright 2021-2025 The Connect Authors
+// Copyright 2021-2026 The Connect Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -32,6 +32,8 @@ var (
 // exported constructor function.
 //
 // When using this stream, request headers should be set via the [ClientStreamForClient.RequestHeader] method.
+//
+// Send is not safe to call concurrently.
 type ClientStreamForClient[Req, Res any] struct {
 	conn        StreamingClientConn
 	initializer maybeInitializer
@@ -41,11 +43,17 @@ type ClientStreamForClient[Req, Res any] struct {
 
 // Spec returns the specification for the RPC.
 func (c *ClientStreamForClient[_, _]) Spec() Spec {
+	if c.err != nil {
+		return Spec{}
+	}
 	return c.conn.Spec()
 }
 
 // Peer describes the server for the RPC.
 func (c *ClientStreamForClient[_, _]) Peer() Peer {
+	if c.err != nil {
+		return Peer{}
+	}
 	return c.conn.Peer()
 }
 
@@ -110,6 +118,8 @@ func (c *ClientStreamForClient[Req, Res]) Conn() (StreamingClientConn, error) {
 // In addition, the response returned by [ClientStreamForClientSimple.CloseAndReceive] is the response type defined for
 // the stream and _not_ a Connect [Response] wrapper type. As a result, response headers/trailers should be read from
 // the [CallInfo] object in context.
+//
+// Send is not safe to call concurrently.
 type ClientStreamForClientSimple[Req, Res any] struct {
 	stream *ClientStreamForClient[Req, Res]
 }
@@ -160,6 +170,8 @@ func (c *ClientStreamForClientSimple[Req, Res]) CloseAndReceive() (*Res, error) 
 //
 // It's returned from [Client].CallServerStream, but doesn't currently have an
 // exported constructor function.
+//
+// Receive is not safe to call concurrently.
 type ServerStreamForClient[Res any] struct {
 	conn        StreamingClientConn
 	initializer maybeInitializer
@@ -247,6 +259,9 @@ func (s *ServerStreamForClient[Res]) Conn() (StreamingClientConn, error) {
 //
 // It's returned from [Client].CallBidiStream, but doesn't currently have an
 // exported constructor function.
+//
+// Send and Receive may be called from separate goroutines concurrently, but
+// neither may be called concurrently with itself.
 type BidiStreamForClient[Req, Res any] struct {
 	conn        StreamingClientConn
 	initializer maybeInitializer
@@ -256,11 +271,17 @@ type BidiStreamForClient[Req, Res any] struct {
 
 // Spec returns the specification for the RPC.
 func (b *BidiStreamForClient[_, _]) Spec() Spec {
+	if b.err != nil {
+		return Spec{}
+	}
 	return b.conn.Spec()
 }
 
 // Peer describes the server for the RPC.
 func (b *BidiStreamForClient[_, _]) Peer() Peer {
+	if b.err != nil {
+		return Peer{}
+	}
 	return b.conn.Peer()
 }
 
@@ -358,6 +379,9 @@ func (b *BidiStreamForClient[Req, Res]) Conn() (StreamingClientConn, error) {
 //
 // It's returned from [Client].CallBidiStream, but doesn't currently have an
 // exported constructor function.
+//
+// Send and Receive may be called from separate goroutines concurrently, but
+// neither may be called concurrently with itself.
 type BidiStreamForClientSimple[Req, Res any] struct {
 	stream *BidiStreamForClient[Req, Res]
 }

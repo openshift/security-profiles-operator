@@ -1,4 +1,4 @@
-// Copyright 2021-2025 The Connect Authors
+// Copyright 2021-2026 The Connect Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@ import (
 type Handler struct {
 	spec             Spec
 	implementation   StreamingHandlerFunc
+	requestGates     []RequestGateFunc
 	protocolHandlers map[string][]protocolHandler // Method to protocol handlers
 	allowMethod      string                       // Allow header
 	acceptPost       string                       // Accept-Post header
@@ -53,6 +54,10 @@ func NewUnaryHandler[Req, Res any](
 			// This is going to panic during serialization. Debugging is much easier
 			// if we panic here instead, so we can include the procedure name.
 			panic(procedure + " returned nil *connect.Response and nil error") //nolint: forbidigo
+		}
+		if res == nil {
+			// Avoid returning a typed nil (*Response[Res]) as an AnyResponse interface value.
+			return nil, err
 		}
 		return res, err
 	})
@@ -101,6 +106,7 @@ func NewUnaryHandler[Req, Res any](
 	return &Handler{
 		spec:             config.newSpec(),
 		implementation:   implementation,
+		requestGates:     config.RequestGates,
 		protocolHandlers: mappedMethodHandlers(protocolHandlers),
 		allowMethod:      sortedAllowMethodValue(protocolHandlers),
 		acceptPost:       sortedAcceptPostValue(protocolHandlers),
@@ -330,6 +336,18 @@ func (h *Handler) ServeHTTP(responseWriter http.ResponseWriter, request *http.Re
 		_ = connCloser.Close(timeoutErr)
 		return
 	}
+	// Gates run before the implementation, so before the interceptor chain and
+	// before any message is received.
+	for _, gate := range h.requestGates {
+		gateCtx, err := gate(ctx, h.spec, connCloser.Peer(), connCloser.RequestHeader())
+		if err != nil {
+			_ = connCloser.Close(err)
+			return
+		}
+		if gateCtx != nil {
+			ctx = gateCtx //nolint:fatcontext // Chaining is intended: each gate sees the previous gate's context.
+		}
+	}
 	_ = connCloser.Close(h.implementation(ctx, connCloser))
 }
 
@@ -348,6 +366,7 @@ type handlerConfig struct {
 	ReadMaxBytes                 int
 	SendMaxBytes                 int
 	StreamType                   StreamType
+	RequestGates                 []RequestGateFunc
 }
 
 func newHandlerConfig(procedure string, streamType StreamType, options []HandlerOption) *handlerConfig {
@@ -416,6 +435,7 @@ func newStreamHandler(
 	return &Handler{
 		spec:             config.newSpec(),
 		implementation:   implementation,
+		requestGates:     config.RequestGates,
 		protocolHandlers: mappedMethodHandlers(protocolHandlers),
 		allowMethod:      sortedAllowMethodValue(protocolHandlers),
 		acceptPost:       sortedAcceptPostValue(protocolHandlers),

@@ -8,12 +8,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/buildkite/agent/v3/internal/agenthttp"
@@ -22,8 +25,11 @@ import (
 )
 
 const (
-	defaultEndpoint  = "https://agent.buildkite.com/v3"
+	defaultEndpoint  = "https://agent-edge.buildkite.com/v3"
 	defaultUserAgent = "buildkite-agent/api"
+
+	// Maximum bytes of a response body to quote in an error message.
+	maxErrorBodySnippet = 512
 )
 
 // Config is configuration for the API Client
@@ -69,7 +75,8 @@ type Client struct {
 	logger logger.Logger
 
 	// server-specified HTTP request headers to include in all requests
-	requestHeaders http.Header
+	requestHeadersMu sync.RWMutex
+	requestHeaders   http.Header
 }
 
 // NewClient returns a new Buildkite Agent API Client.
@@ -138,7 +145,7 @@ func requestHeadersFromEnv(environ []string) http.Header {
 // request headers and the logger.
 func (c *Client) New(conf Config) *Client {
 	client := NewClient(c.logger, conf)
-	client.requestHeaders = c.requestHeaders
+	client.requestHeaders = c.requestHeadersSnapshot()
 	return client
 }
 
@@ -150,7 +157,7 @@ func (c *Client) Config() Config {
 // ServerSpecifiedRequestHeaders returns the HTTP headers that the Buildkite register/ping
 // APIs have advised the client to send in all requests.
 func (c *Client) ServerSpecifiedRequestHeaders() http.Header {
-	return c.requestHeaders
+	return c.requestHeadersSnapshot()
 }
 
 // FromAgentRegisterResponse returns a new instance using the access token and endpoint
@@ -166,29 +173,52 @@ func (c *Client) FromAgentRegisterResponse(reg *AgentRegisterResponse) *Client {
 		conf.Endpoint = reg.Endpoint
 	}
 
-	return c.New(conf)
+	newClient := c.New(conf)
+
+	// If Buildkite told us to use Buildkite-* request headers, store those
+	newClient.setRequestHeaders(reg.RequestHeaders)
+
+	return newClient
 }
 
-func (c *Client) setRequestHeaders(headers map[string]string) {
+// setRequestHeaders replaces the current headers when headers is non-nil and
+// reports whether the effective set of permitted headers changed.
+func (c *Client) setRequestHeaders(headers map[string]string) bool {
 	if headers == nil {
-		return
+		return false
 	}
 
-	c.requestHeaders = make(http.Header)
+	next := make(http.Header)
 	for k, v := range headers {
 		if !strings.HasPrefix(k, "Buildkite-") {
 			continue
 		}
-		c.requestHeaders.Set(k, v)
+		next.Set(k, v)
 	}
 
-	if c.logger.Level() <= logger.DEBUG {
-		for k, values := range c.requestHeaders {
+	c.requestHeadersMu.Lock()
+	changed := !maps.EqualFunc(c.requestHeaders, next, slices.Equal)
+	if changed {
+		c.requestHeaders = next
+	}
+	c.requestHeadersMu.Unlock()
+
+	if changed && c.logger.Level() <= logger.DEBUG {
+		for k, values := range next {
 			for _, v := range values {
-				c.logger.Debug("Server-specified request header: %s: %s", k, v)
+				c.logger.Debugf("Server-specified request header: %s: %s", k, v)
 			}
 		}
 	}
+
+	return changed
+}
+
+func (c *Client) requestHeadersSnapshot() http.Header {
+	c.requestHeadersMu.RLock()
+	defer c.requestHeadersMu.RUnlock()
+
+	return c.requestHeaders.Clone()
 }
 
 // FromPing returns a new instance using a new endpoint from a ping response
@@ -246,7 +276,7 @@ func (c *Client) newRequest(
 	}
 
 	// add any request headers specified by the server during register/ping
-	for k, values := range c.requestHeaders {
+	for k, values := range c.requestHeadersSnapshot() {
 		for _, v := range values {
 			req.Header.Add(k, v)
 		}
@@ -280,7 +310,7 @@ func (c *Client) newFormRequest(ctx context.Context, method, urlStr string, body
 	}
 
 	// add any request headers specified by the server during register/ping
-	for k, values := range c.requestHeaders {
+	for k, values := range c.requestHeadersSnapshot() {
 		for _, v := range values {
 			req.Header.Add(k, v)
 		}
@@ -332,11 +362,14 @@ func (c *Client) doRequest(req *http.Request, v any) (*Response, error) {
 			}
 		} else {
 			if strings.Contains(req.Header.Get("Content-Type"), "application/msgpack") {
-				return response, errors.New("Msgpack not supported")
+				return response, errors.New("msgpack not supported")
 			}
 
-			if err = json.NewDecoder(resp.Body).Decode(v); err != nil {
-				return response, fmt.Errorf("failed to decode JSON response: %w", err)
+			// Keep the start of the body as it is decoded, so that a decode
+			// failure can report what the response actually contained.
+			head := &headWriter{limit: maxErrorBodySnippet}
+			if err = json.NewDecoder(io.TeeReader(resp.Body, head)).Decode(v); err != nil {
+				return response, newUndecodableResponseError(resp, head.String(), err)
 			}
 		}
 	}
@@ -348,6 +381,11 @@ func (c *Client) doRequest(req *http.Request, v any) (*Response, error) {
 type ErrorResponse struct {
 	Response *http.Response // HTTP response that caused this error
 	Message  string         `json:"message"` // error message
+
+	// Details of a response body that wasn't an API error message. Taken from the
+	// response, never decoded from it, hence `json:"-"`.
+	ContentType string `json:"-"`
+	Snippet     string `json:"-"`
 }
 
 func (r *ErrorResponse) Error() string {
@@ -359,7 +397,90 @@ func (r *ErrorResponse) Error() string {
 		s = fmt.Sprintf("%s: %v", s, r.Message)
 	}
 
+	if r.Snippet != "" {
+		s = fmt.Sprintf("%s: non-JSON body (content-type %q) starting with %q", s, r.ContentType, r.Snippet)
+	}
+
 	return s
+}
+
+// UndecodableResponseError is returned when a response had a success status but
+// a body that could not be decoded. Usually this means something other than the
+// Buildkite Agent API answered the request - a proxy, load balancer, or CDN
+// serving its own error page - which makes it worth retrying. See
+// IsRetryableError.
+type UndecodableResponseError struct {
+	Method      string // request method
+	URL         string // request URL, after any redirects
+	Status      string // response status
+	ContentType string // response content type
+	Snippet     string // start of the response body; empty when it could hold credentials
+	Err         error  // the decoding error
+}
+
+func (e *UndecodableResponseError) Error() string {
+	s := fmt.Sprintf("%s %s: %s: could not decode response body", e.Method, e.URL, e.Status)
+
+	if e.ContentType != "" {
+		s = fmt.Sprintf("%s (content-type %q)", s, e.ContentType)
+	}
+
+	s = fmt.Sprintf("%s: %v", s, e.Err)
+
+	if e.Snippet != "" {
+		s = fmt.Sprintf("%s: body starts with %q", s, e.Snippet)
+	}
+
+	return s
+}
+
+func (e *UndecodableResponseError) Unwrap() error { return e.Err }
+
+func newUndecodableResponseError(r *http.Response, head string, err error) *UndecodableResponseError {
+	e := &UndecodableResponseError{
+		Status:      r.Status,
+		ContentType: r.Header.Get("Content-Type"),
+		Err:         err,
+	}
+
+	if r.Request != nil {
+		e.Method = r.Request.Method
+		e.URL = r.Request.URL.String()
+	}
+
+	// A body that didn't claim to be JSON came from something that isn't the
+	// Agent API, so quoting it leaks none of our credentials. A malformed JSON
+	// body did come from the API and could contain a token, so it stays out.
+	if !isJSONContent(e.ContentType) {
+		// head is capped by the caller; drop a trailing partial rune.
+		e.Snippet = strings.ToValidUTF8(head, "")
+	}
+
+	return e
+}
+
+// headWriter keeps the first limit bytes written to it, and discards the rest.
+type headWriter struct {
+	buf   bytes.Buffer
+	limit int
+}
+
+func (w *headWriter) Write(p []byte) (int, error) {
+	if rem := w.limit - w.buf.Len(); rem > 0 {
+		w.buf.Write(p[:min(rem, len(p))]) //nolint:errcheck // bytes.Buffer.Write never errors.
+	}
+	return len(p), nil
+}
+
+func (w *headWriter) String() string { return w.buf.String() }
+
+// truncate shortens s to at most limit bytes, marking it when it does.
+func truncate(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	// Cutting at a byte offset can split a multi-byte rune; drop the remnant.
+	return strings.ToValidUTF8(s[:limit], "") + "…"
 }
 
 func IsErrHavingStatus(err error, code int) bool {
@@ -372,15 +493,21 @@ func checkResponse(r *http.Response) error {
 		return nil
 	}
 
-	errorResponse := &ErrorResponse{Response: r}
+	contentType := r.Header.Get("Content-Type")
+	errorResponse := &ErrorResponse{Response: r, ContentType: contentType}
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
 		return errorResponse
 	}
-	if data != nil {
+	if len(data) > 0 {
 		// Unmarshaling the error JSON is best-effort, but we could consider
 		// reporting unmarshaling problems.
-		json.Unmarshal(data, errorResponse) //nolint:errcheck // ^^
+		if err := json.Unmarshal(data, errorResponse); err != nil && !isJSONContent(contentType) {
+			// Not an API error message: most likely an error page from a proxy,
+			// load balancer, or CDN in front of the API. It's the only clue as to
+			// what really answered, and holds none of our credentials.
+			errorResponse.Snippet = truncate(string(data), maxErrorBodySnippet)
+		}
 	}
 
 	return errorResponse

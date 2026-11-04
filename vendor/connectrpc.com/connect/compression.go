@@ -1,4 +1,4 @@
-// Copyright 2021-2025 The Connect Authors
+// Copyright 2021-2026 The Connect Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -188,8 +189,7 @@ func newReadOnlyCompressionPools(
 	// but we want the last registered to be the most preferred.
 	names := make([]string, 0, len(reversedNames))
 	seen := make(map[string]struct{}, len(reversedNames))
-	for i := len(reversedNames) - 1; i >= 0; i-- {
-		name := reversedNames[i]
+	for _, name := range slices.Backward(reversedNames) {
 		if _, ok := seen[name]; ok {
 			continue
 		}
