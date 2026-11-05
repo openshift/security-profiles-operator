@@ -12,7 +12,6 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"github.com/protocolbuffers/txtpbfmt/ast"
 	"github.com/protocolbuffers/txtpbfmt/config"
-	"github.com/protocolbuffers/txtpbfmt/descriptor"
 	"github.com/protocolbuffers/txtpbfmt/quote"
 	"github.com/protocolbuffers/txtpbfmt/sort"
 	"github.com/protocolbuffers/txtpbfmt/wrap"
@@ -156,23 +155,9 @@ func ParseWithMetaCommentConfig(in []byte, c config.Config) ([]*ast.Node, error)
 		return nil, err
 	}
 
-	// Load descriptor if field number sorting is enabled
-	var rootDesc protoreflect.MessageDescriptor
-	if c.SortFieldsByFieldNumber {
-		if c.ProtoDescriptor == "" {
-			return nil, fmt.Errorf("proto_descriptor is required when using sort_fields_by_field_number")
-		}
-
-		loader, err := descriptor.NewLoader(c.ProtoDescriptor)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create descriptor loader: %v", err)
-		}
-
-		// Get root message descriptor
-		rootDesc, err = loader.GetRootMessageDescriptor(c.MessageFullName)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get root message descriptor: %v", err)
-		}
+	rootDesc := c.RootMessageDescriptor
+	if c.SortFieldsByFieldNumber && rootDesc == nil {
+		return nil, fmt.Errorf("RootMessageDescriptor is required when using SortFieldsByFieldNumber")
 	}
 
 	if p.config.InfoLevel() {
@@ -221,10 +206,23 @@ func addToConfig(metaComment string, c *config.Config) error {
 		c.Disable = true
 	case "expand_all_children":
 		c.ExpandAllChildren = true
+	case "field_sort_order":
+		if !hasEqualSign {
+			return fmt.Errorf("format should be %s=<string>, got: %s", key, metaComment)
+		}
+		parts := strings.SplitN(val, ":", 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("format should be %s=NodeName:field1 field2..., got: %s", key, metaComment)
+		}
+		nodeName := strings.TrimSpace(parts[0])
+		fields := strings.Fields(parts[1])
+		c.AddFieldSortOrder(nodeName, fields...)
 	case "preserve_angle_brackets":
 		c.PreserveAngleBrackets = true
 	case "remove_duplicate_values_for_repeated_fields":
 		c.RemoveDuplicateValuesForRepeatedFields = true
+	case "require_field_sort_order_to_match_all_fields_in_node":
+		c.RequireFieldSortOrderToMatchAllFieldsInNode = true
 	case "skip_all_colons":
 		c.SkipAllColons = true
 	case "smartquotes":
