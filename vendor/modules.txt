@@ -216,7 +216,7 @@ github.com/acobaugh/osrelease
 # github.com/agnivade/levenshtein v1.2.1
 ## explicit; go 1.21
 github.com/agnivade/levenshtein
-# github.com/alibabacloud-go/alibabacloud-gateway-spi v0.0.4
+# github.com/alibabacloud-go/alibabacloud-gateway-spi v0.0.5
 ## explicit; go 1.14
 github.com/alibabacloud-go/alibabacloud-gateway-spi/client
 # github.com/alibabacloud-go/cr-20160607 v1.0.1
