@@ -846,8 +846,8 @@ github.com/in-toto/in-toto-golang/in_toto/slsa_provenance/v1
 # github.com/inconshreveable/mousetrap v1.1.0
 ## explicit; go 1.18
 github.com/inconshreveable/mousetrap
-# github.com/jedisct1/go-minisign v0.0.0-20241212093149-d2f9f49435c7
-## explicit; go 1.23.4
+# github.com/jedisct1/go-minisign v0.0.0-20260527172527-a09352b57a22
+## explicit; go 1.25.0
 github.com/jedisct1/go-minisign
 # github.com/jellydator/ttlcache/v3 v3.4.1
 ## explicit; go 1.23.0
