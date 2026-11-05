@@ -868,8 +868,8 @@ github.com/klauspost/compress/zstd/internal/xxhash
 # github.com/lestrrat-go/blackmagic v1.0.4
 ## explicit; go 1.23
 github.com/lestrrat-go/blackmagic
-# github.com/lestrrat-go/dsig v1.0.0
-## explicit; go 1.23.0
+# github.com/lestrrat-go/dsig v1.4.0
+## explicit; go 1.25.0
 github.com/lestrrat-go/dsig
 github.com/lestrrat-go/dsig/internal/ecutil
 # github.com/lestrrat-go/dsig-secp256k1 v1.0.0
