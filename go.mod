@@ -64,7 +64,7 @@ require (
 	connectrpc.com/connect v1.19.1 // indirect
 	cuelabs.dev/go/oci/ociregistry v0.0.0-20251212221603-3adeb8663819 // indirect
 	cuelang.org/go v0.16.0 // indirect
-	cyphar.com/go-pathrs v0.2.5 // indirect
+	cyphar.com/go-pathrs v0.2.6 // indirect
 	github.com/AliyunContainerService/ack-ram-tool/pkg/credentials/provider v0.20.0 // indirect
 	github.com/AliyunContainerService/ack-ram-tool/pkg/ecsmetadata v0.0.10 // indirect
 	github.com/Azure/azure-sdk-for-go v68.0.0+incompatible // indirect

@@ -155,7 +155,7 @@ cuelang.org/go/pkg/tool/http
 cuelang.org/go/pkg/tool/os
 cuelang.org/go/pkg/uuid
 cuelang.org/go/tools/flow
-# cyphar.com/go-pathrs v0.2.5
+# cyphar.com/go-pathrs v0.2.6
 ## explicit; go 1.18
 cyphar.com/go-pathrs
 cyphar.com/go-pathrs/internal/fdutils

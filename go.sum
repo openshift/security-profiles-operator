@@ -25,8 +25,8 @@ cuelabs.dev/go/oci/ociregistry v0.0.0-20251212221603-3adeb8663819 h1:Zh+Ur3OsoWp
 cuelabs.dev/go/oci/ociregistry v0.0.0-20251212221603-3adeb8663819/go.mod h1:WjmQxb+W6nVNCgj8nXrF24lIz95AHwnSl36tpjDZSU8=
 cuelang.org/go v0.16.0 h1:mmt9SL/IzfSIiBKuP5wxdO4xLjvIHr3urpbjCDdMV5U=
 cuelang.org/go v0.16.0/go.mod h1:4veMX+GpsK0B91b1seGXoozG80LJCczvG1M1Re/knxo=
-cyphar.com/go-pathrs v0.2.5 h1:SnX9FBvnoyn3lUs1dkMgZ52bAETpirNu3FTRh5HlRik=
-cyphar.com/go-pathrs v0.2.5/go.mod h1:y8f1EMG7r+hCuFf/rXsKqMJrJAUoADZGNh5/vZPKcGc=
+cyphar.com/go-pathrs v0.2.6 h1:+btfBJ7qWKZo+TDJlDZ2tPqToKdN8QD4BAOqomueXZg=
+cyphar.com/go-pathrs v0.2.6/go.mod h1:y8f1EMG7r+hCuFf/rXsKqMJrJAUoADZGNh5/vZPKcGc=
 filippo.io/edwards25519 v1.2.0 h1:crnVqOiS4jqYleHd9vaKZ+HKtHfllngJIiOpNpoJsjo=
 filippo.io/edwards25519 v1.2.0/go.mod h1:xzAOLCNug/yB62zG1bQ8uziwrIqIuxhctzJT18Q77mc=
 filippo.io/mldsa v0.0.0-20260215214346-43d0283efc3e h1:VsUbObBMxXlc23Eb9VeeJYE4jvTs87qa5RqSN2U5FJU=
