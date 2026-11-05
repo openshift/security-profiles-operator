@@ -925,7 +925,7 @@ github.com/letsencrypt/boulder/goodkey
 github.com/letsencrypt/boulder/identifier
 github.com/letsencrypt/boulder/probs
 github.com/letsencrypt/boulder/revocation
-# github.com/lib/pq v1.11.2
+# github.com/lib/pq v1.12.3
 ## explicit; go 1.21
 # github.com/liggitt/tabwriter v0.0.0-20181228230101-89fcab3d43de
 ## explicit
