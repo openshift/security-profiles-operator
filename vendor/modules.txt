@@ -1,7 +1,7 @@
 # buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go v1.36.11-20260209202127-80ab13bee0bf.1
 ## explicit; go 1.23
 buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go/buf/validate
-# cel.dev/expr v0.25.2
+# cel.dev/expr v0.25.3
 ## explicit; go 1.23.0
 cel.dev/expr
 # cloud.google.com/go/auth v0.20.0
@@ -1766,19 +1766,19 @@ google.golang.org/api/internal/third_party/uritemplates
 google.golang.org/api/option
 google.golang.org/api/option/internaloption
 google.golang.org/api/transport/http
-# google.golang.org/genproto/googleapis/api v0.0.0-20260803160001-6ac0973c030d
+# google.golang.org/genproto/googleapis/api v0.0.0-20260817212433-ac3dfec99bb1
 ## explicit; go 1.25.0
 google.golang.org/genproto/googleapis/api
 google.golang.org/genproto/googleapis/api/annotations
 google.golang.org/genproto/googleapis/api/expr/v1alpha1
 google.golang.org/genproto/googleapis/api/httpbody
-# google.golang.org/genproto/googleapis/rpc v0.0.0-20260803160001-6ac0973c030d
+# google.golang.org/genproto/googleapis/rpc v0.0.0-20260817212433-ac3dfec99bb1
 ## explicit; go 1.25.0
 google.golang.org/genproto/googleapis/rpc/code
 google.golang.org/genproto/googleapis/rpc/errdetails
 google.golang.org/genproto/googleapis/rpc/status
-# google.golang.org/grpc v1.84.0
-## explicit; go 1.25.0
+# google.golang.org/grpc v1.85.0
+## explicit; go 1.26.0
 google.golang.org/grpc
 google.golang.org/grpc/attributes
 google.golang.org/grpc/backoff
