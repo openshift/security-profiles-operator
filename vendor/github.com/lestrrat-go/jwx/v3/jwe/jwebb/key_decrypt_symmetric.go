@@ -3,12 +3,11 @@ package jwebb
 import (
 	"crypto/aes"
 	cryptocipher "crypto/cipher"
+	"crypto/pbkdf2"
 	"crypto/sha256"
 	"crypto/sha512"
 	"fmt"
 	"hash"
-
-	"golang.org/x/crypto/pbkdf2"
 
 	"github.com/lestrrat-go/jwx/v3/internal/tokens"
 )
@@ -54,7 +53,10 @@ func KeyDecryptPBES2(_, enckey []byte, alg string, password []byte, salt []byte,
 	}
 
 	// Derive key using PBKDF2
-	derivedKey := pbkdf2.Key(password, salt, count, keylen, hashFunc)
+	derivedKey, err := pbkdf2.Key(hashFunc, string(password), salt, count, keylen)
+	if err != nil {
+		return nil, fmt.Errorf(`failed to derive key: %w`, err)
+	}
 
 	// Use the derived key for AES key wrap
 	return KeyDecryptAESKW(nil, enckey, alg, derivedKey)
@@ -78,8 +80,11 @@ func KeyDecryptAESGCMKW(recipientKey, _ []byte, _ string, sharedkey []byte, iv [
 		return nil, fmt.Errorf(`failed to create new GCM wrap: %w`, err)
 	}
 
-	// Combine recipient key and tag for GCM decryption
-	ciphertext := recipientKey[:]
+	// Combine recipient key and tag for GCM decryption. Allocate a fresh
+	// buffer so we never alias into recipientKey's backing array, which
+	// is owned by the parsed message.
+	ciphertext := make([]byte, 0, len(recipientKey)+len(tag))
+	ciphertext = append(ciphertext, recipientKey...)
 	ciphertext = append(ciphertext, tag...)
 
 	jek, err := aesgcm.Open(nil, iv, ciphertext, nil)

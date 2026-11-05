@@ -101,7 +101,7 @@ type Token interface {
 	Keys() []string
 }
 type stdToken struct {
-	mu            *sync.RWMutex
+	mu            sync.RWMutex
 	dc            DecodeCtx          // per-object context for decoding
 	options       TokenOptionSet     // per-object option
 	audience      types.StringList   // https://tools.ietf.org/html/rfc7519#section-4.1.3
@@ -119,13 +119,14 @@ type stdToken struct {
 // Convenience accessors are provided for these standard claims
 func New() Token {
 	return &stdToken{
-		mu:            &sync.RWMutex{},
 		privateClaims: make(map[string]any),
 		options:       DefaultOptionSet(),
 	}
 }
 
 func (t *stdToken) Options() *TokenOptionSet {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
 	return &t.options
 }
 
@@ -440,11 +441,11 @@ LOOP:
 				}
 				t.issuedAt = &decoded
 			case IssuerKey:
-				if err := json.AssignNextStringToken(&t.issuer, dec); err != nil {
+				if err := json.AssignNextStringToken(&t.issuer, dec, t.dc); err != nil {
 					return fmt.Errorf(`failed to decode value for key %s: %w`, IssuerKey, err)
 				}
 			case JwtIDKey:
-				if err := json.AssignNextStringToken(&t.jwtID, dec); err != nil {
+				if err := json.AssignNextStringToken(&t.jwtID, dec, t.dc); err != nil {
 					return fmt.Errorf(`failed to decode value for key %s: %w`, JwtIDKey, err)
 				}
 			case NotBeforeKey:
@@ -454,7 +455,7 @@ LOOP:
 				}
 				t.notBefore = &decoded
 			case SubjectKey:
-				if err := json.AssignNextStringToken(&t.subject, dec); err != nil {
+				if err := json.AssignNextStringToken(&t.subject, dec, t.dc); err != nil {
 					return fmt.Errorf(`failed to decode value for key %s: %w`, SubjectKey, err)
 				}
 			default:
@@ -548,6 +549,8 @@ func putClaimPairList(list []claimPair) {
 
 func (t *stdToken) makePairs() ([]claimPair, error) {
 	pairs := getClaimPairList()
+	t.mu.RLock()
+	defer t.mu.RUnlock()
 	if t.audience != nil {
 		buf, err := json.MarshalAudience(t.audience, t.options.IsEnabled(FlattenAudience))
 		if err != nil {
@@ -556,18 +559,10 @@ func (t *stdToken) makePairs() ([]claimPair, error) {
 		pairs = append(pairs, claimPair{Name: AudienceKey, Value: buf})
 	}
 	if t.expiration != nil {
-		buf, err := json.Marshal(t.expiration.Unix())
-		if err != nil {
-			return nil, fmt.Errorf(`failed to encode "exp": %w`, err)
-		}
-		pairs = append(pairs, claimPair{Name: ExpirationKey, Value: buf})
+		pairs = append(pairs, claimPair{Name: ExpirationKey, Value: []byte(t.expiration.String())})
 	}
 	if t.issuedAt != nil {
-		buf, err := json.Marshal(t.issuedAt.Unix())
-		if err != nil {
-			return nil, fmt.Errorf(`failed to encode "iat": %w`, err)
-		}
-		pairs = append(pairs, claimPair{Name: IssuedAtKey, Value: buf})
+		pairs = append(pairs, claimPair{Name: IssuedAtKey, Value: []byte(t.issuedAt.String())})
 	}
 	if t.issuer != nil {
 		buf, err := json.Marshal(*(t.issuer))
@@ -584,11 +579,7 @@ func (t *stdToken) makePairs() ([]claimPair, error) {
 		pairs = append(pairs, claimPair{Name: JwtIDKey, Value: buf})
 	}
 	if t.notBefore != nil {
-		buf, err := json.Marshal(t.notBefore.Unix())
-		if err != nil {
-			return nil, fmt.Errorf(`failed to encode "nbf": %w`, err)
-		}
-		pairs = append(pairs, claimPair{Name: NotBeforeKey, Value: buf})
+		pairs = append(pairs, claimPair{Name: NotBeforeKey, Value: []byte(t.notBefore.String())})
 	}
 	if t.subject != nil {
 		buf, err := json.Marshal(*(t.subject))
@@ -612,7 +603,7 @@ func (t *stdToken) makePairs() ([]claimPair, error) {
 	return pairs, nil
 }
 
-func (t stdToken) MarshalJSON() ([]byte, error) {
+func (t *stdToken) MarshalJSON() ([]byte, error) {
 	buf := pool.BytesBuffer().Get()
 	defer pool.BytesBuffer().Put(buf)
 	pairs, err := t.makePairs()
@@ -625,7 +616,10 @@ func (t stdToken) MarshalJSON() ([]byte, error) {
 		if i > 0 {
 			buf.WriteByte(tokens.Comma)
 		}
-		fmt.Fprintf(buf, "%q: %s", pair.Name, pair.Value)
+		if err := json.WriteQuotedKey(buf, pair.Name); err != nil {
+			return nil, fmt.Errorf(`failed to encode claim name %q: %w`, pair.Name, err)
+		}
+		buf.Write(pair.Value.([]byte))
 	}
 	buf.WriteByte(tokens.CloseCurlyBracket)
 	ret := make([]byte, buf.Len())

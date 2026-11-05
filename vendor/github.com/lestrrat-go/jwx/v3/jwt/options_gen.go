@@ -39,6 +39,25 @@ type globalOption struct {
 
 func (*globalOption) globalOption() {}
 
+// GlobalParseOption describes an Option that can be passed to `jwt.Settings()`,
+// `jwt.Parse()`, and `jwt.ReadFile()`.
+type GlobalParseOption interface {
+	Option
+	globalOption()
+	parseOption()
+	readFileOption()
+}
+
+type globalParseOption struct {
+	Option
+}
+
+func (*globalParseOption) globalOption() {}
+
+func (*globalParseOption) parseOption() {}
+
+func (*globalParseOption) readFileOption() {}
+
 // GlobalValidateOption describes an Option that can be passed to `jwt.Settings()` and `jwt.Validate()`
 type GlobalValidateOption interface {
 	Option
@@ -181,6 +200,7 @@ type identNumericDateParsePrecision struct{}
 type identPedantic struct{}
 type identResetValidators struct{}
 type identSignOption struct{}
+type identStrictStringClaims struct{}
 type identToken struct{}
 type identTruncation struct{}
 type identValidate struct{}
@@ -257,6 +277,10 @@ func (identResetValidators) String() string {
 
 func (identSignOption) String() string {
 	return "WithSignOption"
+}
+
+func (identStrictStringClaims) String() string {
+	return "WithStrictStringClaims"
 }
 
 func (identToken) String() string {
@@ -370,9 +394,25 @@ func WithKeyProvider(v jws.KeyProvider) ParseOption {
 	return &parseOption{option.New(identKeyProvider{}, v)}
 }
 
-// WithNumericDateFormatPrecision sets the precision up to which the
-// library uses to format fractional dates found in the numeric date
-// fields. Default is 0 (second, no fractions), max is 9 (nanosecond)
+// WithNumericDateFormatPrecision sets the maximum number of fractional
+// digits written for NumericDate claims when a token is serialized. This
+// applies to `exp`, `iat`, and `nbf` in jwt.Token, and to those claims
+// plus `updated_at` in openid.Token. Default is 0 (whole seconds, no
+// fraction), max is 9 (nanoseconds).
+//
+// With a precision above 0, a date that has a fraction is serialized
+// with one. Digits past the precision are rounded down, toward the
+// earlier time, and trailing zeros are removed. A date with no fraction
+// left is written as an integer, exactly as at precision 0. At
+// precision 3:
+//
+//	2000000000.123456789 → 2000000000.123
+//	2000000000.1         → 2000000000.1
+//	2000000000           → 2000000000
+//
+// The value is always a JSON number. Because fractions change the
+// serialized token, they also change the bytes that jwt.Sign signs and
+// the values that jwt.Equal compares.
 func WithNumericDateFormatPrecision(v int) GlobalOption {
 	return &globalOption{option.New(identNumericDateFormatPrecision{}, v)}
 }
@@ -430,6 +470,18 @@ func WithResetValidators(v bool) ValidateOption {
 // need to use this.
 func WithSignOption(v jws.SignOption) SignOption {
 	return &signOption{option.New(identSignOption{}, v)}
+}
+
+// WithStrictStringClaims controls whether JSON null values for string
+// claims (such as "iss", "sub", "jti") cause a parse error. By default,
+// null is silently accepted as an empty string (matching Go's standard
+// JSON decoding behavior). When set to true, null values are rejected
+// per the RFC type definitions (e.g. StringOrURI).
+//
+// This option only affects JWT claims. JWK, JWE, and JWS fields are
+// not subject to this check and will always accept null as an empty string.
+func WithStrictStringClaims(v bool) ParseOption {
+	return &parseOption{option.New(identStrictStringClaims{}, v)}
 }
 
 // WithToken specifies the token instance in which the resulting JWT is stored

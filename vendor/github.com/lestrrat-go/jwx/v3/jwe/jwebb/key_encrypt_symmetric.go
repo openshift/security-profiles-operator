@@ -3,14 +3,13 @@ package jwebb
 import (
 	"crypto/aes"
 	cryptocipher "crypto/cipher"
+	"crypto/pbkdf2"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/sha512"
 	"fmt"
 	"hash"
 	"io"
-
-	"golang.org/x/crypto/pbkdf2"
 
 	"github.com/lestrrat-go/jwx/v3/internal/tokens"
 	"github.com/lestrrat-go/jwx/v3/jwe/internal/keygen"
@@ -35,8 +34,11 @@ func KeyEncryptDirect(_ []byte, _ string, sharedkey []byte) (keygen.ByteSource, 
 	return keygen.ByteKey(sharedkey), nil
 }
 
-// KeyEncryptPBES2 encrypts the CEK using PBES2 password-based encryption
-func KeyEncryptPBES2(cek []byte, alg string, password []byte) (keygen.ByteSource, error) {
+// KeyEncryptPBES2 encrypts the CEK using PBES2 password-based encryption.
+// count is the PBKDF2 iteration count. If count <= 0, tokens.PBES2DefaultIterations
+// is used as a safety fallback; public callers go through jwe.Encrypt / jwe.Settings
+// and always provide a positive value via the WithPBES2Count option.
+func KeyEncryptPBES2(cek []byte, alg string, password []byte, count int) (keygen.ByteSource, error) {
 	var hashFunc func() hash.Hash
 	var keylen int
 
@@ -54,7 +56,9 @@ func KeyEncryptPBES2(cek []byte, alg string, password []byte) (keygen.ByteSource
 		return nil, fmt.Errorf(`unsupported PBES2 algorithm: %s`, alg)
 	}
 
-	count := tokens.PBES2DefaultIterations
+	if count <= 0 {
+		count = tokens.PBES2DefaultIterations
+	}
 	salt := make([]byte, keylen)
 	_, err := io.ReadFull(rand.Reader, salt)
 	if err != nil {
@@ -66,7 +70,10 @@ func KeyEncryptPBES2(cek []byte, alg string, password []byte) (keygen.ByteSource
 	fullsalt = append(fullsalt, salt...)
 
 	// Derive key using PBKDF2
-	derivedKey := pbkdf2.Key(password, fullsalt, count, keylen, hashFunc)
+	derivedKey, err := pbkdf2.Key(hashFunc, string(password), fullsalt, count, keylen)
+	if err != nil {
+		return nil, fmt.Errorf(`failed to derive key: %w`, err)
+	}
 
 	// Use the derived key for AES key wrap
 	block, err := aes.NewCipher(derivedKey)
