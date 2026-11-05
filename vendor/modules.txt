@@ -451,7 +451,7 @@ github.com/clipperhouse/displaywidth
 # github.com/clipperhouse/uax29/v2 v2.7.0
 ## explicit; go 1.18
 github.com/clipperhouse/uax29/v2/graphemes
-# github.com/cockroachdb/apd/v3 v3.2.1
+# github.com/cockroachdb/apd/v3 v3.2.3
 ## explicit; go 1.17
 github.com/cockroachdb/apd/v3
 # github.com/common-nighthawk/go-figure v0.0.0-20210622060536-734e95fb86be
