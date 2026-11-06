@@ -57,11 +57,9 @@ func NewWriter(writeURL string, opts ...client.Option) (Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing url %s: %w", writeURL, err)
 	}
-	transport := http.DefaultTransport
-	if cfg.TLSConfig != nil {
-		transport = &http.Transport{
-			TLSClientConfig: cfg.TLSConfig,
-		}
+	transport, err := cfg.BaseTransport()
+	if err != nil {
+		return nil, err
 	}
 	timeout := cfg.Timeout
 	if timeout == 0 {
@@ -77,7 +75,7 @@ func NewWriter(writeURL string, opts ...client.Option) (Client, error) {
 	}, nil
 }
 
-// Add uploads a hashedrekord or DSSE log entry and returns the TransparencyLogEntry proving the entry's inclusion in the log.
+// Add uploads a hashedrekord log entry and returns the TransparencyLogEntry proving the entry's inclusion in the log.
 func (w *writeClient) Add(ctx context.Context, entry any) (*pbs.TransparencyLogEntry, error) {
 	cer, err := createRequest(entry)
 	if err != nil {
@@ -119,8 +117,6 @@ func createRequest(entry any) (*pb.CreateEntryRequest, error) {
 	switch e := entry.(type) {
 	case *pb.HashedRekordRequestV002:
 		return createHashedRekordRequest(e), nil
-	case *pb.DSSERequestV002:
-		return createDSSERequest(e), nil
 	default:
 		return nil, fmt.Errorf("unsupported entry type: %T", entry)
 	}
@@ -130,14 +126,6 @@ func createHashedRekordRequest(h *pb.HashedRekordRequestV002) *pb.CreateEntryReq
 	return &pb.CreateEntryRequest{
 		Spec: &pb.CreateEntryRequest_HashedRekordRequestV002{
 			HashedRekordRequestV002: h,
-		},
-	}
-}
-
-func createDSSERequest(d *pb.DSSERequestV002) *pb.CreateEntryRequest {
-	return &pb.CreateEntryRequest{
-		Spec: &pb.CreateEntryRequest_DsseRequestV002{
-			DsseRequestV002: d,
 		},
 	}
 }
