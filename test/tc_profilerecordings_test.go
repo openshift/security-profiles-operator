@@ -24,7 +24,7 @@ import (
 	"strings"
 	"time"
 
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 
 	spoutil "sigs.k8s.io/security-profiles-operator/internal/pkg/util"
 )
