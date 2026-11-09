@@ -35,7 +35,7 @@ require (
 	go.podman.io/common v0.69.1
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/mod v0.41.0
-	golang.org/x/sync v0.24.0
+	golang.org/x/sync v0.25.0
 	gomodules.xyz/jsonpatch/v2 v2.5.0
 	google.golang.org/grpc v1.84.0
 	google.golang.org/grpc/cmd/protoc-gen-go-grpc v1.6.2
