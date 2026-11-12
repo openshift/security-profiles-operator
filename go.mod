@@ -23,7 +23,7 @@ require (
 	github.com/openshift/api v0.0.0-20260805215214-cfb63858e9d7
 	github.com/openshift/controller-runtime-common v0.0.0-20260813135806-e1187ec555fc
 	github.com/openshift/library-go v0.0.0-20260807194649-ee0a87843dda
-	github.com/pjbgf/go-apparmor v0.1.3-0.20241107184909-1375e5e7aa89
+	github.com/pjbgf/go-apparmor v0.1.3
 	github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring v0.93.1
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.2
